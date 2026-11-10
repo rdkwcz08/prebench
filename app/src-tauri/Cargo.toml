@@ -1,0 +1,47 @@
+[package]
+name = "prebench"
+version = "0.1.0"
+description = "Prebench — simulateur de cartes de développement"
+authors = ["Mathis Rudkiewicz"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.95"
+
+[lib]
+name = "prebench_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Coquille de l'app (D6)
+tauri = { version = "2", features = [] }
+# Socket Unix / named pipe (section 6.1)
+interprocess = { version = "2", features = ["tokio"] }
+# Événementiel : E/S asynchrones, processus, minuteurs (règle 16.2.9)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process"] }
+# Fichiers de carte et de projet (TOML) ; JSON uniquement vers l'interface, hors chemin critique
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# Erreurs typées (section 16.3)
+thiserror = "2"
+rquickjs = { version = "0.14.0", features = ["loader"] }
+oxc = { version = "0.158", features = ["transformer", "codegen", "semantic"] }
+tauri-plugin-updater = "2.14.1"
+
+# Priorité basse et EcoQoS du firmware (platform/windows.rs, section 11.2) ;
+# déjà présente dans l'arbre de dépendances de Tauri.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+[dev-dependencies]
+# Runtime simulé de Tauri : teste l'acteur et le vrai firmware sans fenêtre.
+tauri = { version = "2", features = ["test"] }

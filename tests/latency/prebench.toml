@@ -1,0 +1,15 @@
+#:schema ../../docs/prebench.schema.json
+# Outil de mesure de latence (section 8.1) : le composant « echo » répond aux
+# pings envoyés vers le Web Worker.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id   = "echo1"
+type = "echo"
+pos  = [520, 80]

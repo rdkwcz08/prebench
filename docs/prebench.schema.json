@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rdkwcz08/prebench/docs/prebench.schema.json",
+  "title": "Fichier de projet prebench.toml (format v1)",
+  "description": "Fichier à la racine du dossier projet, versionné avec le code : carte, composants, câblage et réglages (section 10.1 du cahier des charges). Écrit avec des fins de ligne LF.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["board", "framework"],
+  "properties": {
+    "format_version": { "const": 1, "default": 1 },
+    "board": {
+      "description": "Identifiant de carte : nom d'un fichier boards/<board>.toml.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "framework": {
+      "description": "Framework du firmware ; DOIT figurer dans le champ framework de la carte.",
+      "type": "string",
+      "enum": ["stm32-hal", "esp-idf", "arduino"]
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "system": {
+          "description": "Système de build ; auto = détection (section 10.1).",
+          "type": "string",
+          "enum": ["auto", "cmake", "make", "platformio", "esp-idf", "arduino"],
+          "default": "auto"
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/component" }
+    },
+    "wires": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/wire" }
+    },
+    "environment": {
+      "description": "Valeurs du panneau environnement (section 8.5), conservées entre deux sessions.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "temperature_c": { "type": "number", "default": 21 },
+        "humidity_percent": { "type": "number", "minimum": 0, "maximum": 100, "default": 50 },
+        "illuminance_lux": { "type": "number", "minimum": 0, "default": 300 },
+        "tilt_deg": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "roll": { "type": "number" }, "pitch": { "type": "number" } }
+        },
+        "acceleration_g": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 3,
+          "maxItems": 3,
+          "default": [0, 0, 1]
+        },
+        "distance_m": { "type": "number", "minimum": 0, "default": 1 }
+      }
+    },
+    "network": {
+      "description": "Accès réseau du shim Wi-Fi (section 11.4) : localhost seul par défaut.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "internet": { "type": "boolean", "default": false }
+      }
+    }
+  },
+  "$defs": {
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "pos"],
+      "properties": {
+        "id": {
+          "description": "Identifiant d'instance, unique dans le projet ; « board » est réservé.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,31}$",
+          "not": { "const": "board" }
+        },
+        "type": {
+          "description": "Identifiant d'un composant de components/.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "params": {
+          "description": "Paramètres, validés contre le manifeste du composant.",
+          "type": "object",
+          "additionalProperties": { "type": ["number", "string", "boolean"] }
+        },
+        "pos": {
+          "description": "Position [x, y] sur la paillasse, en unités du canevas.",
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "endpoint": {
+      "description": "« <id>.<broche> » : broche d'un composant (oled1.SDA) ou de la carte (board.PB9, board.GND).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}\\.[A-Za-z0-9_+-]{1,16}$"
+    },
+    "wire": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/endpoint" },
+        "to": { "$ref": "#/$defs/endpoint" }
+      }
+    }
+  }
+}

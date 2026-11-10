@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rdkwcz08/prebench/boards/board.schema.json",
+  "title": "Fichier de définition de carte Prebench (format v1)",
+  "description": "boards/<id>.toml, validé après lecture TOML. L'identifiant de la carte est le nom du fichier sans extension. Voir la section 7 du cahier des charges. Noms de broches : STM32 « PA5 » (port = lettre − A, pin = numéro), ESP32 « GPIO5 » (port 0).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "mcu", "family", "framework", "logic_voltage", "adc_bits", "ram_kb", "flash_kb", "image", "power", "pins"],
+  "properties": {
+    "format_version": { "description": "Version de ce format.", "const": 1, "default": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "mcu": { "type": "string", "minLength": 1 },
+    "family": { "type": "string", "enum": ["stm32", "esp32"] },
+    "framework": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "enum": ["stm32-hal", "esp-idf", "arduino"] }
+    },
+    "logic_voltage": { "description": "Tension logique en volts.", "type": "number", "exclusiveMinimum": 0 },
+    "adc_bits": { "type": "integer", "minimum": 8, "maximum": 16 },
+    "ram_kb": { "description": "RAM de la vraie cible (jauge mémoire).", "type": "integer", "minimum": 1 },
+    "flash_kb": { "description": "Flash de la vraie cible (jauge mémoire).", "type": "integer", "minimum": 1 },
+    "image": { "description": "Image SVG de la carte, chemin relatif à boards/.", "type": "string", "pattern": "\\.svg$" },
+    "reset": {
+      "description": "Étiquette du bouton reset intégré, représenté par le bouton Reset de la barre d'outils.",
+      "type": "string"
+    },
+    "power": {
+      "description": "Broches d'alimentation : nom -> tension en volts (GND = 0). Utilisables comme extrémités de câble (board.3V3).",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[A-Za-z0-9_]{1,16}$" },
+      "additionalProperties": { "type": "number", "minimum": 0 }
+    },
+    "pins": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/pinName" },
+      "additionalProperties": { "$ref": "#/$defs/pin" }
+    },
+    "onboard": {
+      "description": "Composants intégrés à la carte : identifiant (LD2, B1) -> instance d'un composant de components/.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_]{0,15}$" },
+      "additionalProperties": { "$ref": "#/$defs/onboard" }
+    }
+  },
+  "$defs": {
+    "pinName": { "type": "string", "pattern": "^(P[A-K](1[0-5]|[0-9])|GPIO[0-9]{1,2})$" },
+    "capability": {
+      "description": "gpio, exti, adcN:CHx, pwm[:TIMx_CHy], i2cN:SDA|SCL, spiN:SCK|MISO|MOSI|NSS, uartN:TX|RX|CTS|RTS. Sans suffixe (pwm, i2c, spi, uart) : fonction routable par matrice (ESP32).",
+      "type": "string",
+      "pattern": "^(gpio|exti|adc[1-3]?:CH[0-9]{1,2}|pwm(:TIM[0-9]{1,2}_CH[1-4]N?)?|i2c([0-9]:(SDA|SCL))?|spi([0-9]:(SCK|MISO|MOSI|NSS))?|uart([0-9]:(TX|RX|CTS|RTS))?)$"
+    },
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caps"],
+      "properties": {
+        "label": { "description": "Étiquette de connecteur (D13, A0).", "type": "string" },
+        "caps": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        "af": {
+          "description": "STM32 : numéro de fonction alternative de chaque capacité (GPIO_AFx). Permet au cœur de savoir quelle fonction une broche en mode alternatif porte.",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/capability" },
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 15 }
+        },
+        "onboard": {
+          "description": "Rappel du composant intégré relié à la broche, « type:id » (led:LD2). L'id DOIT exister dans [onboard].",
+          "type": "string",
+          "pattern": "^[a-z0-9-]+:[A-Za-z][A-Za-z0-9_]*$"
+        },
+        "external_pull": {
+          "description": "Résistance de tirage soudée sur la carte.",
+          "type": "string",
+          "enum": ["up", "down"]
+        },
+        "constraints": {
+          "description": "Contraintes signalées par un avertissement (section 7.2).",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["input-only", "strapping", "flash"] }
+        }
+      }
+    },
+    "onboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "wires"],
+      "properties": {
+        "type": { "description": "Identifiant d'un composant de components/.", "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "params": {
+          "type": "object",
+          "additionalProperties": { "type": ["number", "string", "boolean"] }
+        },
+        "wires": {
+          "description": "Broche du composant -> broche ou alimentation de la carte (PA5, GND).",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

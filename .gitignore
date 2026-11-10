@@ -1,0 +1,53 @@
+# --- Système ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Éditeurs ---
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json
+
+# --- Rust / Tauri ---
+target/
+app/src-tauri/gen/schemas/
+
+# --- Node / interface ---
+node_modules/
+dist/
+.svelte-kit/
+*.tsbuildinfo
+
+# --- C / CMake (libvmcu, firmwares d'exemple) ---
+# (jamais « build/ » seul : app/src-tauri/src/build/ est un dossier source)
+/build/
+/libvmcu/build/
+/templates/*/build/
+/tests/*/build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.dSYM/
+
+# --- Python (scripts CI) ---
+__pycache__/
+.venv/
+
+# --- Secrets : jamais dans le dépôt (section 12.5) ---
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+.tauri/
+
+# --- Journaux ---
+*.log

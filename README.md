@@ -1,0 +1,135 @@
+# Prebench
+
+**Programmer et tester un projet Nucleo (STM32) ou ESP32 avant d'avoir reçu la carte et les composants.**
+
+Prebench est une application de bureau, locale et hors ligne. Elle simule une carte de développement et les composants câblés dessus (LED, boutons, potentiomètres, écrans I2C/SPI…) sur une paillasse virtuelle. Tu gardes ton éditeur habituel : Prebench surveille le dossier du projet, recompile le firmware pour ton ordinateur à chaque sauvegarde et le relance aussitôt.
+
+> **État : développement initial (0.x).** Les contrats de la version 1 sont écrits ; l'application n'est pas encore utilisable.
+
+## Principe
+
+- Le firmware est compilé pour ton ordinateur et lié à **libvmcu**, une bibliothèque qui remplace le HAL (STM32 HAL d'abord, puis ESP-IDF et Arduino). Ton code source ne change pas.
+- Le cœur du microcontrôleur, son horloge et ses registres **ne sont pas simulés**. Le simulateur valide la logique ; la vraie carte valide le timing, l'analogique et la physique.
+- Les composants sont des dossiers (`components/<id>/` : manifeste, modèle TypeScript, vue Svelte). Toute contribution est bienvenue.
+- Tout fonctionne hors ligne, sur macOS (Apple Silicon) et Windows 10/11.
+
+## Téléchargement
+
+Les versions publiées sont dans les [GitHub Releases](https://github.com/rdkwcz08/prebench/releases) :
+
+| Système | Fichier |
+| --- | --- |
+| macOS (Apple Silicon) | `Prebench_X.Y.Z_aarch64.dmg` |
+| Windows 10/11 (x64) | `Prebench_X.Y.Z_x64.msi` |
+
+Une fois installée, l'application se met à jour seule et vérifie la signature de chaque mise à jour.
+
+### Premier lancement sur macOS
+
+L'application n'est pas encore notarisée par Apple : au premier lancement, macOS la bloque.
+
+1. Ouvre Prebench une première fois, puis ferme le message d'avertissement.
+2. Ouvre **Réglages Système → Confidentialité et sécurité**.
+3. En bas de la page, en face du message sur Prebench, clique **Ouvrir quand même**, puis confirme.
+
+### Premier lancement sur Windows
+
+L'installeur n'est pas encore signé : SmartScreen affiche « Windows a protégé votre ordinateur ».
+
+1. Clique **Informations complémentaires**.
+2. Clique **Exécuter quand même**.
+
+## Prérequis utilisateur (simuler un firmware)
+
+Prebench compile ton firmware pour ton ordinateur : il lui faut un compilateur C et CMake 3.20 ou plus récent. Rien d'autre (ni Rust, ni Node).
+
+### macOS
+
+```sh
+xcode-select --install   # outils en ligne de commande Xcode : clang
+brew install cmake       # ou l'installeur de https://cmake.org/download/
+```
+
+### Windows 10/11
+
+Le firmware se compile avec **MinGW-w64** (gcc), fourni par MSYS2. **MSVC n'est pas pris en charge** pour le firmware : le code HAL utilise des extensions GCC.
+
+Dans PowerShell :
+
+```powershell
+# 1. MSYS2 et CMake
+winget install --id MSYS2.MSYS2 -e
+winget install --id Kitware.CMake -e
+
+# 2. gcc et make de MinGW-w64 (environnement UCRT64)
+C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make"
+
+# 3. Ajouter gcc au PATH de l'utilisateur, puis rouvrir PowerShell
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";C:\msys64\ucrt64\bin", "User")
+
+# 4. Vérification (dans un nouveau PowerShell)
+gcc --version; mingw32-make --version; cmake --version
+```
+
+### Facultatif
+
+Pour la jauge mémoire de la vraie cible : `arm-none-eabi-gcc` (STM32), toolchain Xtensa d'ESP-IDF (ESP32).
+
+## Prérequis développeur (construire Prebench)
+
+Seulement pour travailler sur Prebench lui-même ; les utilisateurs installent le `.dmg` ou le `.msi`.
+
+| Outil | macOS | Windows |
+| --- | --- | --- |
+| Prérequis utilisateur ci-dessus | ✔ | ✔ |
+| Rust (rustup, avec clippy et rustfmt) | ✔ | ✔ |
+| Node.js LTS | ✔ | ✔ |
+| Visual Studio Build Tools, charge « Développement Desktop en C++ » (cible Rust MSVC de Tauri) | — | ✔ |
+| WebView2 | intégré (WebKit) | intégré à Windows 11 |
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy,rustfmt
+```
+
+La CLI Tauri n'est pas installée globalement : c'est une dépendance de développement de `app/package.json`, installée par `npm ci`.
+
+Lancer l'app en développement (rechargement à chaud de l'interface) :
+
+```sh
+cd app
+npm ci
+npm run tauri dev
+```
+
+Le projet ouvert par défaut est `templates/blinky-stm32-hal` : **▶ Démarrer** le compile (cible « sim ») et le lance.
+
+Tests du cœur Rust, dont deux avec le vrai firmware compilé (blinky, mesure de latence) :
+
+```sh
+cd app/src-tauri
+cargo test -- --nocapture --test-threads=1
+```
+
+Tests de libvmcu et du shim STM32 HAL :
+
+```sh
+cmake -S libvmcu -B build-libvmcu -DVMCU_WERROR=ON
+cmake --build build-libvmcu --parallel
+ctest --test-dir build-libvmcu --output-on-failure
+```
+
+## Documentation
+
+- [Protocole firmware ↔ app](docs/protocol.md)
+- [API libvmcu](libvmcu/include/vmcu.h)
+- [Interface des composants](components/component-api.d.ts) et [schéma des manifestes](components/manifest.schema.json)
+- [Format des cartes](boards/board.schema.json) et [format de `prebench.toml`](docs/prebench.schema.json)
+- [Cahier des charges](docs/cahier-des-charges.md)
+
+## Contribuer
+
+Les pull requests sont les bienvenues sur ce dépôt, en particulier pour les nouveaux composants (`components/<id>/`) et les nouvelles cartes (`boards/<id>.toml`). Commentaires et messages de l'interface sont en français ; les identifiants de code sont en anglais.
+
+## Licence
+
+[MIT](LICENSE) pour tout le projet : application, libvmcu, shims, cartes et composants.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-component-control"
+description = "Enables the component_control command without any pre-configured scope."
+commands.allow = ["component_control"]
+
+[[permission]]
+identifier = "deny-component-control"
+description = "Denies the component_control command without any pre-configured scope."
+commands.deny = ["component_control"]

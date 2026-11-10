@@ -1,0 +1,26 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "led",
+  "version": "1.0.0",
+  "name": "LED",
+  "description": "LED 5 mm. S'allume quand l'anode est au niveau haut et la cathode au niveau bas ; la luminosité suit le rapport cyclique PWM.",
+  "category": "output",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 40, "height": 80 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "A", "label": "Anode (+)", "role": "input", "x": 14, "y": 80 },
+    { "name": "K", "label": "Cathode (−)", "role": "input", "x": 26, "y": 80 }
+  ],
+  "params": {
+    "color": {
+      "type": "enum",
+      "label": "Couleur",
+      "values": ["red", "green", "blue", "yellow", "orange", "white"],
+      "default": "red"
+    }
+  },
+  "controls": []
+}

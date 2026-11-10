@@ -1,0 +1,12 @@
+/*
+ * Généré par CMake depuis libvmcu/shims/stm32-hal/src/default_hal_callback.c.in.
+ * @NAME@ par défaut (équivalent de la fonction __weak du HAL de ST), utilisé
+ * seulement si le projet ne la définit pas (voir default_exti_callback.c).
+ */
+#include "stm32f4xx_hal.h"
+
+void @NAME@(@TYPE@ *handle@EXTRA_DECL@)
+{
+    UNUSED(handle);
+    @EXTRA_USE@;
+}

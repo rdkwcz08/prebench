@@ -1,0 +1,147 @@
+#:schema ./board.schema.json
+# boards/nucleo-f401re.toml — Carte Nucleo-F401RE (STM32F401RE, Nucleo-64)
+# Source du brochage : manuel ST UM1724 (cartes Nucleo-64), configuration
+# d'usine des ponts de soudure. Format : boards/board.schema.json.
+
+format_version = 1
+name          = "Nucleo-F401RE"
+mcu           = "STM32F401RE"
+family        = "stm32"
+framework     = ["stm32-hal", "arduino"]
+logic_voltage = 3.3
+adc_bits      = 12
+ram_kb        = 96
+flash_kb      = 512
+image         = "nucleo-64.svg"
+reset         = "B2"
+
+[power]
+"3V3" = 3.3
+"5V"  = 5.0
+GND   = 0.0
+
+# --- Composants intégrés ------------------------------------------------------
+
+# LED utilisateur verte, active à l'état haut.
+[onboard.LD2]
+type   = "led"
+params = { color = "green" }
+wires  = { A = "PA5", K = "GND" }
+
+# Bouton utilisateur bleu : relie PC13 à la masse, pull-up externe sur la carte.
+# Le composant « button » est créé en phase 1.
+[onboard.B1]
+type  = "button"
+wires = { "1" = "PC13", "2" = "GND" }
+
+# --- Bouton utilisateur ---------------------------------------------------------
+
+[pins.PC13]
+label         = "B1"
+caps          = ["gpio", "exti"]
+onboard       = "button:B1"
+external_pull = "up"
+
+# --- USART2 : relié par défaut au port COM virtuel du ST-LINK (VCP) -------------
+
+[pins.PA2]
+label = "VCP_TX"
+caps  = ["gpio", "exti", "uart2:TX"]
+af    = { "uart2:TX" = 7 }
+
+[pins.PA3]
+label = "VCP_RX"
+caps  = ["gpio", "exti", "uart2:RX"]
+af    = { "uart2:RX" = 7 }
+
+# --- I2C1 ------------------------------------------------------------------------
+
+[pins.PB8]
+label = "D15"
+caps  = ["gpio", "exti", "i2c1:SCL"]
+af    = { "i2c1:SCL" = 4 }
+
+[pins.PB9]
+label = "D14"
+caps  = ["gpio", "exti", "i2c1:SDA"]
+af    = { "i2c1:SDA" = 4 }
+
+# --- SPI1 (CS logiciel sur D10) ----------------------------------------------------
+
+[pins.PA5]
+label   = "D13"
+caps    = ["gpio", "exti", "pwm:TIM2_CH1", "spi1:SCK"]
+af      = { "pwm:TIM2_CH1" = 1, "spi1:SCK" = 5 }
+onboard = "led:LD2"
+
+[pins.PA6]
+label = "D12"
+caps  = ["gpio", "exti", "spi1:MISO"]
+af    = { "spi1:MISO" = 5 }
+
+[pins.PA7]
+label = "D11"
+caps  = ["gpio", "exti", "spi1:MOSI"]
+af    = { "spi1:MOSI" = 5 }
+
+[pins.PB6]
+label = "D10"
+caps  = ["gpio", "exti"]
+
+# --- Entrées ADC (ADC1) ----------------------------------------------------------
+
+[pins.PA0]
+label = "A0"
+caps  = ["gpio", "exti", "adc1:CH0"]
+
+[pins.PA1]
+label = "A1"
+caps  = ["gpio", "exti", "adc1:CH1"]
+
+[pins.PA4]
+label = "A2"
+caps  = ["gpio", "exti", "adc1:CH4"]
+
+[pins.PB0]
+label = "A3"
+caps  = ["gpio", "exti", "adc1:CH8"]
+
+# --- Sorties PWM -------------------------------------------------------------------
+
+[pins.PA8]
+label = "D7"
+caps  = ["gpio", "exti", "pwm:TIM1_CH1"]
+af    = { "pwm:TIM1_CH1" = 1 }
+
+[pins.PB10]
+label = "D6"
+caps  = ["gpio", "exti", "pwm:TIM2_CH3"]
+af    = { "pwm:TIM2_CH3" = 1 }
+
+[pins.PB4]
+label = "D5"
+caps  = ["gpio", "exti", "pwm:TIM3_CH1"]
+af    = { "pwm:TIM3_CH1" = 2 }
+
+[pins.PC7]
+label = "D9"
+caps  = ["gpio", "exti", "pwm:TIM3_CH2"]
+af    = { "pwm:TIM3_CH2" = 2 }
+
+# --- Autres GPIO du connecteur Arduino ---------------------------------------------
+
+[pins.PA10]
+label = "D2"
+caps  = ["gpio", "exti"]
+
+[pins.PB3]
+label = "D3"
+caps  = ["gpio", "exti"]
+
+[pins.PB5]
+label = "D4"
+caps  = ["gpio", "exti"]
+
+[pins.PA9]
+label = "D8"
+caps  = ["gpio", "exti"]

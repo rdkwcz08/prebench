@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rdkwcz08/prebench/components/manifest.schema.json",
+  "title": "Manifeste de composant Prebench (API composant v1)",
+  "description": "components/<id>/manifest.json : identité, broches, interfaces, paramètres et contrôles d'un composant. Voir component-api.d.ts et la section 8 du cahier des charges.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "id", "version", "name", "category", "view", "pins"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "api_version": {
+      "description": "Version de l'interface model.ts implémentée.",
+      "const": 1
+    },
+    "id": {
+      "description": "Identifiant unique, égal au nom du dossier.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    },
+    "version": {
+      "description": "Version du composant (SemVer).",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "name": { "description": "Nom affiché (français).", "type": "string", "minLength": 1, "maxLength": 64 },
+    "description": { "type": "string", "maxLength": 500 },
+    "category": {
+      "type": "string",
+      "enum": ["output", "input", "display", "sensor", "actuator", "communication", "generic", "passive"]
+    },
+    "author": { "type": "string" },
+    "license": { "type": "string", "default": "MIT" },
+    "logic_voltages": {
+      "description": "Tensions logiques acceptées, en volts (validation 3,3 V / 5 V, section 9.2). Absent : toutes.",
+      "type": "array",
+      "items": { "type": "number", "exclusiveMinimum": 0 },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "view": {
+      "description": "Taille du rendu en unités du canevas ; les coordonnées des broches s'y rapportent.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "tick_hz": {
+      "description": "Fréquence d'appel de onTick. 0 = jamais (défaut, aucun coût au repos).",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 60,
+      "default": 0
+    },
+    "pins": {
+      "description": "Broches du composant ; vide pour un composant sans broche (diagnostic, écho).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/pin" }
+    },
+    "interfaces": {
+      "description": "Bus que le cœur doit router vers le modèle.",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/i2c" },
+          { "$ref": "#/$defs/spi" },
+          { "$ref": "#/$defs/uart" }
+        ]
+      }
+    },
+    "params": {
+      "description": "Paramètres réglables dans prebench.toml et l'inspecteur.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+      "additionalProperties": { "$ref": "#/$defs/param" }
+    },
+    "controls": {
+      "description": "Contrôles exposés à l'utilisateur en mode simulation.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/control" }
+    }
+  },
+  "$defs": {
+    "pinName": { "type": "string", "pattern": "^[A-Za-z0-9_+-]{1,16}$" },
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "role", "x", "y"],
+      "properties": {
+        "name": { "$ref": "#/$defs/pinName" },
+        "label": { "type": "string" },
+        "role": {
+          "description": "Rôle vu du composant.",
+          "type": "string",
+          "enum": ["input", "output", "io", "open-drain", "analog-in", "analog-out", "power", "ground", "passive"]
+        },
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "paramRef": {
+      "description": "Référence à un paramètre : { \"param\": \"address\" }.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["param"],
+      "properties": { "param": { "type": "string" } }
+    },
+    "i2c": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sda", "scl", "address"],
+      "properties": {
+        "type": { "const": "i2c" },
+        "name": { "type": "string" },
+        "sda": { "$ref": "#/$defs/pinName" },
+        "scl": { "$ref": "#/$defs/pinName" },
+        "address": {
+          "description": "Adresse 7 bits, fixe ou tirée d'un paramètre.",
+          "oneOf": [
+            { "type": "integer", "minimum": 8, "maximum": 119 },
+            { "$ref": "#/$defs/paramRef" }
+          ]
+        }
+      }
+    },
+    "spi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sck", "cs"],
+      "properties": {
+        "type": { "const": "spi" },
+        "name": { "type": "string" },
+        "sck": { "$ref": "#/$defs/pinName" },
+        "mosi": { "$ref": "#/$defs/pinName" },
+        "miso": { "$ref": "#/$defs/pinName" },
+        "cs": { "$ref": "#/$defs/pinName" },
+        "cs_active": { "type": "string", "enum": ["low", "high"], "default": "low" }
+      }
+    },
+    "uart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name"],
+      "properties": {
+        "type": { "const": "uart" },
+        "name": { "type": "string" },
+        "tx": { "$ref": "#/$defs/pinName" },
+        "rx": { "$ref": "#/$defs/pinName" },
+        "baud": {
+          "description": "Débit attendu (alerte si différent du firmware).",
+          "oneOf": [
+            { "type": "integer", "minimum": 1 },
+            { "$ref": "#/$defs/paramRef" }
+          ]
+        }
+      }
+    },
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "label", "default"],
+      "properties": {
+        "type": { "type": "string", "enum": ["integer", "number", "string", "boolean", "enum"] },
+        "label": { "type": "string" },
+        "default": { "type": ["number", "string", "boolean"] },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 },
+        "unit": { "type": "string" },
+        "values": { "type": "array", "items": { "type": ["string", "number"] }, "minItems": 1 }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "enum" } } }, "then": { "required": ["values"] } }
+      ]
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "label"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "type": { "type": "string", "enum": ["button", "switch", "slider", "knob"] },
+        "label": { "type": "string" },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 },
+        "default": { "type": ["number", "boolean"] }
+      }
+    }
+  }
+}

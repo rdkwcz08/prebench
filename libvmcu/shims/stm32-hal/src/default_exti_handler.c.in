@@ -1,0 +1,13 @@
+/*
+ * Généré par CMake depuis libvmcu/shims/stm32-hal/src/default_exti_handler.c.in.
+ * @HANDLER@ par défaut, utilisé seulement si le projet ne le définit pas
+ * (voir default_exti_callback.c). Sert les lignes EXTI @FIRST@ à @LAST@.
+ */
+#include "stm32f4xx_hal.h"
+
+void @HANDLER@(void)
+{
+    for (uint32_t line = @FIRST@U; line <= @LAST@U; ++line) {
+        HAL_GPIO_EXTI_IRQHandler((uint16_t)(1U << line));
+    }
+}

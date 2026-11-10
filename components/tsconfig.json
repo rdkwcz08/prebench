@@ -1,0 +1,19 @@
+// Vérification des modèles de composants : TypeScript strict,
+// bibliothèque Web Worker uniquement (pas de DOM, section 11.4).
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "WebWorker"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "skipLibCheck": false
+  },
+  "include": ["component-api.d.ts", "*/model.ts"]
+}

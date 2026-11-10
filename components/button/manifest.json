@@ -1,0 +1,28 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "button",
+  "version": "1.0.0",
+  "name": "Bouton poussoir",
+  "description": "Bouton poussoir à deux broches. Appuyé, il relie la broche 1 au niveau de la broche 2 (en général la masse) ; relâché, il laisse la broche 1 libre.",
+  "category": "input",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 48, "height": 56 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "1", "label": "Broche 1 (signal)", "role": "passive", "x": 12, "y": 56 },
+    { "name": "2", "label": "Broche 2 (référence)", "role": "passive", "x": 36, "y": 56 }
+  ],
+  "params": {
+    "color": {
+      "type": "enum",
+      "label": "Couleur",
+      "values": ["black", "blue", "red", "green", "yellow", "white"],
+      "default": "black"
+    }
+  },
+  "controls": [
+    { "id": "press", "type": "button", "label": "Appuyer" }
+  ]
+}

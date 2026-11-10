@@ -1,0 +1,26 @@
+# Fins de ligne : LF partout (section 12.3, piège 4), CRLF pour les scripts Windows.
+*         text=auto eol=lf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# Binaires
+*.png     binary
+*.jpg     binary
+*.ico     binary
+*.icns    binary
+*.dmg     binary
+*.msi     binary
+*.woff2   binary
+
+# --- Export vers le dépôt public (release.sh → git archive) -------------------
+# Tout ce qui est marqué export-ignore reste dans prebench-dev.
+# Ce qui est publié l'est définitivement : vérifier avant chaque release.
+/release.sh                     export-ignore
+/.github/workflows/ci.yml       export-ignore
+/.github/scripts                export-ignore
+/.claude                        export-ignore
+/notes                          export-ignore
+/drafts                         export-ignore
+*.draft.md                      export-ignore
+.gitkeep                        export-ignore

@@ -1,0 +1,170 @@
+# .github/workflows/release.yml — Build et publication d'une version (dépôt public prebench).
+# Section 12.5. Déclenché par le tag vX.Y.Z que pousse release.sh.
+#
+# Produit :
+#   Prebench_X.Y.Z_aarch64.dmg          macOS Apple Silicon
+#   Prebench_X.Y.Z_aarch64.app.tar.gz   archive de mise à jour macOS (+ signature)
+#   Prebench_X.Y.Z_x64.msi              Windows x64 (installeur et mise à jour, + signature)
+#   latest.json                         manifeste lu par le plugin updater de Tauri
+#
+# Secrets du dépôt public (Settings → Secrets and variables → Actions) :
+#   TAURI_SIGNING_PRIVATE_KEY           clé privée créée par `npx tauri signer generate`
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  son mot de passe
+# La clé publique va dans app/src-tauri/tauri.conf.json (plugins.updater.pubkey),
+# avec l'adresse https://github.com/rdkwcz08/prebench/releases/latest/download/latest.json
+# et bundle.createUpdaterArtifacts = true.
+#
+# Côté Rust, l'app Windows est compilée avec la cible MSVC
+# (x86_64-pc-windows-msvc), standard pour Tauri. L'interdiction de MSVC
+# (section 12.3) concerne la compilation du firmware de l'utilisateur, pas l'app.
+
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            platform: darwin-aarch64
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            bundles: msi
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version du tag = version de l'app
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          APP_VERSION="$(node -p "require('./app/src-tauri/tauri.conf.json').version")"
+          if [ "$VERSION" != "$APP_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME mais tauri.conf.json indique $APP_VERSION" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Dépendances de l'interface
+        working-directory: app
+        run: npm ci
+
+      - name: Build Tauri
+        working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Renommage selon la section 12.5
+        run: |
+          BUNDLE="app/src-tauri/target/${{ matrix.target }}/release/bundle"
+          mkdir -p out
+          one() { # un seul fichier attendu par motif
+            local found
+            found="$(find "$BUNDLE" -type f -name "$1")"
+            [ "$(printf '%s\n' "$found" | grep -c .)" = "1" ] || { echo "Attendu un seul $1 : $found" >&2; exit 1; }
+            printf '%s' "$found"
+          }
+          if [ "${{ matrix.platform }}" = "darwin-aarch64" ]; then
+            cp "$(one '*.dmg')"            "out/Prebench_${VERSION}_aarch64.dmg"
+            cp "$(one '*.app.tar.gz')"     "out/Prebench_${VERSION}_aarch64.app.tar.gz"
+            cp "$(one '*.app.tar.gz.sig')" "out/Prebench_${VERSION}_aarch64.app.tar.gz.sig"
+          else
+            cp "$(one '*.msi')"            "out/Prebench_${VERSION}_x64.msi"
+            cp "$(one '*.msi.sig')"        "out/Prebench_${VERSION}_x64.msi.sig"
+          fi
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Notes de version (section du CHANGELOG)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "Section ## [$VERSION] absente du CHANGELOG" >&2; exit 1; }
+
+      - name: Manifeste de mise à jour latest.json
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$(cat notes.md)" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg mac_sig "$(cat "dist/Prebench_${VERSION}_aarch64.app.tar.gz.sig")" \
+            --arg mac_url "$BASE/Prebench_${VERSION}_aarch64.app.tar.gz" \
+            --arg win_sig "$(cat "dist/Prebench_${VERSION}_x64.msi.sig")" \
+            --arg win_url "$BASE/Prebench_${VERSION}_x64.msi" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $date,
+              platforms: {
+                "darwin-aarch64": { signature: $mac_sig, url: $mac_url },
+                "windows-x86_64": { signature: $win_sig, url: $win_url }
+              }
+            }' > dist/latest.json
+          cat dist/latest.json
+
+      - name: Création de la GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Prebench $VERSION" \
+            --notes-file notes.md \
+            "dist/Prebench_${VERSION}_aarch64.dmg" \
+            "dist/Prebench_${VERSION}_aarch64.app.tar.gz" \
+            "dist/Prebench_${VERSION}_x64.msi" \
+            dist/latest.json

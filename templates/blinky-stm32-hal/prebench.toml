@@ -1,0 +1,11 @@
+#:schema ../../docs/prebench.schema.json
+# Projet Prebench : blinky STM32 HAL sur Nucleo-F401RE.
+# LD2 et B1 sont intégrés à la carte (boards/nucleo-f401re.toml) : aucun
+# composant ni câble à ajouter.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"

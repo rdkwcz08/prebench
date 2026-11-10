@@ -1,0 +1,14 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "echo",
+  "version": "1.0.0",
+  "name": "Écho (latence)",
+  "description": "Composant de diagnostic sans broche : répond aux requêtes vmcu_ping(VMCU_PING_WORKER) pour mesurer l'aller-retour firmware ↔ cœur ↔ Web Worker (section 8.1).",
+  "category": "generic",
+  "license": "MIT",
+  "view": { "width": 96, "height": 40 },
+  "tick_hz": 0,
+  "pins": [],
+  "controls": []
+}
