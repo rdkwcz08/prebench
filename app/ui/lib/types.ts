@@ -56,7 +56,7 @@ export interface StatusEvent {
 }
 
 export interface LogEvent {
-  source: 'firmware' | 'stdout' | 'stderr' | 'composant';
+  source: 'firmware' | 'stdout' | 'stderr' | 'composant' | 'prebench';
   level: number;
   text: string;
 }
@@ -64,4 +64,28 @@ export interface LogEvent {
 export interface WarnEvent {
   code: number;
   text: string;
+}
+
+/* --- Prérequis de build (commande check_prerequisites) --- */
+
+export interface Prerequisite {
+  kind: 'cmake' | 'compiler' | 'make';
+  label: string;
+  /** Chemin trouvé (PATH, puis emplacements standard) ; null : absent. */
+  path: string | null;
+  /** Commande d'installation, affichée quand l'outil manque. */
+  install: string;
+}
+
+export interface Prerequisites {
+  tools: Prerequisite[];
+  /** Renvoi vers la section du README sur les prérequis. */
+  readme: string;
+}
+
+/** Modèle de nouveau projet (commande list_templates). */
+export interface TemplateInfo {
+  id: string;
+  /** Dossier proposé pour la copie : Documents/Prebench/<id>, libre. */
+  suggested_dir: string;
 }

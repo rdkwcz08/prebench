@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Prebench",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "dev.prebench.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,6 +12,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "Prebench",
         "width": 1200,
         "height": 800,

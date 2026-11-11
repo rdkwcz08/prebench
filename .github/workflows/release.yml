@@ -7,6 +7,14 @@
 #   Prebench_X.Y.Z_x64.msi              Windows x64 (installeur et mise à jour, + signature)
 #   latest.json                         manifeste lu par le plugin updater de Tauri
 #
+# Avant toute publication, l'app est vérifiée telle qu'un utilisateur l'installe
+# (job build, étapes « Vérification de l'app installée ») : .msi installé en
+# silencieux dans C:\Program Files\Prebench, Prebench.app copiée depuis le .dmg.
+# L'app, lancée avec --verifier-installation (app/src-tauri/src/install_check.rs),
+# crée un projet depuis le modèle blinky, le compile avec le sdk installé, en
+# trouvant seule CMake et le compilateur hors du PATH, puis attend que LD2
+# clignote. Un échec bloque la release.
+#
 # Secrets du dépôt public (Settings → Secrets and variables → Actions) :
 #   TAURI_SIGNING_PRIVATE_KEY           clé privée créée par `npx tauri signer generate`
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  son mot de passe
@@ -103,6 +111,75 @@ jobs:
             cp "$(one '*.msi.sig')"        "out/Prebench_${VERSION}_x64.msi.sig"
           fi
           ls -l out
+
+      # --- Vérification de l'app installée (Windows) ---------------------------
+      # Comme chez l'utilisateur : gcc et mingw32-make dans C:\msys64\ucrt64\bin
+      # (MSYS2 préinstallé du runner), CMake dans C:\Program Files\CMake\bin.
+      - name: "Windows : MinGW-w64 dans C:\\msys64"
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          release: false
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make
+
+      - name: "Vérification de l'app installée (Windows : .msi)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path "$env:ProgramFiles\CMake\bin\cmake.exe")) { throw "CMake absent de $env:ProgramFiles\CMake\bin" }
+          if (-not (Test-Path 'C:\msys64\ucrt64\bin\gcc.exe')) { throw 'gcc absent de C:\msys64\ucrt64\bin' }
+
+          # Installation silencieuse, comme un double-clic sur le .msi.
+          $msi = (Resolve-Path "out\Prebench_${env:VERSION}_x64.msi").Path
+          $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/l*v', "`"$env:RUNNER_TEMP\msi.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\msi.log" -Tail 40; throw "msiexec : code $($p.ExitCode)" }
+          $dir = Join-Path $env:ProgramFiles 'Prebench'
+          $exe = Get-ChildItem $dir -Filter *.exe | Where-Object Name -notmatch 'uninstall' | Select-Object -First 1
+          if (-not $exe -or -not (Test-Path "$dir\sdk\libvmcu")) { Get-ChildItem $dir -Recurse -Depth 1; throw "installation incomplète dans $dir" }
+          $before = Get-ChildItem $dir -Recurse -Force | ForEach-Object FullName | Sort-Object
+
+          # PATH sans CMake ni MinGW : l'app doit les trouver aux emplacements standard.
+          $env:Path = ($env:Path -split ';' | Where-Object { $_ -and $_ -notmatch '(?i)cmake|msys64|mingw|strawberry' }) -join ';'
+          if (Get-Command cmake, gcc -ErrorAction SilentlyContinue) { throw 'CMake ou gcc encore dans le PATH' }
+
+          $project = Join-Path $env:RUNNER_TEMP 'Mes projets\blinky test'
+          $report = Join-Path $env:RUNNER_TEMP 'verification.txt'
+          $p = Start-Process $exe.FullName -ArgumentList '--verifier-installation', "`"$project`"", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report } else { Write-Output 'rapport absent' }
+          if ($p.ExitCode -ne 0) { throw "vérification : code $($p.ExitCode)" }
+
+          # Rien n'est écrit dans le dossier d'installation.
+          $after = Get-ChildItem $dir -Recurse -Force | ForEach-Object FullName | Sort-Object
+          $diff = Compare-Object $before $after
+          if ($diff) { $diff | Format-Table -AutoSize | Out-String -Width 200; throw "fichiers modifiés dans $dir" }
+
+      # --- Vérification de l'app installée (macOS) -----------------------------
+      # Prebench.app copiée depuis le .dmg dans /Applications et mise en lecture
+      # seule ; lancée avec le PATH minimal d'une app ouverte depuis le Finder.
+      - name: "Vérification de l'app installée (macOS : .dmg)"
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          MNT="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "out/Prebench_${VERSION}_aarch64.dmg"
+          rm -rf /Applications/Prebench.app
+          cp -R "$MNT/Prebench.app" /Applications/
+          hdiutil detach "$MNT"
+          APP=/Applications/Prebench.app
+          test -d "$APP/Contents/Resources/sdk/libvmcu" || { echo "sdk absent de $APP" >&2; exit 1; }
+          EXE="$(find "$APP/Contents/MacOS" -type f -perm -u+x | head -n 1)"
+          chmod -R a-w "$APP"
+
+          REPORT="$RUNNER_TEMP/verification.txt"
+          STATUS=0
+          env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            "$EXE" --verifier-installation "$RUNNER_TEMP/Mes projets/blinky test" "$REPORT" || STATUS=$?
+          cat "$REPORT" 2>/dev/null || echo "rapport absent"
+          exit "$STATUS"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -11,10 +11,12 @@ import type {
   ComponentInfo,
   InstanceInfo,
   LogEvent,
+  Prerequisites,
   ProjectView,
   SimState,
   StatesEvent,
   StatusEvent,
+  TemplateInfo,
   WarnEvent,
 } from './types';
 import { loadView, type ViewComponent } from './views';
@@ -59,6 +61,7 @@ export class Bench {
   status = $state<{ state: SimState; message: string }>({ state: 'idle', message: '' });
   logs = $state<LogLine[]>([]);
   warnings = $state<string[]>([]);
+  prerequisites = $state<Prerequisites | null>(null);
   private pending: StatesEvent = {};
   private frameRequested = false;
 
@@ -71,8 +74,31 @@ export class Bench {
     await listen<WarnEvent>('sim:warn', (e) => this.warn(e.payload.text));
   }
 
-  defaultProject(): Promise<string> {
-    return invoke<string>('default_project');
+  /** Vérifie CMake et le compilateur, et l'écrit dans le Journal. */
+  async checkPrerequisites(): Promise<void> {
+    try {
+      const p = await invoke<Prerequisites>('check_prerequisites');
+      this.prerequisites = p;
+      for (const t of p.tools) {
+        this.log('prebench', t.path === null ? `❌ ${t.label} introuvable` : `✅ ${t.label} : ${t.path}`);
+      }
+    } catch (e) {
+      this.log('prebench', String(e));
+    }
+  }
+
+  listTemplates(): Promise<TemplateInfo[]> {
+    return invoke<TemplateInfo[]>('list_templates');
+  }
+
+  /** Copie un modèle dans `dest` ; renvoie le chemin du nouveau projet. */
+  createProject(template: string, dest: string): Promise<string> {
+    return invoke<string>('create_project', { template, dest });
+  }
+
+  /** Copie du blinky dans Documents/Prebench ; null : aucun projet encore. */
+  defaultProject(): Promise<string | null> {
+    return invoke<string | null>('default_project');
   }
 
   async open(path: string): Promise<void> {

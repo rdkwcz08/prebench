@@ -9,6 +9,9 @@ const COMMANDS: &[&str] = &[
     "stop_simulation",
     "reset_simulation",
     "component_control",
+    "check_prerequisites",
+    "list_templates",
+    "create_project",
     "check_update",
     "install_update",
 ];

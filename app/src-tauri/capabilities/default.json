@@ -14,6 +14,9 @@
     "allow-stop-simulation",
     "allow-reset-simulation",
     "allow-component-control",
+    "allow-check-prerequisites",
+    "allow-list-templates",
+    "allow-create-project",
     "allow-check-update",
     "allow-install-update"
   ]

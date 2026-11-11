@@ -6,6 +6,22 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.1.1] - 2026-11-11
+
+**Aperçu technique** : corrige la compilation avec l'app installée sous Windows et facilite la création d'un premier projet.
+
+### Corrigé
+
+- Windows : échec du build (« target pattern contains no '%' ») avec l'app installée dans `C:\Program Files` : les chemins sont maintenant transmis à CMake sans le préfixe `\\?\`.
+- Le firmware n'est plus compilé dans le dossier du projet ni dans celui de l'installation (en lecture seule sous Windows), mais dans le cache de Prebench. Si la configuration CMake échoue, ce build est supprimé et le suivant repart de zéro ; une erreur de compilation le garde.
+- Windows : « CMake introuvable » quand CMake n'est pas dans le PATH (cas par défaut de son installateur). Prebench cherche CMake, le compilateur et make dans le PATH, puis aux emplacements standard (`C:\Program Files\CMake\bin`, `C:\msys64\ucrt64\bin` ; sous macOS `/opt/homebrew/bin`, `/usr/local/bin`, `/Applications/CMake.app`).
+
+### Ajouté
+
+- **Nouveau projet…** : copie d'un modèle (blinky STM32 HAL) dans `Documents/Prebench`, pour le modifier sans toucher au modèle installé. Au premier lancement, **Créer mon premier projet** prépare la copie du blinky.
+- Vérification des prérequis au démarrage (CMake, compilateur) : un bandeau indique ce qui manque et la commande pour l'installer.
+- Les chemins de CMake et du compilateur utilisés sont écrits dans le Journal à chaque démarrage de la simulation.
+
 ## [0.1.0] - 2026-11-10
 
 **Aperçu technique** : première version publiée, pour essayer le principe de Prebench. Elle simule une seule carte, la Nucleo-F401RE, et seulement ses GPIO.

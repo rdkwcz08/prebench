@@ -1,6 +1,6 @@
 [package]
 name = "prebench"
-version = "0.1.0"
+version = "0.1.1"
 description = "Prebench — simulateur de cartes de développement"
 authors = ["Mathis Rudkiewicz"]
 license = "MIT"
@@ -30,6 +30,9 @@ thiserror = "2"
 rquickjs = { version = "0.14.0", features = ["loader"] }
 oxc = { version = "0.158", features = ["transformer", "codegen", "semantic"] }
 tauri-plugin-updater = "2.14.1"
+# Chemins Windows sans le préfixe \\?\ (renvoyé par le dossier des ressources),
+# que make et CMake ne savent pas lire ; déjà présente dans l'arbre de Tauri.
+dunce = "1.0.5"
 
 # Priorité basse et EcoQoS du firmware (platform/windows.rs, section 11.2) ;
 # déjà présente dans l'arbre de dépendances de Tauri.

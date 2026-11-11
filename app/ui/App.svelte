@@ -8,20 +8,33 @@
   import { onMount } from 'svelte';
   import { bench } from './lib/bench.svelte';
   import ComponentHost from './lib/ComponentHost.svelte';
+  import type { TemplateInfo } from './lib/types';
 
   let path = $state('');
   let tab = $state<'log' | 'warn'>('log');
   let update = $state<{ version: string } | null>(null);
   let updating = $state('');
+  // Formulaire « Nouveau projet » : copie d'un modèle (section 10.1).
+  let templates = $state<TemplateInfo[] | null>(null);
+  let template = $state('');
+  let dest = $state('');
+  let createError = $state('');
 
   const running = $derived(['building', 'starting', 'running'].includes(bench.status.state));
   const onboard = $derived(bench.instances.filter((i) => i.onboard));
   const placed = $derived(bench.instances.filter((i) => !i.onboard));
+  const missing = $derived(bench.prerequisites?.tools.filter((t) => t.path === null) ?? []);
+  // Une commande partagée par deux outils (gcc et make de MSYS2) n'est affichée qu'une fois.
+  const installs = $derived([...new Set(missing.map((t) => t.install))]);
 
   onMount(async () => {
     await bench.init();
-    path = await bench.defaultProject();
-    await open();
+    await bench.checkPrerequisites();
+    const first = await bench.defaultProject();
+    if (first !== null) {
+      path = first;
+      await open();
+    }
     // Hors ligne, la vérification échoue sans bruit (D10).
     update = await invoke<{ version: string } | null>('check_update').catch(() => null);
   });
@@ -32,6 +45,40 @@
       await invoke('install_update'); // redémarre l'app en cas de succès
     } catch (e) {
       updating = String(e);
+    }
+  }
+
+  /** Modèle de « Créer mon premier projet ». */
+  const FIRST_TEMPLATE = 'blinky-stm32-hal';
+
+  async function showNewProject(preselect?: string): Promise<void> {
+    createError = '';
+    try {
+      templates = await bench.listTemplates();
+      const chosen = templates.find((t) => t.id === preselect) ?? templates[0];
+      if (chosen !== undefined) {
+        template = chosen.id;
+        dest = chosen.suggested_dir;
+      }
+    } catch (e) {
+      templates = null;
+      bench.status = { state: 'error', message: String(e) };
+    }
+  }
+
+  function chooseTemplate(id: string): void {
+    template = id;
+    dest = templates?.find((t) => t.id === id)?.suggested_dir ?? dest;
+  }
+
+  async function createProject(): Promise<void> {
+    createError = '';
+    try {
+      path = await bench.createProject(template, dest);
+      templates = null;
+      await open();
+    } catch (e) {
+      createError = String(e);
     }
   }
 
@@ -57,10 +104,27 @@
       {/if}
     </div>
   {/if}
+  {#if missing.length > 0}
+    <div class="prereq" role="alert">
+      <div class="prereq-title">
+        Prérequis manquants pour simuler :
+        {#each bench.prerequisites?.tools ?? [] as t (t.kind)}
+          <span class="tool">{t.path === null ? '❌' : '✅'} {t.label}</span>
+        {/each}
+        <button onclick={() => bench.checkPrerequisites()} disabled={running}>Revérifier</button>
+      </div>
+      <div>Commande à lancer dans un terminal, puis cliquer sur Revérifier :</div>
+      {#each installs as command (command)}
+        <pre>{command}</pre>
+      {/each}
+      <div class="readme">Voir le {bench.prerequisites?.readme}</div>
+    </div>
+  {/if}
   <header>
     <strong class="brand">Prebench</strong>
     <input bind:value={path} spellcheck="false" aria-label="Dossier du projet" disabled={running} />
     <button onclick={open} disabled={running}>Ouvrir</button>
+    <button onclick={() => showNewProject()} disabled={running}>Nouveau projet…</button>
     <span class="sep"></span>
     <button class="primary" onclick={() => bench.start()} disabled={running || !bench.project}>▶ Démarrer</button>
     <button onclick={() => bench.stop()} disabled={!running}>■ Arrêter</button>
@@ -69,6 +133,27 @@
       {bench.status.message || bench.status.state}
     </span>
   </header>
+  {#if templates !== null}
+    <form class="new-project" onsubmit={(e) => { e.preventDefault(); void createProject(); }}>
+      <label>
+        Modèle
+        <select value={template} onchange={(e) => chooseTemplate(e.currentTarget.value)}>
+          {#each templates as t (t.id)}
+            <option value={t.id}>{t.id}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="dest">
+        Dossier du nouveau projet
+        <input bind:value={dest} spellcheck="false" />
+      </label>
+      <button class="primary" type="submit" disabled={!template || !dest}>Créer</button>
+      <button type="button" onclick={() => (templates = null)}>Annuler</button>
+      {#if createError}
+        <div class="create-error">{createError}</div>
+      {/if}
+    </form>
+  {/if}
   </div>
 
   <main class="paillasse">
@@ -83,6 +168,11 @@
       {#each placed as inst (inst.id)}
         <ComponentHost {inst} mode="simulate" />
       {/each}
+    {:else if templates === null}
+      <div class="welcome">
+        <p>Bienvenue dans Prebench. Pour commencer, crée un projet à partir du modèle blinky STM32 HAL : il sera copié dans un dossier que tu pourras modifier.</p>
+        <button class="primary" onclick={() => showNewProject(FIRST_TEMPLATE)}>Créer mon premier projet</button>
+      </div>
     {/if}
   </main>
 
@@ -118,6 +208,68 @@
     padding: 6px 12px;
     background: var(--accent);
     color: #062016;
+  }
+  .prereq {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 12px;
+    background: var(--panel);
+    border-bottom: 2px solid var(--error);
+    font-size: 12px;
+  }
+  .prereq-title {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    font-weight: 600;
+  }
+  .prereq .tool {
+    font-weight: normal;
+  }
+  .prereq pre {
+    margin: 0;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background: var(--bg);
+    white-space: pre-wrap;
+    user-select: text;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+  .readme {
+    color: var(--text-muted);
+    user-select: text;
+  }
+  .new-project {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: flex-end;
+    padding: 8px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .new-project label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    color: var(--text-muted);
+  }
+  .new-project .dest {
+    flex: 1;
+  }
+  .new-project select {
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .create-error {
+    flex-basis: 100%;
+    color: var(--error);
   }
   header {
     display: flex;
@@ -180,6 +332,19 @@
     overflow: auto;
     background-image: radial-gradient(var(--border) 1px, transparent 1px);
     background-size: 20px 20px;
+  }
+  .welcome {
+    max-width: 420px;
+    margin: 80px auto;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    text-align: center;
+  }
+  .welcome p {
+    margin: 0 0 16px;
+    line-height: 1.5;
   }
   .board {
     position: absolute;

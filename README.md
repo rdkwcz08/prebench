@@ -50,6 +50,8 @@ xcode-select --install   # outils en ligne de commande Xcode : clang
 brew install cmake       # ou l'installeur de https://cmake.org/download/
 ```
 
+Prebench trouve CMake dans `/opt/homebrew/bin`, `/usr/local/bin` ou `/Applications/CMake.app`, même lancé depuis le Finder.
+
 ### Windows 10/11
 
 Le firmware se compile avec **MinGW-w64** (gcc), fourni par MSYS2. **MSVC n'est pas pris en charge** pour le firmware : le code HAL utilise des extensions GCC.
@@ -57,9 +59,9 @@ Le firmware se compile avec **MinGW-w64** (gcc), fourni par MSYS2. **MSVC n'est 
 Dans PowerShell :
 
 ```powershell
-# 1. MSYS2 et CMake
+# 1. MSYS2 et CMake (ADD_CMAKE_TO_PATH : l'installateur de CMake n'ajoute pas CMake au PATH par défaut)
 winget install --id MSYS2.MSYS2 -e
-winget install --id Kitware.CMake -e
+winget install --id Kitware.CMake -e --custom "ADD_CMAKE_TO_PATH=System"
 
 # 2. gcc et make de MinGW-w64 (environnement UCRT64)
 C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make"
@@ -70,6 +72,18 @@ C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x8
 # 4. Vérification (dans un nouveau PowerShell)
 gcc --version; mingw32-make --version; cmake --version
 ```
+
+CMake déjà installé sans l'option PATH : rien à refaire, Prebench le trouve dans `C:\Program Files\CMake\bin`, et gcc dans `C:\msys64\ucrt64\bin`. Pour l'utiliser aussi dans un terminal, réinstalle-le avec l'option : `winget install --id Kitware.CMake -e --force --custom "ADD_CMAKE_TO_PATH=System"`.
+
+Au démarrage, Prebench vérifie ces prérequis : s'il en manque un, un bandeau donne la commande à lancer. Les chemins des outils utilisés sont écrits dans le Journal à chaque ▶ Démarrer.
+
+## Premier projet
+
+1. Au premier lancement, clique **Créer mon premier projet**, puis **Créer** : Prebench copie le modèle `blinky-stm32-hal` dans `Documents/Prebench/blinky-stm32-hal`, un dossier que tu peux modifier. Plus tard, **Nouveau projet…** fait de même avec le modèle de ton choix.
+2. Clique **▶ Démarrer** : LD2 clignote, le bouton B1 change la vitesse.
+3. Modifie `Core/Src/main.c` dans ton éditeur, puis clique de nouveau **▶ Démarrer**.
+
+Le firmware est compilé dans le cache de Prebench, jamais dans le dossier du projet : `~/Library/Caches/dev.prebench.app/builds` (macOS), `%LOCALAPPDATA%\dev.prebench.app\builds` (Windows). Une erreur de compilation garde ce build, pour que la correction recompile seulement le fichier modifié. Ce dossier peut être supprimé à tout moment.
 
 ### Facultatif
 
@@ -101,7 +115,7 @@ npm ci
 npm run tauri dev
 ```
 
-Le projet ouvert par défaut est `templates/blinky-stm32-hal` : **▶ Démarrer** le compile (cible « sim ») et le lance.
+Au démarrage, l'app ouvre la copie du blinky dans `Documents/Prebench` si elle existe, sinon elle propose de la créer. Pour travailler directement sur le modèle du dépôt, saisis le chemin de `templates/blinky-stm32-hal` et clique **Ouvrir**. **▶ Démarrer** compile le projet (cible « sim ») dans le cache de l'app et le lance.
 
 Tests du cœur Rust, dont deux avec le vrai firmware compilé (blinky, mesure de latence) :
 

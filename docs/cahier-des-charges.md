@@ -433,10 +433,12 @@ L'utilisateur code dans son éditeur ; l'app surveille le dossier, recompile la 
 ### 10.1 Projet
 
 - Ouvrir un projet = ouvrir un **dossier**. Rien n'est importé ni copié.
+- Le build « sim » se fait dans le cache de l'app (`<cache>/builds/<nom>-<empreinte du chemin>`), jamais dans le dossier du projet ni dans celui de l'installation, en lecture seule sous Windows. Il est supprimé quand la configuration CMake échoue, pour qu'un cache corrompu ne bloque pas le build suivant ; une erreur de compilation du code le garde, pour que la correction ne relance pas une recompilation complète.
 - Le dossier contient le code de l'utilisateur et un fichier `prebench.toml` (carte, composants, paramètres, câblage), versionné dans Git avec le code.
 - Composants propres au projet : `<projet>/components/<id>/`, prioritaires sur les composants fournis portant le même identifiant (avertissement ⚠). Quand ce dossier existe, l'app y écrit `component-api.d.ts` (en-tête « généré par Prebench, ne pas modifier » et version de l'API), réécrit s'il diffère de la version de l'app.
 - Détection automatique du système de build : CMake, Makefile, PlatformIO, ESP-IDF, sketch Arduino.
-- Modèles de nouveaux projets : blinky Nucleo HAL, ESP-IDF, Arduino.
+- Modèles de nouveaux projets : blinky Nucleo HAL, ESP-IDF, Arduino. **Nouveau projet** = copie d'un modèle dans un dossier de l'utilisateur (`Documents/Prebench/<modèle>` proposé), sans les builds locaux ; le modèle installé n'est jamais modifié. Au démarrage, l'app ouvre la copie du blinky si elle existe ; sinon, elle n'ouvre pas le modèle installé (non modifiable) mais propose « Créer mon premier projet », qui ouvre le formulaire Nouveau projet avec le blinky présélectionné.
+- Chemins transmis aux outils de build sans le préfixe Windows `\\?\` (illisible pour make) ; les chemins avec espaces (`C:\Program Files`) sont pris en charge.
 
 ```toml
 # prebench.toml (esquisse)
@@ -605,6 +607,7 @@ Prebench est open source et téléchargeable librement ; le dépôt public ne re
 | Dépôt public | `prebench` : un commit « Release vX.Y.Z » par version, README, CHANGELOG, licences, issues, GitHub Releases |
 | Publication | `release.sh vX.Y.Z` : `git archive` du tag, exclusions `.gitattributes export-ignore`, commit unique + tag dans le clone public, push en HTTPS par défaut (`https://github.com/rdkwcz08/prebench.git`), SSH possible via la variable `PREBENCH_PUBLIC_REMOTE` |
 | Build de release | GitHub Actions du dépôt public : `.dmg` macOS arm64 et `.msi` Windows x64, publiés en GitHub Release **normale** (jamais en pré-release) |
+| Vérification avant publication | Dans `release.yml`, l'app est testée telle qu'installée : `.msi` installé en silencieux dans `C:\Program Files\Prebench`, `Prebench.app` copiée depuis le `.dmg` dans `/Applications` en lecture seule. Lancée avec `--verifier-installation`, sans fenêtre, elle crée un projet depuis le modèle blinky, le compile avec le sdk installé en trouvant CMake et le compilateur hors du PATH, et attend que LD2 clignote ; sous Windows, rien ne doit être écrit dans le dossier d'installation. Un échec bloque la release |
 | Mises à jour | Plugin updater de Tauri : lit `latest.json` à l'adresse `releases/latest/download/latest.json` du dépôt public (dernière release normale) et vérifie chaque mise à jour avec la clé de signature du projet |
 | Versions | SemVer `0.x` jusqu'à la stabilité, tags `vX.Y.Z` uniquement (pas de suffixe `-rc`). Les versions `0.x` sont des releases normales : le numéro `0.x`, le README et la mention « aperçu technique » dans les notes de version signalent leur maturité. `CHANGELOG.md` rédigé pour les utilisateurs, binaires `Prebench_X.Y.Z_aarch64.dmg` et `Prebench_X.Y.Z_x64.msi` |
 | Signature macOS | Pas de notarisation au départ : procédure « Ouvrir quand même » (Réglages Système → Confidentialité et sécurité) documentée dans le README ; notarisation Apple plus tard (programme développeur payant) |
@@ -657,6 +660,7 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
 - Shim `HAL_GPIO_*` + `HAL_Delay` / `HAL_GetTick` + `HAL_GPIO_EXTI_Callback`
 - Socket firmware ↔ cœur Rust (`vmcu_platform_posix.c`, `vmcu_platform_win32.c`)
 - Fenêtre Tauri avec une LED (LD2) et un bouton (B1)
+- Recherche des outils de build (CMake, compilateur, make) dans le PATH, puis aux emplacements standard de chaque système, car une app lancée depuis le Finder ou installée par le `.msi` n'hérite pas du PATH du terminal ; chemins utilisés écrits dans le Journal ; vérification des prérequis au démarrage, avec pour chaque outil absent la commande d'installation et un renvoi au README
 - Modèle `templates/blinky-stm32-hal/` avec cible « sim » CMake (clang macOS, MinGW/clang Windows)
 - Projet de test `tests/cubemx-nucleo-f401re/` : projet STM32CubeMX de la Nucleo-F401RE en configuration par défaut (chaîne CMake), non modifié, compilé par la cible « sim » ; les modules HAL qu'il utilise sans simulation (USART2) compilent et avertissent « non simulé »
 - Outil de mesure de la latence par `vmcu_ping` (messages `PING` / `PONG`), deux mesures :
@@ -666,7 +670,7 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
 **Préparation de la release v0.1.0** (avant la fin de la phase 1, section 12.5) :
 
 1. Vérifier la disponibilité du nom `prebench` sur GitHub, puis créer le dépôt public `prebench`, vide (sans README ni licence).
-2. Générer la paire de clés de l'updater (`npx tauri signer generate`) ; conserver la clé privée et son mot de passe hors du dépôt, avec une sauvegarde.
+2. Générer la paire de clés de l'updater (`npx tauri signer generate`) ; conserver la clé privée et son mot de passe hors du dépôt, avec une sauvegarde. Vérifier aussitôt le mot de passe en signant un fichier de test (`npx tauri signer sign`) : un mot de passe perdu impose une nouvelle clé, que les versions déjà installées refusent.
 3. Inscrire la clé publique et l'adresse de `latest.json` dans `app/src-tauri/tauri.conf.json` (`plugins.updater`), avec `bundle.createUpdaterArtifacts = true`.
 4. Enregistrer la clé privée et son mot de passe dans les secrets du dépôt public (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`).
 5. Ajouter la section `## [0.1.0]` au `CHANGELOG.md`, avec la mention « aperçu technique », et la version `0.1.0` dans `tauri.conf.json`.

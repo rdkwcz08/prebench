@@ -52,12 +52,33 @@ impl Recorder {
 }
 
 fn start_project(dir: &Path) -> (tauri::App<tauri::test::MockRuntime>, SimHandle, Recorder) {
+    start_project_with(&repo_root(), dir, &test_build_dir(dir))
+}
+
+/// Dossier de build d'un test, hors du projet (comme le cache de l'app).
+fn test_build_dir(dir: &Path) -> PathBuf {
+    crate::build::build_dir_for(
+        &std::env::temp_dir().join(format!("prebench-tests-{}", std::process::id())),
+        dir,
+    )
+}
+
+fn start_project_with(
+    root: &Path,
+    dir: &Path,
+    build_dir: &Path,
+) -> (tauri::App<tauri::test::MockRuntime>, SimHandle, Recorder) {
     let app = mock_builder()
         .build(mock_context(noop_assets()))
         .expect("app simulée");
-    let root = repo_root();
-    let (project, board, components) = resolve_for_tests(&root, dir).expect("projet");
-    let firmware = tauri::async_runtime::block_on(build_sim(dir, &root)).expect("build « sim »");
+    let (project, board, components) = resolve_for_tests(root, dir).expect("projet");
+    let firmware = tauri::async_runtime::block_on(build_sim(
+        dir,
+        root,
+        build_dir,
+        &crate::platform::toolchain::Toolchain::detect(),
+    ))
+    .expect("build « sim »");
 
     let (tx, rx) = mpsc::channel();
     for name in ["sim:states", "sim:status", "sim:log", "sim:warn"] {
@@ -170,4 +191,89 @@ fn latency_tool() {
         }
     }
     assert_eq!(results.len(), 2, "deux mesures attendues : {results:?}");
+}
+
+/// Dossier temporaire dont le nom contient des espaces.
+fn spaced_temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("prebench test {} {name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// Comme l'app installée (Windows : C:\Program Files\Prebench\sdk) : sdk,
+/// projet créé depuis le modèle et cache de build, tous dans des chemins avec
+/// espaces, hors du dépôt. Le blinky compile et LD2 clignote.
+#[test]
+fn installed_layout_with_spaces() {
+    let base = spaced_temp_dir("installation");
+    let sdk = base.join("Program Files").join("Prebench").join("sdk");
+    for part in ["libvmcu", "boards", "components", "templates"] {
+        crate::project::templates::copy_dir(&repo_root().join(part), &sdk.join(part), 0)
+            .expect("copie du sdk");
+    }
+    let project = base.join("Mes Documents").join("Mon blinky");
+    crate::project::templates::create(&sdk.join("templates"), "blinky-stm32-hal", &project)
+        .expect("nouveau projet");
+    let build_dir = crate::build::build_dir_for(&base.join("Cache Prebench"), &project);
+
+    let (_app, sim, rec) = start_project_with(&sdk, &project, &build_dir);
+    rec.wait(Duration::from_secs(10), |name, v| {
+        name == "sim:status" && v["state"] == "running"
+    });
+    let period = mean_toggle_ms(&rec, 3);
+    assert!((450.0..650.0).contains(&period), "période {period} ms");
+    let _ = sim.tx.try_send(SimMsg::Stop);
+    // Rien n'est écrit dans le sdk ni dans le projet.
+    assert!(!sdk
+        .join("templates")
+        .join("blinky-stm32-hal")
+        .join("build-sim")
+        .exists());
+    assert!(!project.join("build-sim").exists());
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// Erreur de compilation : le cache est gardé (pas de recompilation complète).
+/// Échec de la configuration CMake : le cache est supprimé.
+#[test]
+fn build_cache_after_failures() {
+    let base = spaced_temp_dir("echec");
+    let project = base.join("projet");
+    crate::project::templates::create(&repo_root().join("templates"), "blinky-stm32-hal", &project)
+        .expect("nouveau projet");
+    let build_dir = crate::build::build_dir_for(&base.join("cache"), &project);
+    let toolchain = crate::platform::toolchain::Toolchain::detect();
+    let build = || {
+        tauri::async_runtime::block_on(build_sim(&project, &repo_root(), &build_dir, &toolchain))
+    };
+
+    // Erreur de compilation : échec, cache conservé, puis build après correction.
+    let main_c = project.join("Core").join("Src").join("main.c");
+    let source = std::fs::read_to_string(&main_c).expect("main.c");
+    std::fs::write(&main_c, format!("{source}\nerreur de syntaxe volontaire\n")).expect("écriture");
+    assert!(build().is_err(), "le build aurait dû échouer");
+    assert!(
+        build_dir.join("CMakeCache.txt").is_file(),
+        "cache supprimé après une erreur de compilation"
+    );
+    std::fs::write(&main_c, &source).expect("écriture");
+    assert!(build().expect("build après correction").is_file());
+
+    // Échec de la configuration : dossier de build supprimé.
+    let cmake_lists = project.join("CMakeLists.txt");
+    let lists = std::fs::read_to_string(&cmake_lists).expect("CMakeLists.txt");
+    std::fs::write(
+        &cmake_lists,
+        format!("{lists}\nmessage(FATAL_ERROR \"échec volontaire\")\n"),
+    )
+    .expect("écriture");
+    assert!(build().is_err(), "la configuration aurait dû échouer");
+    assert!(
+        !build_dir.exists(),
+        "dossier de build conservé après l'échec de la configuration"
+    );
+    std::fs::write(&cmake_lists, lists).expect("écriture");
+    assert!(build().expect("build après correction").is_file());
+    let _ = std::fs::remove_dir_all(base);
 }

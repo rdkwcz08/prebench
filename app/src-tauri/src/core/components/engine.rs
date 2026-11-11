@@ -178,7 +178,14 @@ impl Resolver for ModelResolver {
 }
 
 /// Charge un module en retirant les types (oxc).
-struct ModelLoader;
+/// Chargeur des modèles : lit model.ts et le traduit en JS (oxc). Ce travail
+/// du cœur est exclu du budget de chargement du modèle (INIT_BUDGET) : le
+/// délai est suspendu pendant la lecture et la traduction, puis repoussé du
+/// temps qu'elles ont pris. Sans cela, un build de debug sur une machine
+/// chargée dépassait les 50 ms avant même d'exécuter le modèle.
+struct ModelLoader {
+    deadline: Arc<AtomicU64>,
+}
 
 impl Loader for ModelLoader {
     fn load<'js>(
@@ -188,11 +195,20 @@ impl Loader for ModelLoader {
         _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
     ) -> rquickjs::Result<Module<'js, rquickjs::module::Declared>> {
         let path = Path::new(name);
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| rquickjs::Error::new_loading_message(name, e.to_string()))?;
-        let js = strip_types(path, &source)
-            .map_err(|e| rquickjs::Error::new_loading_message(name, e))?;
-        Module::declare(ctx.clone(), name, js)
+        let saved = self.deadline.swap(u64::MAX, Ordering::Relaxed);
+        let t0 = now_ns();
+        let js = std::fs::read_to_string(path)
+            .map_err(|e| rquickjs::Error::new_loading_message(name, e.to_string()))
+            .and_then(|source| {
+                strip_types(path, &source)
+                    .map_err(|e| rquickjs::Error::new_loading_message(name, e))
+            });
+        if saved != u64::MAX {
+            let spent = now_ns().saturating_sub(t0);
+            self.deadline
+                .store(saved.saturating_add(spent), Ordering::Relaxed);
+        }
+        Module::declare(ctx.clone(), name, js?)
     }
 }
 
@@ -363,8 +379,13 @@ impl Instance {
         let runtime = Runtime::new().map_err(|e| e.to_string())?;
         runtime.set_memory_limit(MEMORY_LIMIT);
         runtime.set_max_stack_size(STACK_LIMIT);
-        runtime.set_loader(ModelResolver, ModelLoader);
         let deadline = Arc::new(AtomicU64::new(u64::MAX));
+        runtime.set_loader(
+            ModelResolver,
+            ModelLoader {
+                deadline: Arc::clone(&deadline),
+            },
+        );
         let d = Arc::clone(&deadline);
         runtime.set_interrupt_handler(Some(Box::new(move || now_ns() > d.load(Ordering::Relaxed))));
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
 
+pub mod templates;
+
 pub const DEFAULT_BOARD: &str = "nucleo-f401re";
 pub const DEFAULT_FRAMEWORK: &str = "stm32-hal";
 
