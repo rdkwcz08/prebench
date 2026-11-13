@@ -2,51 +2,40 @@
 
 Ce dossier sert au critère de passage de la phase 1 (cahier des charges, section 14). Il contient un projet STM32CubeMX **non modifié**, que la cible « sim » doit compiler tel quel.
 
-## État actuel
+## Contenu
 
-Les fichiers de `Core/` sont pour l'instant un **équivalent écrit à la main** du code que CubeMX génère pour une Nucleo-F401RE en configuration par défaut :
+Projet **généré par STM32CubeMX 6.18.1** (paquet STM32Cube FW_F4 V1.28.3, toolchain **CMake**), sans aucune modification : NUCLEO-F401RE, périphériques initialisés dans leur mode par défaut (LD2 sur PA5, B1 sur PC13 en interruption, USART2 à 115 200 bauds, horloge à 84 MHz).
 
-- GPIO : LD2 sur PA5 en sortie, B1 sur PC13 en interruption sur front descendant ;
-- USART2 à 115 200 bauds sur PA2 / PA3 ;
-- horloge à 84 MHz, à partir du HSI et de la PLL.
+Traitement par la cible « sim » (`libvmcu/cmake/PrebenchFirmware.cmake`) :
 
-Ils seront remplacés par le projet réellement généré.
+| Fichier | Origine | Cible « sim » |
+| --- | --- | --- |
+| `cubemx-nucleo-f401re.ioc`, `.mxproject` | Configuration CubeMX | Non utilisés |
+| `CMakeLists.txt`, `CMakePresets.json`, `cmake/` | Chaîne CMake de CubeMX (cible ARM) | Lu pour détecter un projet CubeMX brut, puis non utilisé : le projet est compilé via `libvmcu/sim` |
+| `Core/Src/main.c`, `stm32f4xx_it.c`, `stm32f4xx_hal_msp.c` | Code généré | Compilés tels quels |
+| `Core/Src/system_stm32f4xx.c`, `syscalls.c`, `sysmem.c` | Code généré propre à la puce | Exclus |
+| `startup_stm32f401xe.s`, `STM32F401xx_FLASH.ld` | Démarrage et édition de liens ARM | Ignorés |
+| `Core/Inc/*.h` | En-têtes générés | Ajoutés avant ceux du shim |
+| `Drivers/` | HAL et CMSIS copiés par CubeMX | **Jamais versionné** (`.gitignore`) : lourd, régénérable, remplacé par le shim |
 
-## Remplacer par le vrai projet
+Les fins de ligne CRLF éventuelles sont converties en LF par Git ; le contenu est inchangé.
 
-1. Dans STM32CubeMX : **New Project → Board Selector → NUCLEO-F401RE**, puis répondre **Yes** à « Initialize all peripherals with their default Mode ».
-2. Dans **Project Manager** :
-   - Project Name : `cubemx-nucleo-f401re` ;
-   - Project Location : le dossier `tests/` du dépôt ;
-   - Toolchain / IDE : **CMake**.
-3. Cliquer **Generate Code**, sans rien modifier ensuite.
-4. Depuis la racine du dépôt, vérifier :
+## Tests
+
+- `test_cubemx` (libvmcu, ctest) : sources compilées telles quelles, initialisation complète sans `Error_Handler`, avertissement « HAL_UART_Init non simulé ». La configuration CMake échoue si `system_stm32f4xx.c`, `syscalls.c` ou `sysmem.c` manquent ou ne sont pas exclus.
+- `cubemx_generated_project` (cœur Rust, `cargo test`) : chemin de l'app. Le `CMakeLists.txt` généré est reconnu, le projet est configuré via `libvmcu/sim`, seuls les trois fichiers de `Core/Src` attendus sont compilés, et la simulation démarre jusqu'à USART2.
+
+## Régénérer
+
+1. Installer le paquet **STM32Cube FW_F4 V1.28.3** dans STM32CubeMX (**Help → Manage embedded software packages**).
+2. Ouvrir `cubemx-nucleo-f401re.ioc` et cliquer **Generate Code**, sans rien modifier (Project Manager est réglé sur CMake).
+3. Depuis la racine du dépôt :
 
    ```sh
    cmake -S libvmcu -B build-libvmcu -DVMCU_WERROR=ON
    cmake --build build-libvmcu --parallel
    ctest --test-dir build-libvmcu --output-on-failure -R test_cubemx
    ```
-
-## Ce que compile la cible « sim »
-
-`libvmcu/cmake/PrebenchFirmware.cmake` :
-
-| Élément | Traitement |
-| --- | --- |
-| `Core/Src/*.c` | Compilés tels quels |
-| `system_stm32f4xx.c`, `syscalls.c`, `sysmem.c` | Exclus : registres CMSIS, newlib et symboles de l'éditeur de liens propres à la vraie puce |
-| `startup_stm32f401xe.s`, `*.ld`, `Drivers/` | Ignorés : le shim STM32 HAL remplace le HAL et CMSIS |
-| `Core/Inc` | Ajouté aux en-têtes, avant ceux du shim |
-
-Build « sim » autonome du projet, depuis la racine du dépôt :
-
-```sh
-cmake -S libvmcu/sim -B build-sim -DPREBENCH_PROJECT=tests/cubemx-nucleo-f401re
-cmake --build build-sim
-```
-
-Sous Windows, ajouter `-G "MinGW Makefiles"` à la première commande.
 
 ## Comportement attendu en phase 1
 

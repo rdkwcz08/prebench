@@ -1,6 +1,7 @@
 <!--
   app/ui/lib/ComponentHost.svelte — Place un composant sur la paillasse et affiche sa vue
   (compilée à l'exécution) ou la vue de repli. Ne se redessine que si l'état change.
+  Repère sous le composant : encre du tapis, ou sérigraphie s'il est sur la carte.
 -->
 <script lang="ts">
   import type { Instance } from './bench.svelte';
@@ -17,7 +18,7 @@
   }
 </script>
 
-<figure class="component" style:left="{inst.pos[0]}px" style:top="{inst.pos[1]}px">
+<figure class="component" class:onboard={inst.onboard} style:left="{inst.pos[0]}px" style:top="{inst.pos[1]}px">
   {#if View && inst.state !== null}
     <View state={inst.state} params={inst.params} {mode} {control} />
   {:else if View || (inst.viewError === '' && inst.info)}
@@ -38,12 +39,18 @@
     user-select: none;
   }
   figcaption {
+    margin-top: 4px;
+    color: var(--pb-mat-ink);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .onboard figcaption {
+    color: var(--pb-silk);
     font-size: 11px;
-    color: var(--text-muted);
-    margin-top: 2px;
   }
   .placeholder {
-    border: 1px dashed var(--border);
-    border-radius: 4px;
+    border: 1px dashed var(--pb-mat-ink);
+    border-radius: 3px;
+    opacity: 0.5;
   }
 </style>

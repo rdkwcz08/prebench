@@ -80,10 +80,27 @@ Au démarrage, Prebench vérifie ces prérequis : s'il en manque un, un bandeau 
 ## Premier projet
 
 1. Au premier lancement, clique **Créer mon premier projet**, puis **Créer** : Prebench copie le modèle `blinky-stm32-hal` dans `Documents/Prebench/blinky-stm32-hal`, un dossier que tu peux modifier. Plus tard, **Nouveau projet…** fait de même avec le modèle de ton choix.
-2. Clique **▶ Démarrer** : LD2 clignote, le bouton B1 change la vitesse.
-3. Modifie `Core/Src/main.c` dans ton éditeur, puis clique de nouveau **▶ Démarrer**.
+2. Clique **Démarrer** : LD2 clignote, le bouton B1 change la vitesse.
+3. Modifie `Core/Src/main.c` dans ton éditeur et enregistre : Prebench recompile et recharge le firmware, sans toucher à la paillasse. Une erreur de compilation s'affiche dans l'onglet **Build** ; un clic sur `fichier:ligne` l'ouvre dans VS Code.
 
 Le firmware est compilé dans le cache de Prebench, jamais dans le dossier du projet : `~/Library/Caches/dev.prebench.app/builds` (macOS), `%LOCALAPPDATA%\dev.prebench.app\builds` (Windows). Une erreur de compilation garde ce build, pour que la correction recompile seulement le fichier modifié. Ce dossier peut être supprimé à tout moment.
+
+## Déboguer le firmware
+
+Le firmware se débogue dans VS Code, avec des points d'arrêt dans ton code C ; Prebench affiche la paillasse.
+
+| Système | À installer |
+| --- | --- |
+| macOS | Extension **CodeLLDB** : `code --install-extension vadimcn.vscode-lldb` (lldb est fourni avec l'extension) |
+| Windows | Extension **C/C++** de Microsoft : `code --install-extension ms-vscode.cpptools`, et gdb de MSYS2 : `C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-gdb"` |
+| Linux | Extension **C/C++** de Microsoft et `sudo apt install gdb` |
+
+1. Dans Prebench, clique **Déboguer** : le firmware est compilé et la configuration « Prebench : déboguer le firmware » est ajoutée à `.vscode/launch.json` du projet (les autres configurations sont conservées ; les commentaires du fichier ne le sont pas). Prebench signale une extension ou un débogueur absent, avec la commande pour l'installer.
+2. Dans VS Code, choisis cette configuration et lance le débogage (F5).
+3. Sur un point d'arrêt, la paillasse se fige et la barre d'état affiche « Arrêté sur un point d'arrêt ». À la reprise, le temps du firmware repart sans saut : un `HAL_Delay` en cours n'est pas raccourci.
+4. Une sauvegarde recompile le firmware ; il sert à la session suivante (Maj+F5, puis F5). **Arrêter** dans Prebench termine la session.
+
+Le firmware est compilé avec les informations de débogage, sans optimisation. Pour IntelliSense (extension C/C++), Prebench inscrit dans `.vscode/settings.json` le `compile_commands.json` du build : les en-têtes du shim (`stm32f4xx_hal.h`…) sont trouvés. Les autres réglages du fichier sont conservés.
 
 ### Facultatif
 

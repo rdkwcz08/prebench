@@ -48,7 +48,18 @@ export interface ProjectView {
 /** États des composants modifiés depuis l'image précédente. */
 export type StatesEvent = Record<string, unknown>;
 
-export type SimState = 'idle' | 'building' | 'starting' | 'running' | 'stopped' | 'error';
+export type SimState =
+  | 'idle'
+  | 'building'
+  | 'starting'
+  | 'running'
+  | 'paused'
+  | 'stopped'
+  | 'error'
+  /** Débogage : en attente du firmware lancé par VS Code. */
+  | 'debug-wait'
+  /** Débogage : firmware figé par le débogueur. */
+  | 'breakpoint';
 
 export interface StatusEvent {
   state: SimState;
@@ -58,6 +69,67 @@ export interface StatusEvent {
 export interface LogEvent {
   source: 'firmware' | 'stdout' | 'stderr' | 'composant' | 'prebench';
   level: number;
+  text: string;
+}
+
+/** Mesure du firmware à 1 Hz, pendant une simulation (section 11.2). */
+export interface UsageEvent {
+  /** Pourcentage d'un cœur. */
+  cpu: number;
+  /** Octets. */
+  memory: number;
+  memory_limit: number;
+}
+
+/** Erreur ou avertissement d'un build « sim » (core : build/diagnostics.rs). */
+export interface Diagnostic {
+  severity: 'error' | 'warning';
+  /** Chemin absolu, transmis à open_in_editor ; null : sans emplacement (éditeur de liens). */
+  file: string | null;
+  /** Chemin affiché, relatif au projet quand c'est possible. */
+  display: string | null;
+  line: number | null;
+  column: number | null;
+  message: string;
+}
+
+/** Résultat d'un build (démarrage ou sauvegarde). */
+export interface BuildResultEvent {
+  ok: boolean;
+  duration_ms: number;
+  errors: number;
+  warnings: number;
+  diagnostics: Diagnostic[];
+}
+
+/** Fichiers du projet modifiés dans l'éditeur (surveillance du dossier). */
+export interface ProjectChangedEvent {
+  firmware: boolean;
+  views: string[];
+  models: string[];
+  project: boolean;
+}
+
+/** Outil de débogage vérifié (extension VS Code ou débogueur). */
+export interface DebugTool {
+  label: string;
+  present: boolean;
+  path: string | null;
+  install: string;
+}
+
+/** Session de débogage préparée (commande start_debug). */
+export interface DebugView {
+  config_name: string;
+  launch_json: string;
+  launch_json_state: 'created' | 'updated' | 'unchanged' | null;
+  launch_json_error: string | null;
+  tools: DebugTool[];
+}
+
+/** Intervention d'un garde-fou : pause automatique (cpu) ou arrêt (memory). */
+export interface GuardEvent {
+  kind: 'cpu' | 'memory';
   text: string;
 }
 

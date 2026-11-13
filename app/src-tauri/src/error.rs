@@ -16,6 +16,19 @@ pub enum CoreError {
     #[error("échec du build « sim » :\n{0}")]
     Build(String),
 
+    /// Erreurs du compilateur, détaillées dans l'onglet Build de l'interface.
+    #[error("Build en échec : {errors} erreur(s). Voir l'onglet Build pour les corriger.")]
+    BuildFailed { errors: usize },
+
+    #[error("ouverture de l'éditeur impossible : {0}")]
+    Open(String),
+
+    #[error("débogage : {0}")]
+    Debug(String),
+
+    #[error("surveillance du dossier du projet impossible : {0}")]
+    Watch(String),
+
     #[error("erreur de protocole : {0}")]
     Protocol(String),
 

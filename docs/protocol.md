@@ -1,4 +1,4 @@
-# Protocole firmware ↔ app — version 1.0
+# Protocole firmware ↔ app — version 1.1
 
 Ce document est le contrat entre libvmcu (côté firmware) et le cœur Rust (côté app). Il complète la section 6 du cahier des charges et suit les décisions D7, D12 et D15. L'API C correspondante est `libvmcu/include/vmcu.h`.
 
@@ -21,8 +21,9 @@ Le cœur crée le serveur du socket, puis lance l'exécutable firmware avec ces 
 
 | Variable | Exemple | Rôle |
 | --- | --- | --- |
-| `PREBENCH_SOCKET` | `/var/folders/…/T/prebench-4242-1.sock` ou `\\.\pipe\prebench-4242-1` | Adresse du canal messages |
+| `PREBENCH_SOCKET` | `/tmp/prebench-4242-1-3.sock` ou `\\.\pipe\prebench-4242-1-3` | Adresse du canal messages, à utiliser telle quelle (le cœur la change à chaque lancement du firmware) |
 | `PREBENCH_BOARD_ID` | `1` | Identifiant d'instance de carte (1..65535) |
+| `PREBENCH_DEBUG` | `1` | Facultative (1.1). Firmware lancé par le débogueur de VS Code (configuration de `.vscode/launch.json` écrite par l'app) : libvmcu active le fil de débogage (section 5.5) |
 
 Si `PREBENCH_SOCKET` est absent, libvmcu écrit un message sur `stderr` et termine le processus avec le code 69 (`VMCU_EXIT_NO_APP`).
 
@@ -82,7 +83,7 @@ Délai : si `WELCOME` ou `REJECT` n'arrive pas dans les 5 s, libvmcu se termine 
 
 ### 3.2 Versions
 
-- Version actuelle : **1.0**, notée majeure.mineure.
+- Version actuelle : **1.1**, notée majeure.mineure.
 - Changer la **majeure** casse la compatibilité : l'app refuse toute majeure différente de la sienne (`REJECT`, raison 1).
 - Changer la **mineure** reste compatible. Seuls ces ajouts sont permis : nouveaux types de messages, nouveaux champs **en fin** de charge utile, nouveaux bits de `flags` qu'on peut ignorer sans risque.
 - La version retenue pour la session est la plus petite des deux mineures ; l'app l'indique dans `WELCOME`. Aucun des deux côtés n'envoie de message plus récent que cette version.
@@ -113,6 +114,7 @@ Les identifiants `0x0001` à `0x7FFF` vont du firmware vers l'app ; `0x8000` à 
 | `0x0072` | `STREAM_NOTIFY` | — | `u16 stream_id`, `u16 reserved`, `u32 commit_seq` |
 | `0x0080` | `WARN` | — | `u16 code`, `str text` |
 | `0x0081` | `LOG` | — | `u8 level` (0 erreur … 3 debug), `u8 reserved`, `str text` |
+| `0x0090` | `HEARTBEAT` | — | vide. Depuis 1.1, seulement avec `PREBENCH_DEBUG=1` : toutes les 200 ms, et aussitôt après un arrêt du processus (section 5.5) |
 | `0x00F0` | `PING` | SYNC | `u8 target` (0 cœur, 1 modèle d'écho), `u8 reserved[3]` |
 
 Valeurs de `mode` : 0 entrée, 1 sortie push-pull, 2 sortie drain ouvert, 3 alternative push-pull, 4 alternative drain ouvert, 5 analogique, 6 désactivée.
@@ -133,7 +135,7 @@ Codes de `WARN` :
 
 | ID | Nom | Flags | Charge utile |
 | --- | --- | --- | --- |
-| `0x8001` | `WELCOME` | REPLY | `u8 proto_major`, `u8 proto_minor` (version retenue), `u8 adc_bits`, `u8 reserved`, `u32 sync_timeout_ms` (défaut : 1000) |
+| `0x8001` | `WELCOME` | REPLY | `u8 proto_major`, `u8 proto_minor` (version retenue), `u8 adc_bits`, `u8 reserved`, `u32 sync_timeout_ms` (défaut : 1000 ; une heure en session de débogage) |
 | `0x8002` | `REJECT` | REPLY | `u16 reason`, `str text` — raisons : 1 version, 2 carte inconnue, 3 `board_id` inattendu, 4 framework non supporté par la carte |
 | `0x8010` | `GPIO_INPUT` | — | `u8 port`, `u8 pin`, `u8 level` (0/1), `u8 net_flags` (bit 0 flottant, bit 1 conflit) |
 | `0x8030` | `ADC_VALUE` | — | `u8 unit`, `u8 channel`, `u16 raw` (selon `adc_bits`) |
@@ -216,7 +218,20 @@ Messages concernés : `HELLO`, `I2C_XFER`, `SPI_XFER` avec `RX`, `STREAM_OPEN` e
 | `RESUME` | Libère les fils ; le temps repart sans saut |
 | `RESET` | Vide le tampon, ferme le canal, termine le processus avec le code 71 ; le cœur relance le firmware avec le même `board_id`, sans toucher à la paillasse |
 | `SHUTDOWN` | Vide le tampon, ferme le canal, termine le processus avec le code 0 |
-| Fermeture du socket par l'app | Termine immédiatement le processus avec le code 70 : aucun processus orphelin (section 5.5) |
+| Fermeture du socket par l'app | Termine immédiatement le processus avec le code 70 : aucun processus orphelin (cahier des charges, section 5.5) |
+
+### 5.5 Débogage (1.1)
+
+Pour déboguer, l'app ne lance pas le firmware : elle écrit dans `.vscode/launch.json` du projet une configuration qui le lance sous le débogueur avec `PREBENCH_SOCKET` (adresse fixe du projet), `PREBENCH_BOARD_ID` et `PREBENCH_DEBUG=1`, puis elle attend sa connexion sans délai.
+
+Un débogueur arrêté sur un point d'arrêt fige tous les fils du processus. Avec `PREBENCH_DEBUG=1` et une version retenue ≥ 1.1, libvmcu démarre un fil de débogage :
+
+- il lit l'horloge toutes les 100 ms et envoie `HEARTBEAT` toutes les 200 ms ;
+- chaque lecture de l'horloge, par n'importe quel fil, la compare à la précédente : un écart de plus de 250 ms signale un processus figé, et cet écart (moins 100 ms) est retiré du temps de simulation, une seule fois. Le premier fil réveillé après un point d'arrêt le constate avant d'utiliser l'heure : aucune échéance ne tombe à tort, `vmcu_millis()` repart sans saut (à 100 ms près) ;
+- côté app, sans `HEARTBEAT` pendant 600 ms, le firmware est « arrêté sur un point d'arrêt » ; ni pause CPU, ni suspension, ni arrêt pour mémoire pendant une session de débogage ;
+- `WELCOME` porte un `sync_timeout_ms` d'une heure : une transaction en cours pendant un arrêt n'expire pas.
+
+À la fin d'une session (débogueur arrêté, reset), le canal se ferme et l'app attend la session suivante sur la même adresse.
 
 ## 6. Canal flux (mémoire partagée)
 
@@ -266,3 +281,4 @@ En-tête de 64 octets, puis la zone de données (alignée sur 64 octets).
 | Version | Date | Changements |
 | --- | --- | --- |
 | 1.0 | 2026-11-10 | Version initiale (phase 0) |
+| 1.1 | 2026-11-13 | Débogage (phase 2) : variable `PREBENCH_DEBUG`, message `HEARTBEAT` (`0x0090`), fil de débogage de libvmcu (section 5.5). Ajouts compatibles |

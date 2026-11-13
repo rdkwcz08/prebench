@@ -4,13 +4,16 @@
 // développement est autorisé à lire la racine du dépôt.
 
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string };
 
 export default defineConfig({
   plugins: [svelte()],
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   clearScreen: false,
   server: {
     port: 1420,

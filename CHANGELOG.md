@@ -6,6 +6,32 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.1.2] - 2026-11-13
+
+**Aperçu technique** : Prebench suit maintenant le dossier du projet (recompilation et rechargement à chaque sauvegarde), se débogue dans VS Code, protège l'ordinateur contre un firmware qui s'emballe, et adopte sa nouvelle interface.
+
+### Ajouté
+
+- Nouvelle interface : paillasse sur tapis antistatique, carte dessinée à plat, inspecteur et panneau du bas repliables, barre d'état ; thème clair, sombre ou celui du système (bouton de la barre d'outils, choix mémorisé).
+- Recompilation à chaque sauvegarde dans ton éditeur : si la simulation tourne, le firmware est rechargé sans toucher à la paillasse ; en cas d'erreur, l'ancien firmware continue de tourner.
+- Onglet **Build** : erreurs et avertissements du compilateur, avec `fichier:ligne` cliquable qui ouvre VS Code à la bonne ligne (sinon l'application associée au fichier). État du build dans la barre d'état.
+- Composants du projet (`components/<id>/`) : une vue modifiée est rechargée aussitôt ; un modèle ou `prebench.toml` modifié relance la simulation.
+- **Déboguer** : le firmware se débogue dans VS Code avec des points d'arrêt (CodeLLDB sur macOS ; extension C/C++ et gdb sous Windows). Prebench ajoute la configuration à `.vscode/launch.json` et signale l'extension ou le débogueur manquant. Sur un point d'arrêt, la paillasse se fige (« Arrêté sur un point d'arrêt ») et le temps du firmware repart sans saut.
+- IntelliSense de VS Code : le build produit `compile_commands.json`, inscrit dans `.vscode/settings.json` du projet ; les en-têtes simulés (`stm32f4xx_hal.h`…) sont trouvés.
+- **Mettre en pause** et **Reprendre** (touche Espace), **Réinitialiser** (touche R), **Arrêter**.
+- Indicateur CPU et RAM du firmware dans la barre d'état.
+- Garde-fous : un firmware qui occupe plus de 80 % d'un cœur pendant 5 s est mis en pause (bannière « Reprendre ») ; au-delà de 256 Mo de mémoire, il est arrêté avec une explication.
+
+### Corrigé
+
+- Le rapport de `--verifier-installation` n'est plus affiché deux fois sous macOS.
+- Windows : le firmware est rattaché à un Job Object : il s'arrête avec l'app, même en cas de fermeture brutale.
+
+### Limites connues
+
+- macOS n'applique pas de plafond mémoire système : la limite de 256 Mo est surveillée par Prebench (4 fois par seconde au-delà de 128 Mo) ; une allocation très rapide peut la dépasser brièvement avant l'arrêt.
+- La carte n'a pas encore de connecteurs : le câblage de composants externes arrive dans une prochaine version.
+
 ## [0.1.1] - 2026-11-11
 
 **Aperçu technique** : corrige la compilation avec l'app installée sous Windows et facilite la création d'un premier projet.

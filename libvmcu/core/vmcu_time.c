@@ -2,7 +2,8 @@
  * libvmcu/core/vmcu_time.c — Temps de simulation et garde-fous CPU (D12, section 5.5).
  *
  * Le temps de simulation est l'horloge monotone du système, moins les périodes
- * de pause : vmcu_millis() ne saute pas après un RESUME. Le mode temps virtuel
+ * de pause et des arrêts du débogueur : vmcu_millis() ne saute ni après un
+ * RESUME ni après un point d'arrêt (vmcu__time_watch_*). Le mode temps virtuel
  * (E6) remplacera vmcu__sim_ns sans toucher aux shims.
  */
 #include "vmcu_internal.h"
@@ -14,6 +15,11 @@ static uint64_t start_ns;
 static uint64_t paused_total_ns;
 static uint64_t paused_since_ns;
 static bool     paused;
+/* Débogage : dernière lecture de l'horloge, tous fils confondus. */
+static bool     watching;
+static uint64_t watch_last_ns;
+static uint64_t watch_tick_ns;
+static uint64_t watch_frozen_ns;
 
 /* Garde-fous, par fil. */
 static _Thread_local uint32_t t_calls;
@@ -25,6 +31,25 @@ void vmcu__time_init(void)
     start_ns = vmcu_plat_monotonic_ns();
 }
 
+/* Sous time_mx : retire du temps l'arrêt du processus constaté depuis la
+ * lecture précédente. Le premier fil réveillé après un point d'arrêt le
+ * constate avant d'utiliser l'heure : aucune échéance ne tombe à tort. */
+static bool watch_locked(uint64_t now)
+{
+    if (!watching) {
+        return false;
+    }
+    uint64_t gap = now - watch_last_ns;
+    watch_last_ns = now;
+    if (gap <= watch_frozen_ns) {
+        return false;
+    }
+    if (!paused) {
+        paused_total_ns += gap - watch_tick_ns; /* en pause, l'horloge est déjà gelée */
+    }
+    return true;
+}
+
 uint64_t vmcu__sim_ns(void)
 {
     uint64_t now = vmcu_plat_monotonic_ns();
@@ -32,6 +57,7 @@ uint64_t vmcu__sim_ns(void)
         return 0;
     }
     vmcu_plat_mutex_lock(time_mx);
+    (void)watch_locked(now);
     uint64_t ref = paused ? paused_since_ns : now;
     uint64_t v = ref - start_ns - paused_total_ns;
     vmcu_plat_mutex_unlock(time_mx);
@@ -50,6 +76,25 @@ void vmcu__time_set_paused(bool on)
         paused = false;
     }
     vmcu_plat_mutex_unlock(time_mx);
+}
+
+void vmcu__time_watch_start(uint64_t tick_ns, uint64_t frozen_ns)
+{
+    vmcu_plat_mutex_lock(time_mx);
+    watch_tick_ns = tick_ns;
+    watch_frozen_ns = frozen_ns;
+    watch_last_ns = vmcu_plat_monotonic_ns();
+    watching = true;
+    vmcu_plat_mutex_unlock(time_mx);
+}
+
+bool vmcu__time_watch_tick(void)
+{
+    uint64_t now = vmcu_plat_monotonic_ns();
+    vmcu_plat_mutex_lock(time_mx);
+    bool frozen = watch_locked(now);
+    vmcu_plat_mutex_unlock(time_mx);
+    return frozen;
 }
 
 /* --- Garde-fous ------------------------------------------------------------------ */

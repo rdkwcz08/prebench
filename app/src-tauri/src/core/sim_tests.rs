@@ -68,6 +68,22 @@ fn start_project_with(
     dir: &Path,
     build_dir: &Path,
 ) -> (tauri::App<tauri::test::MockRuntime>, SimHandle, Recorder) {
+    let (app, handle, rec, _) = start_project_full(root, dir, build_dir, None);
+    (app, handle, rec)
+}
+
+/// Comme start_project_with ; renvoie aussi l'exécutable compilé.
+fn start_project_full(
+    root: &Path,
+    dir: &Path,
+    build_dir: &Path,
+    debug: Option<DebugConfig>,
+) -> (
+    tauri::App<tauri::test::MockRuntime>,
+    SimHandle,
+    Recorder,
+    PathBuf,
+) {
     let app = mock_builder()
         .build(mock_context(noop_assets()))
         .expect("app simulée");
@@ -81,7 +97,14 @@ fn start_project_with(
     .expect("build « sim »");
 
     let (tx, rx) = mpsc::channel();
-    for name in ["sim:states", "sim:status", "sim:log", "sim:warn"] {
+    for name in [
+        "sim:states",
+        "sim:status",
+        "sim:log",
+        "sim:warn",
+        "sim:usage",
+        "sim:guard",
+    ] {
         let tx = tx.clone();
         app.handle().listen_any(name, move |event| {
             let value = serde_json::from_str(event.payload()).unwrap_or(Value::Null);
@@ -94,12 +117,13 @@ fn start_project_with(
             project_dir: dir.to_path_buf(),
             project,
             board,
-            firmware,
+            firmware: firmware.clone(),
             board_id: 1,
             components,
+            debug,
         },
     );
-    (app, handle, Recorder { rx })
+    (app, handle, Recorder { rx }, firmware)
 }
 
 /// Luminosité de LD2 calculée par le modèle led (QuickJS).
@@ -165,6 +189,217 @@ fn blinky_led_and_button() {
     assert!((70.0..200.0).contains(&fast), "période rapide {fast} ms");
 
     let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Reset (docs/protocol.md, 5.4) : le firmware se termine (code 71) et le cœur
+/// le relance sur un nouveau canal. Sous Windows, le nom du canal doit changer
+/// à chaque lancement (FILE_FLAG_FIRST_PIPE_INSTANCE) : deux resets de suite.
+#[test]
+fn reset_relaunches_firmware() {
+    let dir = repo_root().join("templates").join("blinky-stm32-hal");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(Duration::from_secs(10), |name, v| {
+        name == "sim:status" && v["state"] == "running"
+    });
+    for round in 1..=2 {
+        sim.tx.try_send(SimMsg::Reset).expect("reset");
+        rec.wait(Duration::from_secs(5), |name, v| {
+            name == "sim:status"
+                && v["state"] == "starting"
+                && v["message"].as_str().is_some_and(|m| m.contains("reset"))
+        });
+        rec.wait(Duration::from_secs(10), |name, v| {
+            name == "sim:status" && v["state"] == "running"
+        });
+        let period = mean_toggle_ms(&rec, 3);
+        println!("reset {round} : LD2 repart, période {period:.0} ms");
+        assert!(
+            (400.0..700.0).contains(&period),
+            "période {period} ms après le reset"
+        );
+    }
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Débogage (section 10.2) : le test joue le rôle de VS Code. Il lance le
+/// firmware avec les variables de launch.json, puis le fige comme un point
+/// d'arrêt (tous les fils suspendus) : la barre d'état l'indique, aucun arrêt
+/// ni pause CPU, et à la reprise le temps du firmware repart sans saut.
+#[test]
+fn debug_session_breakpoint_without_time_jump() {
+    let dir = repo_root().join("templates").join("blinky-stm32-hal");
+    let address = crate::platform::debug_socket_address(u64::from(std::process::id()) ^ 0x5eed);
+    let program = std::env::temp_dir().join(format!(
+        "prebench-debug-program-{}{}",
+        std::process::id(),
+        if cfg!(windows) { ".exe" } else { "" }
+    ));
+    let (_app, sim, rec, firmware) = start_project_full(
+        &repo_root(),
+        &dir,
+        &test_build_dir(&dir),
+        Some(DebugConfig {
+            address: address.clone(),
+            program: program.clone(),
+        }),
+    );
+    rec.wait(Duration::from_secs(5), |name, v| {
+        name == "sim:status" && v["state"] == "debug-wait"
+    });
+
+    // « F5 » : le débogueur lance le firmware.
+    let mut child = std::process::Command::new(&firmware)
+        .env("PREBENCH_SOCKET", &address)
+        .env("PREBENCH_BOARD_ID", "1")
+        .env("PREBENCH_DEBUG", "1")
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("firmware lancé par le « débogueur »");
+    rec.wait(Duration::from_secs(10), |name, v| {
+        name == "sim:status" && v["state"] == "running"
+    });
+    let before = mean_toggle_ms(&rec, 3);
+
+    // Point d'arrêt juste après une bascule de LD2.
+    let level = |v: &Value| ld2_level(v);
+    let (_, first) = rec.wait(Duration::from_secs(5), |name, v| {
+        name == "sim:states" && level(v).is_some()
+    });
+    let last = level(&first);
+    let (_, toggled) = rec.wait(Duration::from_secs(5), |name, v| {
+        name == "sim:states" && level(v).is_some() && level(v) != last
+    });
+    let frozen_level = level(&toggled);
+    crate::platform::suspend_process(child.id()).expect("arrêt");
+    let frozen_at = Instant::now();
+    let (_, status) = rec.wait(Duration::from_secs(3), |name, v| {
+        name == "sim:status" && v["state"] != "running"
+    });
+    assert_eq!(status["state"], "breakpoint", "{status}");
+    std::thread::sleep(Duration::from_millis(1500).saturating_sub(frozen_at.elapsed()));
+
+    crate::platform::resume_process(child.id()).expect("reprise");
+    let resumed_at = Instant::now();
+    // États envoyés à chaque changement : la bascule suivante diffère du niveau figé.
+    rec.wait(Duration::from_secs(5), |name, v| {
+        name == "sim:states" && level(v).is_some() && level(v) != frozen_level
+    });
+    let next_toggle = resumed_at.elapsed();
+    println!(
+        "période {before:.0} ms ; arrêt {:.1?} ; bascule suivante {next_toggle:.1?} après la reprise",
+        resumed_at - frozen_at
+    );
+    // Sans saut de temps, le délai de 500 ms en cours se termine après la reprise.
+    assert!(
+        (Duration::from_millis(250)..Duration::from_millis(700)).contains(&next_toggle),
+        "saut de temps : bascule {next_toggle:?} après la reprise"
+    );
+
+    // Fin de session dans le débogueur : la paillasse attend la suivante.
+    let _ = child.kill();
+    let _ = child.wait();
+    rec.wait(Duration::from_secs(5), |name, v| {
+        name == "sim:status" && v["state"] == "debug-wait"
+    });
+    let _ = sim.tx.try_send(SimMsg::Stop);
+    let _ = std::fs::remove_file(&program);
+}
+
+/// Critère de passage de la phase 2 (garde-fou CPU, section 11.2) : une boucle
+/// sans délai est mise en pause au bout de 5 s, suspendue (plus aucune mesure),
+/// puis reprend sur demande et se remet en pause.
+#[test]
+fn guard_busy_loop_pauses() {
+    let dir = repo_root().join("tests").join("guard-busy-loop");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(Duration::from_secs(10), |name, v| {
+        name == "sim:status" && v["state"] == "running"
+    });
+    let started = Instant::now();
+    let mut peak = 0.0_f64;
+    let (_, guard) = rec.wait(Duration::from_secs(15), |name, v| {
+        if name == "sim:usage" {
+            peak = peak.max(v["cpu"].as_f64().unwrap_or(0.0));
+        }
+        name == "sim:guard"
+    });
+    let elapsed = started.elapsed();
+    println!("pause automatique après {elapsed:.1?}, pic à {peak:.0} % d'un cœur");
+    assert_eq!(guard["kind"], "cpu");
+    assert!(peak > 80.0, "pic CPU mesuré à {peak:.0} %");
+    assert!(
+        (Duration::from_secs(4)..Duration::from_secs(12)).contains(&elapsed),
+        "pause après {elapsed:?}"
+    );
+    rec.wait(Duration::from_secs(2), |name, v| {
+        name == "sim:status" && v["state"] == "paused"
+    });
+
+    // En pause : minuteur arrêté, aucune mesure.
+    let quiet_until = Instant::now() + Duration::from_millis(2500);
+    while let Some(left) = quiet_until.checked_duration_since(Instant::now()) {
+        if let Ok((name, _)) = rec.rx.recv_timeout(left) {
+            assert_ne!(name, "sim:usage", "mesure reçue pendant la pause");
+        }
+    }
+
+    sim.tx.try_send(SimMsg::Resume).expect("reprise");
+    rec.wait(Duration::from_secs(2), |name, v| {
+        name == "sim:status" && v["state"] == "running"
+    });
+    let (_, again) = rec.wait(Duration::from_secs(15), |name, _| name == "sim:guard");
+    assert_eq!(again["kind"], "cpu");
+
+    // Arrêt d'un firmware suspendu : aucun processus fantôme.
+    sim.tx.try_send(SimMsg::Stop).expect("arrêt");
+    rec.wait(Duration::from_secs(5), |name, v| {
+        name == "sim:status" && v["state"] == "stopped"
+    });
+}
+
+/// Garde-fou mémoire (section 11.2) : une fuite de 80 Mo/s est arrêtée
+/// au-delà de 256 Mo, avec un message qui dit pourquoi.
+#[test]
+fn guard_memory_leak_stops() {
+    let dir = repo_root().join("tests").join("guard-memory-leak");
+    let (_app, _sim, rec) = start_project(&dir);
+    rec.wait(Duration::from_secs(10), |name, v| {
+        name == "sim:status" && v["state"] == "running"
+    });
+    // Au-delà de 128 Mo, mesure à 4 Hz : arrêt à moins de 40 Mo au-delà de la
+    // limite pour une fuite de 80 Mo/s (jusqu'à 80 Mo de dépassement à 1 Hz).
+    let mut peak = 0_u64;
+    let mut fast = 0_u32;
+    let (_, guard) = rec.wait(Duration::from_secs(20), |name, v| {
+        if name == "sim:usage" {
+            let memory = v["memory"].as_u64().unwrap_or(0);
+            if memory > MEMORY_LIMIT / 2 {
+                fast += 1;
+            }
+            peak = peak.max(memory);
+        }
+        name == "sim:guard"
+    });
+    assert_eq!(guard["kind"], "memory");
+    let mo = |b: u64| b / (1024 * 1024);
+    println!("arrêt à {} Mo, {fast} mesures au-delà de 128 Mo", mo(peak));
+    assert!(
+        peak <= MEMORY_LIMIT + 40 * 1024 * 1024,
+        "arrêt à {} Mo",
+        mo(peak)
+    );
+    assert!(
+        fast >= 3,
+        "{fast} mesures au-delà de 128 Mo : pas de mesure rapprochée"
+    );
+    let (_, status) = rec.wait(Duration::from_secs(5), |name, v| {
+        name == "sim:status" && v["state"] == "stopped"
+    });
+    let message = status["message"].as_str().unwrap_or_default();
+    println!("{message}");
+    assert!(message.contains("256 Mo"), "message : {message}");
 }
 
 /// Outil de latence : le composant d'écho tourne dans QuickJS (fil « modèles »).
@@ -276,4 +511,81 @@ fn build_cache_after_failures() {
     std::fs::write(&cmake_lists, lists).expect("écriture");
     assert!(build().expect("build après correction").is_file());
     let _ = std::fs::remove_dir_all(base);
+}
+
+/// Fichiers objets produits par un build « sim » (noms seuls).
+fn object_names(dir: &Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            object_names(&path, out);
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.ends_with(".o") || name.ends_with(".obj") {
+                out.push(name.to_owned());
+            }
+        }
+    }
+}
+
+/// Critère de passage : le projet STM32CubeMX généré (chaîne CMake), non
+/// modifié, est reconnu par son CMakeLists.txt et compilé via libvmcu/sim ;
+/// system_stm32f4xx.c, syscalls.c et sysmem.c sont exclus, le startup .s et le
+/// .ld ignorés ; l'initialisation va jusqu'à USART2 (« non simulé »).
+#[test]
+fn cubemx_generated_project() {
+    let dir = repo_root().join("tests").join("cubemx-nucleo-f401re");
+    for generated in [
+        "CMakeLists.txt",
+        "startup_stm32f401xe.s",
+        "STM32F401xx_FLASH.ld",
+        "Core/Src/system_stm32f4xx.c",
+        "Core/Src/syscalls.c",
+        "Core/Src/sysmem.c",
+    ] {
+        assert!(
+            dir.join(generated).is_file(),
+            "{generated} absent : génération incomplète"
+        );
+    }
+    let build_dir = test_build_dir(&dir);
+    let _ = std::fs::remove_dir_all(&build_dir);
+    let (_app, sim, rec) = start_project(&dir);
+
+    // Détection : configuré depuis libvmcu/sim, pas depuis le CMakeLists.txt de CubeMX.
+    let cache = std::fs::read_to_string(build_dir.join("CMakeCache.txt")).expect("CMakeCache.txt");
+    assert!(
+        cache.contains("CMAKE_PROJECT_NAME:STATIC=prebench_sim"),
+        "projet CubeMX non détecté"
+    );
+
+    let mut objects = Vec::new();
+    object_names(&build_dir, &mut objects);
+    for kept in ["main.c", "stm32f4xx_it.c", "stm32f4xx_hal_msp.c"] {
+        assert!(
+            objects.iter().any(|o| o.starts_with(kept)),
+            "{kept} non compilé : {objects:?}"
+        );
+    }
+    for excluded in [
+        "system_stm32f4xx",
+        "syscalls",
+        "sysmem",
+        "startup_stm32f401xe",
+    ] {
+        assert!(
+            !objects.iter().any(|o| o.starts_with(excluded)),
+            "{excluded} compilé à tort : {objects:?}"
+        );
+    }
+
+    rec.wait(Duration::from_secs(10), |name, v| {
+        name == "sim:status" && v["state"] == "running"
+    });
+    rec.wait(Duration::from_secs(5), |name, v| {
+        name == "sim:warn"
+            && v["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("HAL_UART_Init non simulé"))
+    });
+    let _ = sim.tx.try_send(SimMsg::Stop);
 }

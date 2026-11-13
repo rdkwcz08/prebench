@@ -30,6 +30,18 @@ endforeach()
 # Projet STM32CubeMX du dépôt, compilé tel quel ; seul `main` est renommé.
 set(PREBENCH_CUBEMX_TEST_PROJECT "${PROJECT_SOURCE_DIR}/../tests/cubemx-nucleo-f401re")
 prebench_cubemx_sources(_cubemx_srcs "${PREBENCH_CUBEMX_TEST_PROJECT}")
+# Le projet généré contient les fichiers propres à la vraie puce : ils doivent
+# exister (génération complète) et être exclus des sources « sim ».
+foreach(_excluded system_stm32f4xx.c syscalls.c sysmem.c)
+  if(NOT EXISTS "${PREBENCH_CUBEMX_TEST_PROJECT}/Core/Src/${_excluded}")
+    message(FATAL_ERROR "Projet CubeMX de test incomplet : Core/Src/${_excluded} absent (voir son README)")
+  endif()
+endforeach()
+set(_kept ${_cubemx_srcs})
+list(FILTER _kept INCLUDE REGEX "/(system_stm32f4xx|syscalls|sysmem)\\.c$")
+if(_kept)
+  message(FATAL_ERROR "Sources CubeMX non exclues de la cible « sim » : ${_kept}")
+endif()
 add_library(cubemx_nucleo_f401re OBJECT ${_cubemx_srcs})
 prebench_configure_cubemx_target(cubemx_nucleo_f401re "${PREBENCH_CUBEMX_TEST_PROJECT}")
 target_compile_definitions(cubemx_nucleo_f401re PRIVATE main=prebench_firmware_main)

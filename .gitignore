@@ -25,6 +25,8 @@ dist/
 /libvmcu/build/
 /templates/*/build/
 /tests/*/build/
+# Drivers/ des projets CubeMX de test : lourd, régénérable, remplacé par le shim
+/tests/*/Drivers/
 build-*/
 cmake-build-*/
 CMakeCache.txt
@@ -51,3 +53,8 @@ __pycache__/
 
 # --- Journaux ---
 *.log
+
+# --- Tests de l’interface (Playwright) ---
+app/test-results/
+app/test-screens/
+app/playwright-report/

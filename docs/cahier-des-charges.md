@@ -355,6 +355,17 @@ Mesures dans l'app (Mac, build debug, outil `tests/latency`, 2000 allers-retours
 | firmware ↔ cœur ↔ WebView ↔ Web Worker (avant) | 326 µs | 1193 µs | 8886 µs |
 | firmware ↔ cœur ↔ modèle QuickJS (décision D5) | 33 µs | 260 µs | 1269 µs |
 
+Mesures sous Windows et Linux (runners GitHub Actions, build debug, test `latency_tool`, 2000 allers-retours par chemin, 11 novembre 2026) :
+
+| Chemin | Système | Médiane | 99e centile | Maximum |
+| --- | --- | --- | --- | --- |
+| firmware ↔ cœur | Windows | 35 µs | 131 µs | 421 µs |
+| firmware ↔ cœur ↔ modèle QuickJS | Windows | 60 µs | 134 µs | 353 µs |
+| firmware ↔ cœur | Linux | 36 µs | 46 µs | 107 µs |
+| firmware ↔ cœur ↔ modèle QuickJS | Linux | 68 µs | 83 µs | 1906 µs |
+
+Les runners sont des machines virtuelles partagées : ces valeurs majorent celles d'un PC physique.
+
 Le 99e centile passe sous 0,3 ms ; le maximum reste au-dessus de 1 ms, probablement dû à l'ordonnancement du système (firmware en priorité basse, cause non mesurée).
 
 ### 8.2 Familles d'interfaces
@@ -460,9 +471,9 @@ to = "board.PB9"
 
 1. L'utilisateur sauvegarde dans son éditeur.
 2. L'app détecte le changement et lance le build « sim » (et le build de la vraie cible pour la jauge mémoire).
-3. En cas d'erreur : liste cliquable qui ouvre `fichier:ligne` dans l'éditeur (schéma `vscode://file/…:ligne` et équivalents).
+3. En cas d'erreur : liste cliquable qui ouvre `fichier:ligne` dans l'éditeur (schéma `vscode://file/…:ligne`, sinon application par défaut du fichier ; choix d'un autre éditeur : Plus tard). L'ancien firmware continue de tourner jusqu'au build réussi suivant.
 4. En cas de succès : rechargement du firmware ; câblage et valeurs des capteurs conservés.
-5. Débogage : l'app génère la configuration `launch.json` ; lldb (Mac) ou gdb natif. Quand le débogueur s'arrête, toute la paillasse se fige.
+5. Débogage : l'app écrit dans `.vscode/launch.json` une configuration qui lance le firmware sous le débogueur (CodeLLDB sur Mac ; extension C/C++ et gdb de MSYS2 sous Windows) et l'attend sans délai ; elle signale l'extension ou le débogueur absent. Quand le débogueur s'arrête, toute la paillasse se fige (« Arrêté sur un point d'arrêt ») ; à la reprise, le temps du firmware repart sans saut (protocole 1.1, `docs/protocol.md` section 5.5).
 
 ### 10.3 Disposition de l'écran
 
@@ -534,8 +545,8 @@ Taille de l'app visée : de l'ordre de 10 à 20 Mo, hors toolchains.
 
 | Garde-fou | macOS | Windows | Défaut |
 | --- | --- | --- | --- |
-| Plafond mémoire par firmware | `setrlimit` | Job Object | 256 Mo, configurable |
-| Surveillance CPU par enfant | `proc_pid_rusage` | API Windows (crate `sysinfo`) | > 80 % pendant 5 s → pause + message |
+| Plafond mémoire par firmware | Surveillance de l'empreinte mémoire (`proc_pid_rusage`) à 1 Hz, à 4 Hz au-delà de la moitié du plafond, et arrêt au-delà du plafond : macOS n'applique pas `setrlimit` (`RLIMIT_AS`, `RLIMIT_DATA`) | Même surveillance + Job Object (plafond système au double) ; Linux : même surveillance + `RLIMIT_AS` au double | 256 Mo surveillés, arrêt du firmware + bannière ; limite réglable dans `prebench.toml` : Plus tard ; plafond système sous macOS par `taskpolicy -m <Mo>` au lancement (option à évaluer) : Plus tard |
+| Surveillance CPU par enfant | `proc_pid_rusage` | `GetProcessTimes` (windows-sys, sans crate supplémentaire) | Minuteur à 1 Hz, actif seulement pendant une simulation et hors pause ; > 80 % d'un cœur pendant 5 s → pause (`PAUSE`, puis suspension du processus) + bannière « Reprendre » |
 | Cœurs économes | QoS « utility » (cœurs E) | EcoQoS (Windows 11) | Activé |
 | Cartes simultanées | Limite de l'app | Limite de l'app | 4 |
 | Plantage firmware | Processus séparé, crash et pile d'appels affichés | Idem |  |
@@ -547,7 +558,7 @@ Taille de l'app visée : de l'ordre de 10 à 20 Mo, hors toolchains.
 - **Coalescence** : le cœur envoie à l'interface l'état par image (`requestAnimationFrame`), jamais chaque événement.
 - Luminosité d'une LED en PWM = rapport cyclique mesuré sur l'image.
 - Écrans : redessinés uniquement si le framebuffer est marqué « modifié ».
-- Fenêtre masquée ou réduite : rendu arrêté (simulation continue ou en pause, au choix).
+- Fenêtre masquée ou réduite : rendu arrêté, la simulation continue.
 - Sur batterie : 30 images/s au lieu de 60.
 - Mode temps virtuel (plus tard) : plafonné à ×1 par défaut, accélération sur demande.
 
@@ -675,16 +686,28 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
 4. Enregistrer la clé privée et son mot de passe dans les secrets du dépôt public (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`).
 5. Ajouter la section `## [0.1.0]` au `CHANGELOG.md`, avec la mention « aperçu technique », et la version `0.1.0` dans `tauri.conf.json`.
 
-**Critère de passage** : un blinky STM32 HAL non modifié fait clignoter la LED, et le bouton déclenche `HAL_GPIO_EXTI_Callback`, sur Mac et Windows ; le projet `tests/cubemx-nucleo-f401re/` généré par STM32CubeMX compile tel quel pour la cible « sim » et s'exécute sans `Error_Handler`, sur Mac et Windows ; les deux latences d'aller-retour (cœur seul, puis cœur + Worker via le composant d'écho) sont mesurées sur Mac et Windows et rapportées (médiane, 99e centile), et la question de la section 8.1 est tranchée ; la chaîne de publication est validée de bout en bout par deux releases GitHub normales : v0.1.0 (`release.sh --dry-run` propre, commit et tag dans le dépôt public `prebench`, `release.yml` vert, `.dmg` et `.msi` installés et lancés sur Mac et Windows), puis v0.1.1 avec un changement minime, que l'app v0.1.0 installée propose et applique par son updater, sur Mac et Windows.
+**Critère de passage** (validé le 12 novembre 2026) :
+
+- [x] Un blinky STM32 HAL non modifié fait clignoter la LED, et le bouton déclenche `HAL_GPIO_EXTI_Callback`, sur Mac et Windows (test `blinky_led_and_button` en local sur Mac et en CI Windows et Linux ; app installée vérifiée par `release.yml` sur macOS et Windows).
+- [x] Le projet `tests/cubemx-nucleo-f401re/` généré par STM32CubeMX (6.18.1, FW_F4 V1.28.3, chaîne CMake) compile tel quel pour la cible « sim » et s'exécute sans `Error_Handler`, sur Mac et Windows : `CMakeLists.txt` généré reconnu, `system_stm32f4xx.c`, `syscalls.c` et `sysmem.c` exclus, startup et `.ld` ignorés (tests `test_cubemx` et `cubemx_generated_project`, en local sur Mac et en CI Windows et Linux).
+- [x] Les deux latences d'aller-retour (cœur seul, puis cœur + modèle via le composant d'écho) sont mesurées sur Mac et Windows et rapportées (médiane, 99e centile), et la question de la section 8.1 est tranchée (D5 : modèles dans QuickJS).
+- [x] La chaîne de publication est validée de bout en bout par deux releases GitHub normales : v0.1.0 (`release.sh --dry-run` propre, commit et tag dans le dépôt public `prebench`, `release.yml` vert, `.dmg` et `.msi` installés et lancés sur Mac et Windows), puis v0.1.1 avec un changement minime, que l'app v0.1.0 installée propose et applique par son updater, sur Mac et Windows.
 
 ### Phase 2 — Socle V1
 
-- Tests des vues dans un navigateur headless (Playwright), uniquement dans la CI Linux : montage réel des vues compilées à l'exécution (le test Node de la phase 1 ne vérifie que l'évaluation en module ES)
-- Surveillance du dossier, build « sim », erreurs cliquables, rechargement à chaud
-- Canevas édition / simulation, câblage assisté, réseau logique, onglet ⚠
-- Moniteur série (UART), traceur, inspecteur, reset et alim
-- Garde-fous ressources (section 11) et indicateur CPU / RAM
-- PWM et ADC (LED variable, servo, potentiomètre)
+Étapes livrables, dans l'ordre. Chacune est testée, committée et passe la CI (Windows + Linux) avant la suivante. Toute étape qui touche l'interface applique la charte `docs/design.md` et la maquette `docs/design/maquette-ecran-principal.html`. Tests manuels sous Windows à chaque release seulement : entre deux releases, la CI suffit.
+
+1. **CI et reports de la phase 1** : tests des vues dans un navigateur headless (Playwright), uniquement dans la CI Linux, avec montage réel des vues compilées à l'exécution (le test Node de la phase 1 ne vérifie que l'évaluation en module ES) ; captures de l'écran principal en thème clair et sombre publiées comme artefact de la CI ; rapport de `--verifier-installation` affiché une seule fois sur macOS.
+2. **Fondations visuelles** (étape 1 bis) : jetons CSS `--pb-*` clair et sombre (charte, section 2), thème du système ou choix manuel, squelette de l'écran (charte, section 4), composants de base (charte, section 5), jeu d'icônes au trait ; vues led, button, echo et bannière des prérequis sur ces fondations.
+3. **Garde-fous ressources** (étape 2, section 11.2) : plafond mémoire, cœurs économes, surveillance CPU à 1 Hz active uniquement pendant une simulation (0 % au repos), pause automatique annoncée par une bannière avec « Reprendre », sans dialogue bloquant ; indicateur CPU / RAM dans la barre d'état.
+4. **Cycle édition → simulation** (étape 3, section 10.2) : surveillance du dossier, build « sim », erreurs `fichier:ligne` cliquables dans le panneau du bas, rechargement à chaud.
+5. **Débogage** (étape 3 bis, section 10.2) : génération du `launch.json` (lldb sur Mac, gdb sous Windows), paillasse figée quand le débogueur s'arrête sur un point d'arrêt. → **release v0.1.2**
+6. **Canevas** (étape 4) : tapis ESD, carte à plat, modes Édition / Simulation en contrôle segmenté, câblage assisté, fils colorés selon la fonction (modifiables), câblage enregistré dans `prebench.toml`, coalescence du rendu par image (section 11.3).
+7. **Réseau logique et onglet Avertissements** (étape 5, section 9) : états des nets doublés d'un mot ou d'une forme, pastille de comptage.
+8. **Moniteur série (UART) et traceur** (étape 6) : shim `HAL_UART_*`, `printf`, onglets par UART, horodatage, hexa, export, alerte de débit, traceur `clé:valeur`. → **release v0.1.3**
+9. **Inspecteur de broche, reset et coupure d'alimentation** (étape 7).
+10. **PWM et ADC** (étape 8) : LED variable, servo, potentiomètre, buzzer, LED RGB.
+11. **Critère de passage** (étape 9) : mesure des budgets de la section 11.1 sur Mac et Windows. → **release v0.2.0**
 
 **Critère de passage** : budgets de la section 11.1 respectés ; un firmware en `while(1)` sans délai ne dépasse pas le plafond.
 
@@ -694,6 +717,7 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
 - SPI + TFT ILI9341 via mémoire partagée
 - WS2812 via shim de bibliothèque
 - Jauge mémoire de la vraie cible ; export de la liste de câblage
+- Palette de commandes `Cmd/Ctrl+K` (section 10.6) et panneau environnement (section 8.5), reportés de la phase 2
 
 **Critère de passage** : les dix composants du catalogue initial (8.4) fonctionnent.
 
@@ -721,7 +745,6 @@ Ensuite, selon les besoins : BLE GATT, veille, temps virtuel et modèles physiqu
 Ces points ne sont pas encore tranchés.
 
 - **Licence de wokwi-elements** : à vérifier avant réutilisation des visuels (MIT supposée).
-- **Simulation quand la fenêtre est masquée** : continuer ou mettre en pause par défaut.
 - **Nom « prebench »** : disponibilité sur GitHub à vérifier avant de créer le dépôt public.
 - **Notarisation Apple et certificat Windows** : à quel moment les financer.
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resume-simulation"
+description = "Enables the resume_simulation command without any pre-configured scope."
+commands.allow = ["resume_simulation"]
+
+[[permission]]
+identifier = "deny-resume-simulation"
+description = "Denies the resume_simulation command without any pre-configured scope."
+commands.deny = ["resume_simulation"]

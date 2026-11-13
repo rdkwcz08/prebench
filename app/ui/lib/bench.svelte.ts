@@ -8,15 +8,21 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type {
+  BuildResultEvent,
   ComponentInfo,
+  DebugView,
+  Diagnostic,
+  GuardEvent,
   InstanceInfo,
   LogEvent,
   Prerequisites,
+  ProjectChangedEvent,
   ProjectView,
   SimState,
   StatesEvent,
   StatusEvent,
   TemplateInfo,
+  UsageEvent,
   WarnEvent,
 } from './types';
 import { loadView, type ViewComponent } from './views';
@@ -62,6 +68,14 @@ export class Bench {
   logs = $state<LogLine[]>([]);
   warnings = $state<string[]>([]);
   prerequisites = $state<Prerequisites | null>(null);
+  /** Dernière mesure du firmware ; null hors simulation. */
+  usage = $state<UsageEvent | null>(null);
+  /** Build en cours, puis résultat du dernier build (onglet Build). */
+  build = $state<{ running: boolean; result: BuildResultEvent | null }>({ running: false, result: null });
+  /** Session de débogage en cours de préparation ou ouverte ; null sinon. */
+  debug = $state<DebugView | null>(null);
+  /** Dernière intervention d'un garde-fou, affichée en bannière. */
+  guard = $state<GuardEvent | null>(null);
   private pending: StatesEvent = {};
   private frameRequested = false;
 
@@ -69,7 +83,24 @@ export class Bench {
     await listen<StatesEvent>('sim:states', (e) => this.onStates(e.payload));
     await listen<StatusEvent>('sim:status', (e) => {
       this.status = e.payload;
+      const s = e.payload.state;
+      if (s !== 'running' && s !== 'paused' && s !== 'breakpoint') this.usage = null;
+      if (s === 'stopped' || s === 'error' || s === 'idle') this.debug = null;
+      if (s === 'running' && this.guard?.kind === 'cpu') this.guard = null;
     });
+    await listen<UsageEvent>('sim:usage', (e) => {
+      this.usage = e.payload;
+    });
+    await listen<GuardEvent>('sim:guard', (e) => {
+      this.guard = e.payload;
+    });
+    await listen<{ state: 'building' }>('build:state', () => {
+      this.build.running = true;
+    });
+    await listen<BuildResultEvent>('build:result', (e) => {
+      this.build = { running: false, result: e.payload };
+    });
+    await listen<ProjectChangedEvent>('project:changed', () => void this.refresh());
     await listen<LogEvent>('sim:log', (e) => this.log(e.payload.source, e.payload.text));
     await listen<WarnEvent>('sim:warn', (e) => this.warn(e.payload.text));
   }
@@ -80,7 +111,7 @@ export class Bench {
       const p = await invoke<Prerequisites>('check_prerequisites');
       this.prerequisites = p;
       for (const t of p.tools) {
-        this.log('prebench', t.path === null ? `❌ ${t.label} introuvable` : `✅ ${t.label} : ${t.path}`);
+        this.log('prebench', t.path === null ? `${t.label} introuvable` : `${t.label} : ${t.path}`);
       }
     } catch (e) {
       this.log('prebench', String(e));
@@ -105,7 +136,8 @@ export class Bench {
     const project = await invoke<ProjectView>('open_project', { path });
     let onboardIndex = 0;
     const instances = project.instances.map((spec) => {
-      const pos: [number, number] = spec.pos ?? [90 + onboardIndex++ * 110, 130];
+      // Composants intégrés : posés en rangée en haut de la carte (Board.svelte).
+      const pos: [number, number] = spec.pos ?? [60 + onboardIndex++ * 112, 72];
       return new Instance(spec, project.components[spec.type], pos);
     });
     this.project = project;
@@ -116,6 +148,48 @@ export class Bench {
     for (const inst of instances) void this.compileView(inst);
   }
 
+  /**
+   * Relit le projet après une modification dans l'éditeur (vue, modèle,
+   * prebench.toml) : les vues sont recompilées, l'état des composants restants
+   * est conservé jusqu'à la prochaine image du cœur.
+   */
+  async refresh(): Promise<void> {
+    if (this.project === null) return;
+    let project: ProjectView;
+    try {
+      project = await invoke<ProjectView>('open_project', { path: this.project.path });
+    } catch (e) {
+      this.warn(`Projet illisible après modification : ${String(e)}`);
+      return;
+    }
+    const previous = new Map(this.instances.map((i) => [i.id, i]));
+    let onboardIndex = 0;
+    const instances = project.instances.map((spec) => {
+      const pos: [number, number] = spec.pos ?? [60 + onboardIndex++ * 112, 72];
+      const inst = new Instance(spec, project.components[spec.type], pos);
+      const old = previous.get(spec.id);
+      if (old !== undefined && old.type === spec.type) {
+        inst.state = old.state;
+        inst.view = old.view; // remplacée dès la nouvelle vue compilée
+      }
+      return inst;
+    });
+    this.project = project;
+    this.instances = instances;
+    for (const w of project.warnings) this.warn(w);
+    for (const inst of instances) void this.compileView(inst);
+  }
+
+  /** Ouvre l'emplacement d'une erreur dans l'éditeur de l'utilisateur. */
+  async openInEditor(d: Diagnostic): Promise<void> {
+    if (d.file === null) return;
+    try {
+      await invoke('open_in_editor', { file: d.file, line: d.line, column: d.column });
+    } catch (e) {
+      this.log('prebench', String(e));
+    }
+  }
+
   private async compileView(inst: Instance): Promise<void> {
     const source = inst.info?.view_source;
     if (source === null || source === undefined) {
@@ -124,15 +198,18 @@ export class Bench {
     }
     try {
       inst.view = await loadView(inst.type, source);
+      inst.viewError = '';
     } catch (e) {
+      inst.view = null;
       inst.viewError = String(e);
-      this.warn(`vue du composant ${inst.type} : ${String(e)} — vue de repli utilisée`);
+      this.warn(`Vue du composant ${inst.type} inutilisable, vue simplifiée affichée : ${String(e)}`);
     }
   }
 
   async start(): Promise<void> {
     if (this.project === null) return;
     this.logs = [];
+    this.guard = null;
     try {
       await invoke('start_simulation', { path: this.project.path });
     } catch (e) {
@@ -141,8 +218,30 @@ export class Bench {
     }
   }
 
+  /** Prépare une session de débogage : build, launch.json, attente de VS Code. */
+  async startDebug(): Promise<void> {
+    if (this.project === null) return;
+    this.logs = [];
+    this.guard = null;
+    try {
+      this.debug = await invoke<DebugView>('start_debug', { path: this.project.path });
+    } catch (e) {
+      this.debug = null;
+      this.status = { state: 'error', message: String(e) };
+      this.log('prebench', String(e));
+    }
+  }
+
   async stop(): Promise<void> {
     await invoke('stop_simulation').catch((e: unknown) => this.log('prebench', String(e)));
+  }
+
+  async pause(): Promise<void> {
+    await invoke('pause_simulation').catch((e: unknown) => this.log('prebench', String(e)));
+  }
+
+  async resume(): Promise<void> {
+    await invoke('resume_simulation').catch((e: unknown) => this.log('prebench', String(e)));
   }
 
   async reset(): Promise<void> {

@@ -61,3 +61,6 @@ python3 .github/scripts/validate_contracts.py      # nécessite jsonschema
 # Modèles de composants (TypeScript strict)
 npx -p typescript@5.6.3 tsc -p components/tsconfig.json
 ```
+## Interface et design
+
+Avant toute modification de l'interface (app/ui, vues des composants, icônes, couleurs, textes affichés), utilise le skill `prebench-design` : il impose la charte `docs/design.md` et la maquette `docs/design/maquette-ecran-principal.html`. Aucune couleur, taille ou espacement hors charte ; les deux thèmes doivent fonctionner.

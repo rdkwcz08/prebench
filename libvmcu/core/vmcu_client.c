@@ -6,7 +6,12 @@
  * - E/S     : lit le canal, complète les transactions, alimente caches et file IRQ ;
  * - IRQ     : exécute les callbacks, un à la fois, verrou d'interruption tenu ;
  * - vidage  : envoie le lot au plus 1 ms après sa première trame ; il dort
- *             sans délai quand le lot est vide (aucune activité au repos).
+ *             sans délai quand le lot est vide (aucune activité au repos) ;
+ * - débogage : seulement si PREBENCH_DEBUG=1 (firmware lancé par le débogueur,
+ *             protocole 1.1) : lit l'horloge toutes les 100 ms et envoie
+ *             HEARTBEAT toutes les 200 ms ; le temps où tout le processus
+ *             était figé (point d'arrêt) est retiré de l'horloge par le
+ *             premier fil qui la lit ensuite (vmcu_time.c) : aucun saut.
  *
  * Ordre des verrous : send_mx -> sync_mx. Le fil E/S ne prend jamais send_mx
  * en tenant sync_mx.
@@ -25,6 +30,8 @@
 #define CONNECT_TIMEOUT_NS 5000000000ull
 #define FLUSH_DELAY_NS    1000000ull
 #define DEFAULT_SYNC_TIMEOUT_MS 1000u
+#define DEBUG_TICK_NS     100000000ull /* réveil du fil de débogage */
+#define DEBUG_FROZEN_NS   250000000ull /* écart entre deux lectures : processus figé */
 
 enum { STATE_NONE = 0, STATE_STARTING = 1, STATE_READY = 2, STATE_CLOSED = 3 };
 
@@ -79,6 +86,8 @@ static struct {
     vmcu_plat_thread_t *io_thread;
     vmcu_plat_thread_t *irq_thread;
     vmcu_plat_thread_t *flush_thread;
+    vmcu_plat_thread_t *debug_thread;
+    uint8_t            proto_minor; /* mineure retenue à la poignée de main */
 
     uint8_t unknown_seen[8192]; /* types inconnus déjà journalisés (1 bit par type) */
 } g;
@@ -547,7 +556,7 @@ static void handshake(const char *board, const char *framework)
         die(VMCU_EXIT_PROTOCOL, "réponse inattendue à la poignée de main");
     }
     uint8_t major = vmcu_rbuf_u8(&r);
-    (void)vmcu_rbuf_u8(&r); /* mineure retenue */
+    g.proto_minor = vmcu_rbuf_u8(&r); /* mineure retenue */
     g.adc_bits = vmcu_rbuf_u8(&r);
     (void)vmcu_rbuf_u8(&r);
     uint32_t timeout = vmcu_rbuf_u32(&r);
@@ -555,6 +564,29 @@ static void handshake(const char *board, const char *framework)
         die(VMCU_EXIT_PROTOCOL, "version de protocole incompatible avec l'app");
     }
     g.sync_timeout_ms = (timeout != 0) ? timeout : DEFAULT_SYNC_TIMEOUT_MS;
+}
+
+/* Fil de débogage : un débogueur fige tous les fils ; au réveil suivant, le
+ * retard anormal est retiré de l'horloge, et l'absence de HEARTBEAT pendant
+ * l'arrêt permet à l'app d'afficher « Arrêté sur un point d'arrêt ». */
+static void debug_main(void *arg)
+{
+    (void)arg;
+    unsigned ticks = 0;
+    vmcu__time_watch_start(DEBUG_TICK_NS, DEBUG_FROZEN_NS);
+    while (!atomic_load(&g.closing) && atomic_load(&g.state) == STATE_READY) {
+        vmcu_plat_sleep_ns(DEBUG_TICK_NS);
+        bool frozen = vmcu__time_watch_tick();
+        if ((++ticks & 1u) == 0 || frozen) {
+            (void)vmcu__send(VMCU_MSG_HEARTBEAT, NULL, 0);
+        }
+    }
+}
+
+static bool debug_requested(void)
+{
+    const char *v = getenv("PREBENCH_DEBUG");
+    return v != NULL && strcmp(v, "1") == 0;
 }
 
 vmcu_status_t vmcu_init(const char *board, const char *framework)
@@ -594,6 +626,9 @@ vmcu_status_t vmcu_init(const char *board, const char *framework)
 
     handshake(board, framework);
     atomic_store(&g.state, STATE_READY);
+    if (debug_requested() && g.proto_minor >= 1) {
+        g.debug_thread = vmcu_plat_thread_start(debug_main, NULL);
+    }
 
     char priority[128];
     vmcu_plat_priority(priority, sizeof priority);
@@ -627,6 +662,10 @@ void vmcu_shutdown(void)
     vmcu_plat_mutex_unlock(g.send_mx);
     vmcu_plat_thread_join(g.flush_thread);
     g.flush_thread = NULL;
+    if (g.debug_thread != NULL) {
+        vmcu_plat_thread_join(g.debug_thread); /* se termine au réveil suivant */
+        g.debug_thread = NULL;
+    }
 
     vmcu_plat_mutex_lock(g.irq_q_mx);
     g.irq_stop = true;

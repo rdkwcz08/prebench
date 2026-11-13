@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prebench — maquette de l'écran principal</title>
+<style>
+/* Jetons : voir docs/design.md, section 2 */
+:root, [data-theme="dark"] {
+  --pb-chrome: #1E2124;
+  --pb-panel: #25292D;
+  --pb-line: #383D42;
+  --pb-text: #E3E5E2;
+  --pb-text-quiet: #98A1A6;
+  --pb-accent: #3FA7D6;
+  --pb-on-accent: #10202A;
+  --pb-mat: #2C454C;
+  --pb-mat-grid: #365560;
+  --pb-mat-ink: #C9D8DB;
+  --pb-high: #E6B422;
+  --pb-low: #6B7B84;
+  --pb-conflict: #E5484D;
+  --pb-warn: #E79A3C;
+  --pb-ok: #4CB782;
+  --pb-gnd-outline: #8D9499;
+  color-scheme: dark;
+}
+[data-theme="light"] {
+  --pb-chrome: #E9EAE7;
+  --pb-panel: #F6F6F4;
+  --pb-line: #C9CDCB;
+  --pb-text: #1E2124;
+  --pb-text-quiet: #5D666B;
+  --pb-accent: #1C77A6;
+  --pb-on-accent: #FFFFFF;
+  --pb-mat: #B9CDD0;
+  --pb-mat-grid: #A6BEC2;
+  --pb-mat-ink: #22383E;
+  --pb-high: #9A7300;
+  --pb-low: #6B7B84;
+  --pb-conflict: #C62828;
+  --pb-warn: #A85B00;
+  --pb-ok: #1F7A4D;
+  --pb-gnd-outline: #2A2A2A;
+  color-scheme: light;
+}
+:root {
+  --pb-board: #1F3B5C;
+  --pb-copper: #B87333;
+  --pb-silk: #E8ECEF;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-data: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  font: 400 13px/1.4 var(--font-ui);
+  color: var(--pb-text);
+  background: var(--pb-chrome);
+  display: grid;
+  grid-template-rows: 40px 1fr 220px 24px;
+  grid-template-columns: 1fr 280px;
+  grid-template-areas:
+    "toolbar toolbar"
+    "bench inspector"
+    "dock dock"
+    "status status";
+  min-width: 960px;
+  min-height: 600px;
+  -webkit-font-smoothing: antialiased;
+}
+.data { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--pb-accent); outline-offset: 1px; }
+svg.icon { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+/* Barre d'outils */
+.toolbar {
+  grid-area: toolbar;
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--pb-line);
+}
+.group { display: flex; align-items: center; gap: 4px; }
+.sep { width: 1px; height: 20px; background: var(--pb-line); margin: 0 4px; }
+.spacer { flex: 1; }
+.btn {
+  height: 28px; padding: 0 10px;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--pb-line); border-radius: 3px;
+  background: transparent; cursor: pointer;
+}
+.btn:hover { background: color-mix(in srgb, var(--pb-text) 6%, transparent); }
+.btn.primary { background: var(--pb-accent); border-color: var(--pb-accent); color: var(--pb-on-accent); font-weight: 600; }
+.btn.primary:hover { background: color-mix(in srgb, var(--pb-accent) 88%, var(--pb-text)); }
+.btn.icon-only { width: 28px; padding: 0; justify-content: center; border-color: transparent; }
+.btn.icon-only:hover { border-color: var(--pb-line); }
+.picker {
+  height: 28px; padding: 0 8px;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid transparent; border-radius: 3px; background: transparent; cursor: pointer;
+}
+.picker:hover { border-color: var(--pb-line); }
+.picker .quiet { color: var(--pb-text-quiet); }
+.segmented { display: inline-flex; border: 1px solid var(--pb-line); border-radius: 3px; overflow: hidden; height: 28px; }
+.segmented button { border: 0; background: transparent; padding: 0 10px; cursor: pointer; color: var(--pb-text-quiet); }
+.segmented button[aria-pressed="true"] { background: color-mix(in srgb, var(--pb-accent) 18%, transparent); color: var(--pb-text); font-weight: 600; }
+.segmented button + button { border-left: 1px solid var(--pb-line); }
+.speed { height: 28px; border: 1px solid var(--pb-line); border-radius: 3px; background: transparent; padding: 0 6px; }
+
+/* Paillasse */
+.bench {
+  grid-area: bench;
+  position: relative;
+  overflow: hidden;
+  background-color: var(--pb-mat);
+  background-image:
+    linear-gradient(var(--pb-mat-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--pb-mat-grid) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.bench svg.scene { position: absolute; inset: 0; width: 100%; height: 100%; }
+.mat-ink { fill: var(--pb-mat-ink); font: 600 12px var(--font-ui); }
+.mat-ink-quiet { fill: var(--pb-mat-ink); opacity: .75; font: 400 11px var(--font-data); }
+.silk { fill: var(--pb-silk); font: 600 8px var(--font-data); }
+.silk-label { fill: var(--pb-silk); font: 600 11px var(--font-ui); }
+.pad { fill: var(--pb-copper); }
+.pin-selected { fill: none; stroke: var(--pb-accent); stroke-width: 2; }
+.led-glow { opacity: 0; transition: opacity 80ms; }
+.lit .led-glow { opacity: 1; }
+.lit .led-dome { fill: var(--led-on); }
+.led-dome { fill: var(--led-off); transition: fill 80ms; }
+.wire-gnd-outline { stroke: var(--pb-gnd-outline); }
+.b1 { cursor: pointer; }
+.b1:hover .b1-cap { fill: #3F7DD6; }
+.bench-hint {
+  position: absolute; left: 12px; bottom: 10px;
+  color: var(--pb-mat-ink); font-size: 12px; opacity: .85;
+}
+
+/* Inspecteur */
+.inspector {
+  grid-area: inspector;
+  background: var(--pb-panel);
+  border-left: 1px solid var(--pb-line);
+  overflow: auto;
+}
+.insp-head { padding: 12px 12px 8px; border-bottom: 1px solid var(--pb-line); }
+.insp-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.insp-head p { margin: 2px 0 0; color: var(--pb-text-quiet); font-size: 12px; }
+.insp-section { padding: 8px 12px 12px; border-bottom: 1px solid var(--pb-line); }
+.insp-section h3 { margin: 4px 0 6px; font-size: 13px; font-weight: 600; }
+.props { margin: 0; display: grid; grid-template-columns: auto 1fr; }
+.props dt { color: var(--pb-text-quiet); line-height: 24px; }
+.props dd { margin: 0; line-height: 24px; text-align: right; }
+.state-pill {
+  display: inline-block; padding: 0 8px; line-height: 20px; border-radius: 3px;
+  font: 600 12px var(--font-ui);
+}
+.state-pill.high { color: var(--pb-high); background: color-mix(in srgb, var(--pb-high) 15%, transparent); }
+.state-pill.low { color: var(--pb-low); background: color-mix(in srgb, var(--pb-low) 15%, transparent); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
+
+/* Panneau du bas */
+.dock {
+  grid-area: dock;
+  display: grid; grid-template-rows: 32px 1fr 40px;
+  border-top: 1px solid var(--pb-line);
+  background: var(--pb-panel);
+  min-height: 0;
+}
+.tabs { display: flex; align-items: stretch; gap: 4px; padding: 0 8px; border-bottom: 1px solid var(--pb-line); background: var(--pb-chrome); }
+.tab {
+  border: 0; background: transparent; padding: 0 10px; cursor: pointer;
+  color: var(--pb-text-quiet); border-bottom: 2px solid transparent; margin-bottom: -1px;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.tab[aria-selected="true"] { color: var(--pb-text); border-bottom-color: var(--pb-accent); font-weight: 600; }
+.badge {
+  min-width: 18px; padding: 0 5px; line-height: 16px; border-radius: 8px; font-size: 11px; font-weight: 600;
+  color: var(--pb-warn); background: color-mix(in srgb, var(--pb-warn) 18%, transparent); text-align: center;
+}
+.tab-tools { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.port { height: 24px; border: 1px solid var(--pb-line); border-radius: 3px; background: transparent; padding: 0 6px; font-size: 12px; }
+.log { overflow: auto; padding: 6px 12px; font: 12px/20px var(--font-data); font-variant-numeric: tabular-nums; }
+.log .t { color: var(--pb-text-quiet); margin-right: 16px; }
+.log .sys { color: var(--pb-text-quiet); }
+.send { display: flex; gap: 8px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--pb-line); }
+.send input {
+  flex: 1; height: 28px; padding: 0 8px; border: 1px solid var(--pb-line); border-radius: 3px; background: var(--pb-chrome);
+  font-family: var(--font-data); font-size: 12px;
+}
+.send input:focus { outline: 2px solid var(--pb-accent); outline-offset: -1px; border-color: transparent; }
+
+/* Barre d'état */
+.status {
+  grid-area: status;
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 12px; font-size: 11px; color: var(--pb-text-quiet);
+  border-top: 1px solid var(--pb-line);
+}
+.status .run { display: inline-flex; align-items: center; gap: 6px; color: var(--pb-text); }
+.status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pb-ok); }
+.status .paused .dot { background: var(--pb-warn); }
+.status .right { margin-left: auto; display: flex; gap: 16px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .led-glow, .led-dome { transition: none; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.5v9l7-4.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 16 16"><path d="M5.5 3.5v9M10.5 3.5v9"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 16 16"><path d="M3.5 8a4.5 4.5 0 1 0 1.3-3.2"/><path d="M3.5 2.5v2.8h2.8"/></symbol>
+  <symbol id="i-power" viewBox="0 0 16 16"><path d="M8 2.5v5"/><path d="M4.8 4.6a4.8 4.8 0 1 0 6.4 0"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="M5 6.5l3 3 3-3"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5"/><path d="M8 3v10a5 5 0 0 0 0-10z" fill="currentColor"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1.5"/></symbol>
+  <symbol id="i-hex" viewBox="0 0 16 16"><path d="M3 5.5h10M3 10.5h10M6 3l-1 10M11 3l-1 10"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.6 8h4.8l.6-8"/></symbol>
+  <symbol id="i-export" viewBox="0 0 16 16"><path d="M8 2.5v7M5 6.5l3 3 3-3M3.5 11v2h9v-2"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2.5l6 10.5H2z"/><path d="M8 6.5v3M8 11.2v.1"/></symbol>
+  <symbol id="i-chip" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1"/><path d="M6 2v2M10 2v2M6 12v2M10 12v2M2 6h2M2 10h2M12 6h2M12 10h2"/></symbol>
+</svg>
+
+<header class="toolbar">
+  <div class="group">
+    <button class="picker" title="Changer de projet">
+      <svg class="icon"><use href="#i-chip"/></svg>
+      <span>blinky-stm32-hal</span>
+      <svg class="icon"><use href="#i-chev"/></svg>
+    </button>
+    <button class="picker" title="Changer de carte">
+      <span class="quiet">Carte</span><span>Nucleo-F401RE</span>
+      <svg class="icon"><use href="#i-chev"/></svg>
+    </button>
+  </div>
+  <div class="sep"></div>
+  <div class="group">
+    <button class="btn primary" id="run" title="Mettre en pause (Espace)">
+      <svg class="icon"><use href="#i-pause" id="run-icon"/></svg><span id="run-label">Mettre en pause</span>
+    </button>
+    <button class="btn icon-only" title="Réinitialiser (R)" id="reset"><svg class="icon"><use href="#i-reset"/></svg></button>
+    <button class="btn icon-only" title="Couper l'alimentation"><svg class="icon"><use href="#i-power"/></svg></button>
+    <select class="speed" title="Vitesse de simulation"><option>×1</option><option>×2</option><option>×10</option></select>
+  </div>
+  <div class="sep"></div>
+  <div class="segmented" role="group" aria-label="Mode">
+    <button aria-pressed="false" id="mode-edit" title="Mode édition (E)">Édition</button>
+    <button aria-pressed="true" id="mode-sim">Simulation</button>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn" title="Ajouter un composant"><svg class="icon"><use href="#i-plus"/></svg>Ajouter un composant</button>
+  <button class="btn icon-only" id="theme" title="Basculer le thème clair ou sombre"><svg class="icon"><use href="#i-theme"/></svg></button>
+</header>
+
+<main class="bench" aria-label="Paillasse">
+  <svg class="scene" viewBox="0 0 900 490" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Carte Nucleo-F401RE câblée à une LED et un potentiomètre">
+    <defs>
+      <radialGradient id="glow-green"><stop offset="0" stop-color="#7CFFB0" stop-opacity=".9"/><stop offset="1" stop-color="#7CFFB0" stop-opacity="0"/></radialGradient>
+      <radialGradient id="glow-red"><stop offset="0" stop-color="#FF6A5C" stop-opacity=".85"/><stop offset="1" stop-color="#FF6A5C" stop-opacity="0"/></radialGradient>
+    </defs>
+
+    <!-- Fils (dessinés sous la carte et les composants) -->
+    <g fill="none" stroke-linecap="round">
+      <!-- D13 / PA5 vers l'anode de LED1 : signal numérique, jaune -->
+      <path d="M576 204 C 640 204, 650 270, 706 262" stroke="#8C7420" stroke-width="6"/>
+      <path d="M576 204 C 640 204, 650 270, 706 262" stroke="#E8C33A" stroke-width="4"/>
+      <!-- GND vers la cathode de LED1 : masse, noir -->
+      <path d="M576 188 C 660 182, 700 296, 718 266" class="wire-gnd-outline" stroke-width="6"/>
+      <path d="M576 188 C 660 182, 700 296, 718 266" stroke="#2A2A2A" stroke-width="4"/>
+      <!-- 3V3 vers POT1 : alimentation, rouge -->
+      <path d="M284 218 C 220 218, 200 368, 156 360" stroke="#8E2A24" stroke-width="6"/>
+      <path d="M284 218 C 220 218, 200 368, 156 360" stroke="#D9453B" stroke-width="4"/>
+      <!-- GND vers POT1 -->
+      <path d="M284 250 C 200 256, 170 392, 124 360" class="wire-gnd-outline" stroke-width="6"/>
+      <path d="M284 250 C 200 256, 170 392, 124 360" stroke="#2A2A2A" stroke-width="4"/>
+      <!-- A0 vers le curseur de POT1 : analogique, vert -->
+      <path d="M284 310 C 230 312, 190 380, 140 360" stroke="#235C36" stroke-width="6"/>
+      <path d="M284 310 C 230 312, 190 380, 140 360" stroke="#3E9B5C" stroke-width="4"/>
+    </g>
+
+    <!-- Carte -->
+    <g>
+      <rect x="290" y="44" width="280" height="418" rx="10" fill="var(--pb-board)"/>
+      <rect x="290" y="44" width="280" height="418" rx="10" fill="none" stroke="#162C45" stroke-width="2"/>
+      <!-- trous de fixation -->
+      <circle cx="306" cy="60" r="5" fill="none" stroke="var(--pb-copper)" stroke-width="2"/>
+      <circle cx="554" cy="60" r="5" fill="none" stroke="var(--pb-copper)" stroke-width="2"/>
+      <circle cx="306" cy="446" r="5" fill="none" stroke="var(--pb-copper)" stroke-width="2"/>
+      <circle cx="540" cy="446" r="5" fill="none" stroke="var(--pb-copper)" stroke-width="2"/>
+      <!-- partie programmeur -->
+      <rect x="300" y="44" width="260" height="70" fill="#183150"/>
+      <rect x="410" y="34" width="40" height="22" rx="2" fill="#9AA4AC"/>
+      <rect x="414" y="38" width="32" height="10" rx="1" fill="#5D666B"/>
+      <text x="320" y="96" class="silk">PROGRAMMEUR</text>
+      <line x1="300" y1="114" x2="560" y2="114" stroke="var(--pb-silk)" stroke-width="1" stroke-dasharray="4 3" opacity=".6"/>
+
+      <!-- microcontrôleur -->
+      <rect x="390" y="230" width="80" height="80" rx="3" fill="#1A1C1E"/>
+      <circle cx="398" cy="238" r="2.5" fill="#3A3D40"/>
+      <text x="430" y="274" text-anchor="middle" class="silk" font-size="9">STM32F401RE</text>
+      <g stroke="#9AA4AC" stroke-width="1.5">
+        <path d="M398 226v4M408 226v4M418 226v4M428 226v4M438 226v4M448 226v4M458 226v4"/>
+        <path d="M398 310v4M408 310v4M418 310v4M428 310v4M438 310v4M448 310v4M458 310v4"/>
+        <path d="M386 238h4M386 248h4M386 258h4M386 268h4M386 278h4M386 288h4M386 298h4"/>
+        <path d="M470 238h4M470 248h4M470 258h4M470 268h4M470 278h4M470 288h4M470 298h4"/>
+      </g>
+
+      <!-- LD2 (PA5) -->
+      <g id="ld2" class="lit" style="--led-on:#5CF59A;--led-off:#2F5E44">
+        <circle cx="500" cy="156" r="16" fill="url(#glow-green)" class="led-glow"/>
+        <rect x="494" y="152" width="12" height="8" rx="1" class="led-dome"/>
+        <text x="488" y="160" text-anchor="end" class="silk-label">LD2</text>
+      </g>
+
+      <!-- B1 (PC13) et reset -->
+      <g class="b1" id="b1" role="button" tabindex="0" aria-label="Appuyer sur B1">
+        <rect x="346" y="140" width="34" height="34" rx="3" fill="#C7CCD0"/>
+        <circle cx="363" cy="157" r="11" fill="#2E5FA8" class="b1-cap"/>
+        <text x="363" y="190" text-anchor="middle" class="silk-label">B1</text>
+      </g>
+      <g>
+        <rect x="390" y="140" width="34" height="34" rx="3" fill="#C7CCD0"/>
+        <circle cx="407" cy="157" r="11" fill="#1A1C1E"/>
+        <text x="407" y="190" text-anchor="middle" class="silk-label">RESET</text>
+      </g>
+
+      <text x="430" y="432" text-anchor="middle" class="silk-label">NUCLEO-F401RE</text>
+
+      <!-- Connecteur gauche : alimentation puis analogiques, pas de 16 -->
+      <rect x="294" y="162" width="12" height="130" rx="1" fill="#141618"/>
+      <rect x="294" y="302" width="12" height="96" rx="1" fill="#141618"/>
+      <g class="pad">
+        <rect x="297" y="167" width="6" height="6"/>
+        <rect x="297" y="183" width="6" height="6"/>
+        <rect x="297" y="199" width="6" height="6"/>
+        <rect x="297" y="215" width="6" height="6"/>
+        <rect x="297" y="231" width="6" height="6"/>
+        <rect x="297" y="247" width="6" height="6"/>
+        <rect x="297" y="263" width="6" height="6"/>
+        <rect x="297" y="279" width="6" height="6"/>
+        <rect x="297" y="307" width="6" height="6"/>
+        <rect x="297" y="323" width="6" height="6"/>
+        <rect x="297" y="339" width="6" height="6"/>
+        <rect x="297" y="355" width="6" height="6"/>
+        <rect x="297" y="371" width="6" height="6"/>
+        <rect x="297" y="387" width="6" height="6"/>
+      </g>
+      <g class="silk" text-anchor="start">
+        <text x="312" y="174">NC</text>
+        <text x="312" y="190">IOREF</text>
+        <text x="312" y="206">RESET</text>
+        <text x="312" y="222">3V3</text>
+        <text x="312" y="238">5V</text>
+        <text x="312" y="254">GND</text>
+        <text x="312" y="270">GND</text>
+        <text x="312" y="286">VIN</text>
+        <text x="312" y="314">A0</text>
+        <text x="312" y="330">A1</text>
+        <text x="312" y="346">A2</text>
+        <text x="312" y="362">A3</text>
+        <text x="312" y="378">A4</text>
+        <text x="312" y="394">A5</text>
+      </g>
+
+      <!-- Connecteur droit : numériques, pas de 16 -->
+      <rect x="554" y="132" width="12" height="162" rx="1" fill="#141618"/>
+      <rect x="554" y="306" width="12" height="124" rx="1" fill="#141618"/>
+      <g class="pad">
+        <rect x="557" y="137" width="6" height="6"/>
+        <rect x="557" y="153" width="6" height="6"/>
+        <rect x="557" y="169" width="6" height="6"/>
+        <rect x="557" y="185" width="6" height="6"/>
+        <rect x="557" y="201" width="6" height="6"/>
+        <rect x="557" y="217" width="6" height="6"/>
+        <rect x="557" y="233" width="6" height="6"/>
+        <rect x="557" y="249" width="6" height="6"/>
+        <rect x="557" y="265" width="6" height="6"/>
+        <rect x="557" y="281" width="6" height="6"/>
+        <rect x="557" y="311" width="6" height="6"/>
+        <rect x="557" y="327" width="6" height="6"/>
+        <rect x="557" y="343" width="6" height="6"/>
+        <rect x="557" y="359" width="6" height="6"/>
+        <rect x="557" y="375" width="6" height="6"/>
+        <rect x="557" y="391" width="6" height="6"/>
+        <rect x="557" y="407" width="6" height="6"/>
+        <rect x="557" y="423" width="6" height="6"/>
+      </g>
+      <g class="silk" text-anchor="end">
+        <text x="550" y="144">D15</text>
+        <text x="550" y="160">D14</text>
+        <text x="550" y="176">AVDD</text>
+        <text x="550" y="192">GND</text>
+        <text x="550" y="208">D13</text>
+        <text x="550" y="224">D12</text>
+        <text x="550" y="240">D11</text>
+        <text x="550" y="256">D10</text>
+        <text x="550" y="272">D9</text>
+        <text x="550" y="288">D8</text>
+        <text x="550" y="318">D7</text>
+        <text x="550" y="334">D6</text>
+        <text x="550" y="350">D5</text>
+        <text x="550" y="366">D4</text>
+        <text x="550" y="382">D3</text>
+        <text x="550" y="398">D2</text>
+        <text x="550" y="414">D1</text>
+        <text x="550" y="430">D0</text>
+      </g>
+      <!-- broche sélectionnée : D13 / PA5 -->
+      <rect x="553" y="197" width="14" height="14" rx="2" class="pin-selected"/>
+      <!-- embouts Dupont -->
+      <g fill="#1A1C1E">
+        <rect x="566" y="199" width="10" height="10" rx="1"/><rect x="566" y="183" width="10" height="10" rx="1"/>
+        <rect x="284" y="213" width="10" height="10" rx="1"/><rect x="284" y="245" width="10" height="10" rx="1"/>
+        <rect x="284" y="305" width="10" height="10" rx="1"/>
+      </g>
+    </g>
+
+    <!-- LED1 -->
+    <g id="led1" class="lit" style="--led-on:#FF5A4A;--led-off:#6E2A26">
+      <circle cx="712" cy="214" r="26" fill="url(#glow-red)" class="led-glow"/>
+      <path d="M706 226v36M718 226v40" stroke="#B9C0C5" stroke-width="2"/>
+      <circle cx="712" cy="214" r="13" class="led-dome"/>
+      <circle cx="707" cy="209" r="3.5" fill="#fff" opacity=".35"/>
+      <text x="740" y="210" class="mat-ink">LED1</text>
+      <text x="740" y="226" class="mat-ink-quiet">rouge, 5 mm</text>
+    </g>
+
+    <!-- Potentiomètre -->
+    <g>
+      <rect x="112" y="290" width="56" height="44" rx="3" fill="#2F6FB0"/>
+      <circle cx="140" cy="306" r="13" fill="#E6E9EC"/>
+      <path d="M140 306l-6 -9" stroke="#2A2A2A" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="M124 334v26M140 334v26M156 334v26" stroke="#B9C0C5" stroke-width="2"/>
+      <text x="100" y="274" class="mat-ink" text-anchor="start">POT1</text>
+      <text x="100" y="404" class="mat-ink-quiet">10 kΩ, A0 = <tspan id="adc">2 731</tspan></text>
+    </g>
+  </svg>
+  <div class="bench-hint">Cliquez sur B1 pour changer la période de clignotement.</div>
+</main>
+
+<aside class="inspector" aria-label="Inspecteur">
+  <div class="insp-head">
+    <h2>Broche PA5</h2>
+    <p>Connecteur CN5, repère D13</p>
+  </div>
+  <div class="insp-section">
+    <h3>Configuration</h3>
+    <dl class="props">
+      <dt>Mode</dt><dd>Sortie push-pull</dd>
+      <dt>Fonction</dt><dd>GPIO</dd>
+      <dt>Résistance de tirage</dt><dd>Aucune</dd>
+      <dt>Vitesse</dt><dd>Basse</dd>
+    </dl>
+  </div>
+  <div class="insp-section">
+    <h3>État</h3>
+    <dl class="props">
+      <dt>Niveau</dt><dd><span class="state-pill high" id="pa5-state">Haut</span></dd>
+      <dt>Période mesurée</dt><dd class="data" id="pa5-period">1 000 ms</dd>
+      <dt>Rapport cyclique</dt><dd class="data">50 %</dd>
+    </dl>
+  </div>
+  <div class="insp-section">
+    <h3>Net</h3>
+    <dl class="props">
+      <dt>Relié à</dt><dd class="data">LD2, LED1.A</dd>
+      <dt>Fil</dt><dd><span class="swatch" style="background:#E8C33A"></span>Jaune, signal</dd>
+    </dl>
+  </div>
+</aside>
+
+<section class="dock" aria-label="Instruments">
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true">Série</button>
+    <button class="tab" role="tab" aria-selected="false">Traceur</button>
+    <button class="tab" role="tab" aria-selected="false">Analyseur</button>
+    <button class="tab" role="tab" aria-selected="false">Bus</button>
+    <button class="tab" role="tab" aria-selected="false"><svg class="icon"><use href="#i-warn"/></svg>Avertissements<span class="badge">1</span></button>
+    <div class="tab-tools">
+      <select class="port data" title="Port série"><option>USART2, 115 200 bauds</option></select>
+      <button class="btn icon-only" title="Afficher l'horodatage"><svg class="icon"><use href="#i-clock"/></svg></button>
+      <button class="btn icon-only" title="Vue hexadécimale"><svg class="icon"><use href="#i-hex"/></svg></button>
+      <button class="btn icon-only" title="Exporter la sortie"><svg class="icon"><use href="#i-export"/></svg></button>
+      <button class="btn icon-only" title="Effacer"><svg class="icon"><use href="#i-trash"/></svg></button>
+    </div>
+  </div>
+  <div class="log" id="log" aria-live="polite">
+    <div><span class="t">00:00.000</span><span class="sys">Firmware démarré, priorité basse</span></div>
+    <div><span class="t">00:00.004</span>Prebench blinky, Nucleo-F401RE</div>
+    <div><span class="t">00:00.004</span>Période LD2 : 500 ms</div>
+  </div>
+  <form class="send" onsubmit="return false">
+    <input type="text" placeholder="Texte à envoyer sur USART2" aria-label="Texte à envoyer">
+    <select class="port" title="Fin de ligne"><option>LF</option><option>CR+LF</option><option>Aucune</option></select>
+    <button class="btn" type="submit">Envoyer</button>
+  </form>
+</section>
+
+<footer class="status">
+  <span class="run" id="status-run"><span class="dot"></span><span id="status-label">En cours</span></span>
+  <span class="data" id="elapsed">00:00</span>
+  <div class="right">
+    <span>CPU <span class="data">4 %</span></span>
+    <span>RAM <span class="data">38 Mo</span></span>
+    <span>Priorité basse</span>
+    <span>Build sim <span class="data">1,2 s</span></span>
+    <span>Prebench 0.1.1</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const root = document.documentElement;
+  const saved = null;
+  root.dataset.theme = saved || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  document.getElementById('theme').onclick = () => {
+    root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+  };
+
+  const ld2 = document.getElementById('ld2');
+  const led1 = document.getElementById('led1');
+  const pill = document.getElementById('pa5-state');
+  const period = document.getElementById('pa5-period');
+  const log = document.getElementById('log');
+  const runBtn = document.getElementById('run');
+  const runIcon = document.getElementById('run-icon');
+  const runLabel = document.getElementById('run-label');
+  const statusRun = document.getElementById('status-run');
+  const statusLabel = document.getElementById('status-label');
+  const elapsedEl = document.getElementById('elapsed');
+
+  let half = 500, high = true, running = true, timer = null, t0 = performance.now(), elapsed = 0;
+
+  const stamp = () => {
+    const ms = Math.round(elapsed);
+    const s = Math.floor(ms / 1000), m = Math.floor(s / 60);
+    return String(m).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0') + '.' + String(ms % 1000).padStart(3, '0');
+  };
+  const line = (text, sys) => {
+    const d = document.createElement('div');
+    d.innerHTML = '<span class="t">' + stamp() + '</span>';
+    const s = document.createElement('span');
+    if (sys) s.className = 'sys';
+    s.textContent = text;
+    d.appendChild(s);
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  };
+  const render = () => {
+    ld2.classList.toggle('lit', high);
+    led1.classList.toggle('lit', high);
+    pill.textContent = high ? 'Haut' : 'Bas';
+    pill.className = 'state-pill ' + (high ? 'high' : 'low');
+  };
+  const tick = () => { high = !high; render(); };
+  const start = () => { clearInterval(timer); timer = setInterval(tick, half); };
+
+  setInterval(() => {
+    if (running) {
+      const now = performance.now(); elapsed += now - t0; t0 = now;
+      const s = Math.floor(elapsed / 1000);
+      elapsedEl.textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    }
+  }, 250);
+
+  const pressB1 = () => {
+    if (!running) return;
+    half = half === 500 ? 100 : 500;
+    period.textContent = (half * 2).toLocaleString('fr-FR') + ' ms';
+    line('B1 appuyé, période LD2 : ' + half + ' ms');
+    start();
+  };
+  const b1 = document.getElementById('b1');
+  b1.addEventListener('click', pressB1);
+  b1.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pressB1(); } });
+
+  const setRunning = on => {
+    running = on;
+    t0 = performance.now();
+    runIcon.setAttribute('href', on ? '#i-pause' : '#i-play');
+    runLabel.textContent = on ? 'Mettre en pause' : 'Reprendre';
+    runBtn.title = (on ? 'Mettre en pause' : 'Reprendre') + ' (Espace)';
+    statusLabel.textContent = on ? 'En cours' : 'En pause';
+    statusRun.classList.toggle('paused', !on);
+    if (on) start(); else clearInterval(timer);
+    line(on ? 'Simulation reprise' : 'Simulation en pause', true);
+  };
+  runBtn.onclick = () => setRunning(!running);
+  document.getElementById('reset').onclick = () => {
+    elapsed = 0; half = 500; high = true; render();
+    period.textContent = '1 000 ms';
+    log.innerHTML = '';
+    line('Firmware réinitialisé', true);
+    line('Prebench blinky, Nucleo-F401RE');
+    line('Période LD2 : 500 ms');
+    if (running) start();
+  };
+  document.addEventListener('keydown', e => {
+    if (e.target.closest('input, select')) return;
+    if (e.code === 'Space' && e.target === document.body) { e.preventDefault(); setRunning(!running); }
+  });
+
+  const edit = document.getElementById('mode-edit'), sim = document.getElementById('mode-sim');
+  edit.onclick = () => { edit.setAttribute('aria-pressed', 'true'); sim.setAttribute('aria-pressed', 'false'); };
+  sim.onclick = () => { sim.setAttribute('aria-pressed', 'true'); edit.setAttribute('aria-pressed', 'false'); };
+
+  render(); start();
+})();
+</script>
+</body>
+</html>

@@ -65,10 +65,12 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>, req: Request) {
         };
         report.truncate(MAX_REPORT_LINES);
         let text = report.join("\n") + "\n";
+        // Le rapport est affiché par le workflow (fichier) : il n'est écrit sur
+        // stderr que si le fichier n'a pas pu l'être, pour ne pas le doubler.
         if let Err(e) = std::fs::write(&req.report, &text) {
             eprintln!("rapport non écrit ({}) : {e}", req.report.display());
+            eprint!("{text}");
         }
-        eprint!("{text}");
         std::process::exit(code);
     });
 }

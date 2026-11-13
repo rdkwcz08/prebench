@@ -1,0 +1,10 @@
+#:schema ../../docs/prebench.schema.json
+# Garde-fou CPU (section 11.2) : boucle sans délai qui n'appelle jamais libvmcu.
+# Attendu : pause automatique au bout de 5 s, bannière « Reprendre ».
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"

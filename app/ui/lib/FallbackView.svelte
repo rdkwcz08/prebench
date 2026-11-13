@@ -2,6 +2,7 @@
   app/ui/lib/FallbackView.svelte — Vue de repli d'un composant sans vue utilisable
   (view.svelte absente ou qui ne compile pas) : nom, broches et état brut.
   Le composant reste utilisable ; ses contrôles sont proposés en boutons.
+  Bordure en tirets couleur d'avertissement, raison complète au survol.
 -->
 <script lang="ts">
   import type { Manifest } from './types';
@@ -23,9 +24,9 @@
 
 <div class="fallback" title={reason}>
   <strong>{manifest?.name ?? '?'}</strong>
-  <code>{json}</code>
+  <code class="data">{json}</code>
   {#if manifest?.pins.length}
-    <span class="pins">{manifest.pins.map((p) => p.name).join(' · ')}</span>
+    <span class="pins">Broches <span class="data">{manifest.pins.map((p) => p.name).join(', ')}</span></span>
   {/if}
   {#each manifest?.controls ?? [] as c (c.id)}
     <button
@@ -39,23 +40,33 @@
   .fallback {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
     min-width: 72px;
     max-width: 160px;
-    padding: 4px 6px;
-    border: 1px dashed var(--warn);
-    border-radius: 6px;
-    background: var(--panel);
+    padding: 4px 8px;
+    border: 1px dashed var(--pb-warn);
+    border-radius: 3px;
+    background: var(--pb-panel);
+    color: var(--pb-text);
     font-size: 11px;
+  }
+  strong {
+    font-weight: 600;
   }
   code {
     overflow-wrap: anywhere;
-    color: var(--text-muted);
+    color: var(--pb-text-quiet);
   }
   .pins {
-    color: var(--text-muted);
+    color: var(--pb-text-quiet);
   }
   button {
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--pb-line);
+    border-radius: 3px;
+    background: transparent;
     font-size: 11px;
+    cursor: pointer;
   }
 </style>

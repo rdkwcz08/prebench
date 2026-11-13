@@ -1,29 +1,70 @@
-/* app/ui/app.css — Thème de l'interface (sombre par défaut, clair si le système l'est). */
-:root {
-  --bg: #15191d;
-  --panel: #1d2329;
-  --border: #2c353d;
-  --text: #e3e7ea;
-  --text-muted: #8b97a1;
-  --accent: #3fb68b;
-  --warn: #e6a23c;
-  --error: #e5534b;
-  --pcb: #1f6f4a;
-  --pcb-edge: #0f3d28;
+/* app/ui/app.css — Jetons et base de l'interface (charte docs/design.md, sections 2 à 6).
+ *
+ * Toutes les couleurs de l'interface passent par les variables --pb-*. Le thème
+ * est porté par l'attribut data-theme de <html> (« light » ou « dark »), posé
+ * par ui/lib/theme.svelte.ts avant le premier rendu : thème du système par
+ * défaut, choix manuel possible.
+ */
+
+:root,
+[data-theme='dark'] {
+  /* 2.1 Interface */
+  --pb-chrome: #1e2124;
+  --pb-panel: #25292d;
+  --pb-line: #383d42;
+  --pb-text: #e3e5e2;
+  --pb-text-quiet: #98a1a6;
+  --pb-accent: #3fa7d6;
+  --pb-on-accent: #10202a;
+  /* 2.2 Paillasse */
+  --pb-mat: #2c454c;
+  --pb-mat-grid: #365560;
+  --pb-mat-ink: #c9d8db;
+  /* 2.3 États logiques et sévérité */
+  --pb-high: #e6b422;
+  --pb-low: #6b7b84;
+  --pb-conflict: #e5484d;
+  --pb-warn: #e79a3c;
+  --pb-ok: #4cb782;
+  /* 2.4 Fils : contour du fil de masse */
+  --pb-gnd-outline: #8d9499;
+  /* Ombre : uniquement ce qui flotte (menus, infobulles) */
+  --pb-shadow: 0 4px 12px rgb(0 0 0 / 0.4);
   color-scheme: dark;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  font-size: 14px;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f3f5f6;
-    --panel: #ffffff;
-    --border: #d5dbe0;
-    --text: #1c2328;
-    --text-muted: #5f6b74;
-    color-scheme: light;
-  }
+[data-theme='light'] {
+  --pb-chrome: #e9eae7;
+  --pb-panel: #f6f6f4;
+  --pb-line: #c9cdcb;
+  --pb-text: #1e2124;
+  --pb-text-quiet: #5d666b;
+  --pb-accent: #1c77a6;
+  --pb-on-accent: #ffffff;
+  --pb-mat: #b9cdd0;
+  --pb-mat-grid: #a6bec2;
+  --pb-mat-ink: #22383e;
+  --pb-high: #9a7300;
+  --pb-low: #6b7b84;
+  --pb-conflict: #c62828;
+  --pb-warn: #a85b00;
+  --pb-ok: #1f7a4d;
+  --pb-gnd-outline: #2a2a2a;
+  --pb-shadow: 0 4px 12px rgb(0 0 0 / 0.16);
+  color-scheme: light;
+}
+
+:root {
+  /* Matériaux : identiques dans les deux thèmes (2.2) */
+  --pb-board: #1f3b5c;
+  --pb-copper: #b87333;
+  --pb-silk: #e8ecef;
+  /* 3. Typographie : polices du système, aucune police embarquée */
+  --pb-font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  --pb-font-data: ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace;
+  /* 6. Mouvement : seuls changements d'état réels */
+  --pb-panel-motion: 120ms;
+  --pb-glow-motion: 80ms;
 }
 
 * {
@@ -35,6 +76,40 @@ body,
 #app {
   height: 100%;
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
+}
+
+body {
+  font: 400 13px/1.4 var(--pb-font-ui);
+  color: var(--pb-text);
+  background: var(--pb-chrome);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+button,
+select,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--pb-accent);
+  outline-offset: 1px;
+}
+
+/* Donnée ou code : chasse fixe, chiffres tabulaires (3) */
+.data {
+  font-family: var(--pb-font-data);
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --pb-panel-motion: 0ms;
+    --pb-glow-motion: 0ms;
+  }
 }

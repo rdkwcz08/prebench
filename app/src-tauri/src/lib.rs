@@ -9,10 +9,12 @@
 mod build;
 mod commands;
 mod core;
+mod debug;
 mod error;
 mod install_check;
 mod platform;
 mod project;
+mod session;
 mod update;
 
 pub fn run() {
@@ -43,7 +45,11 @@ pub fn run() {
             commands::start_simulation,
             commands::stop_simulation,
             commands::reset_simulation,
+            commands::pause_simulation,
+            commands::resume_simulation,
             commands::component_control,
+            commands::open_in_editor,
+            commands::start_debug,
             commands::check_prerequisites,
             commands::list_templates,
             commands::create_project,

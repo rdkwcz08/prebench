@@ -38,6 +38,7 @@
 #define VMCU_MSG_STREAM_NOTIFY  0x0072u
 #define VMCU_MSG_WARN           0x0080u
 #define VMCU_MSG_LOG            0x0081u
+#define VMCU_MSG_HEARTBEAT      0x0090u /* protocole 1.1 : mode débogage */
 #define VMCU_MSG_PING           0x00F0u
 
 /* App -> firmware (section 4.2) */

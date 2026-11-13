@@ -16,7 +16,7 @@
 #ifndef VMCU_DEFAULT_FRAMEWORK
 #define VMCU_DEFAULT_FRAMEWORK "stm32-hal"
 #endif
-#define VMCU_LIBVMCU_VERSION "0.1.0"
+#define VMCU_LIBVMCU_VERSION "0.1.2"
 
 /* Garde-fous (section 5.5). */
 #define VMCU_GUARD_CALLS       10000u   /* appels sans sommeil avant micro-pause */
@@ -63,6 +63,13 @@ uint8_t vmcu__adc_bits(void);
 
 void     vmcu__time_init(void);
 void     vmcu__time_set_paused(bool paused);
+/* Débogage : surveille les arrêts du processus entier (point d'arrêt). Chaque
+ * lecture de l'horloge compare l'heure à la lecture précédente, tous fils
+ * confondus ; un écart de plus de `frozen_ns` (le fil de débogage lit l'heure
+ * toutes les `tick_ns`) est retiré du temps de simulation, une seule fois. */
+void     vmcu__time_watch_start(uint64_t tick_ns, uint64_t frozen_ns);
+/* Lecture de l'horloge par le fil de débogage ; true si un arrêt vient d'être retiré. */
+bool     vmcu__time_watch_tick(void);
 uint64_t vmcu__sim_ns(void);
 void     vmcu__guard_call(void);
 void     vmcu__guard_poll(bool changed);

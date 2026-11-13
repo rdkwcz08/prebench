@@ -11,14 +11,30 @@
 //   vue -> component_control -> acteur -> onControl (modèles)
 //   modèles -> invalidate -> une fois par image : getState -> « sim:states » (vues)
 //   PING Worker : firmware -> acteur -> onPing du composant d'écho -> PONG (sans WebView)
+//
+// Garde-fous (section 11.2) : pendant une simulation, et seulement alors, un
+// minuteur à 1 Hz mesure le CPU et la mémoire du firmware (« sim:usage »).
+// Plus de 80 % d'un cœur pendant 5 s : pause automatique (PAUSE, puis
+// suspension du processus pour une boucle qui n'appelle jamais libvmcu).
+// Plus de 256 Mo : arrêt du firmware. Au-delà de 128 Mo, la mesure passe à
+// 4 Hz pour arrêter une fuite rapide plus près de la limite (macOS n'a pas de
+// plafond système). Le minuteur s'arrête en pause.
+//
+// Débogage (section 10.2) : le firmware est lancé par le débogueur de VS Code
+// sur une adresse fixe du projet (`DebugConfig`) ; l'acteur l'attend sans
+// délai, le reprend après chaque fin de session, et suit ses HEARTBEAT
+// (protocole 1.1) : sans HEARTBEAT pendant BREAKPOINT_AFTER, le firmware est
+// figé par le débogueur (« Arrêté sur un point d'arrêt »). Ni pause CPU, ni
+// suspension, ni arrêt pour mémoire pendant une session de débogage.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::tokio::Stream as LocalStream;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
@@ -42,6 +58,33 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SYNC_TIMEOUT_MS: u32 = 1000;
 const EXIT_RESET: i32 = 71;
 
+/// Plafond mémoire d'un firmware (section 11.1), surveillé à 1 Hz.
+pub const MEMORY_LIMIT: u64 = 256 * 1024 * 1024;
+/// Plafond posé par le système (Linux : RLIMIT_AS, mémoire virtuelle ; Windows :
+/// Job Object, mémoire engagée), au double du plafond surveillé : la mesure
+/// arrête une fuite ordinaire avec un message clair, ce plafond-ci une
+/// allocation trop rapide pour elle. macOS n'en a pas (platform/macos.rs).
+const MEMORY_BACKSTOP: u64 = 2 * MEMORY_LIMIT;
+/// Pause automatique : plus de CPU_LIMIT_PCT % d'un cœur pendant CPU_LIMIT_TIME.
+const CPU_LIMIT_PCT: f32 = 80.0;
+const CPU_LIMIT_TIME: Duration = Duration::from_secs(5);
+const MONITOR_PERIOD: Duration = Duration::from_secs(1);
+/// Mesure rapprochée (4 Hz) au-delà de la moitié du plafond mémoire.
+const MONITOR_PERIOD_FAST: Duration = Duration::from_millis(250);
+/// Délai entre PAUSE et la suspension du processus : laisse le fil E/S de
+/// libvmcu geler l'horloge, pour que le temps reparte sans saut.
+const SUSPEND_DELAY: Duration = Duration::from_millis(20);
+/// Débogage : sans HEARTBEAT (toutes les 200 ms) pendant ce délai, le firmware
+/// est arrêté sur un point d'arrêt.
+const BREAKPOINT_AFTER: Duration = Duration::from_millis(600);
+/// Débogage : délai des transactions synchrones (WELCOME), une heure : un fil
+/// arrêté dans le débogueur ne doit pas faire expirer une transaction.
+const DEBUG_SYNC_TIMEOUT_MS: u32 = 3_600_000;
+/// Débogage : nouvelle tentative de création du canal, le temps que Windows
+/// ferme l'instance de la session précédente.
+const DEBUG_LISTEN_RETRY: Duration = Duration::from_millis(50);
+const DEBUG_LISTEN_TRIES: u32 = 40;
+
 pub enum SimMsg {
     Frame(Header, Vec<u8>),
     Disconnected,
@@ -57,10 +100,32 @@ pub enum SimMsg {
     FlushUi,
     Reset,
     Stop,
+    /// Mise en pause demandée par l'utilisateur.
+    Pause,
+    /// Reprise demandée par l'utilisateur.
+    Resume,
+    /// Mesure du firmware : CPU en % d'un cœur sur `span`, mémoire en octets.
+    Usage {
+        cpu_pct: f32,
+        memory: u64,
+        span: Duration,
+    },
+    /// Suspension du processus, `SUSPEND_DELAY` après PAUSE (numéro de pause).
+    Suspend(u64),
+    /// Rechargement à chaud (section 10.2) : le firmware en cours est arrêté
+    /// et remplacé par ce nouvel exécutable ; paillasse, réseau et modèles
+    /// sont conservés. En débogage : l'exécutable sert à la session suivante.
+    Reload(PathBuf),
+    /// Débogage : firmware lancé par le débogueur, connecté.
+    DebugAttach(LocalStream),
+    /// Débogage : échéance du HEARTBEAT numéro donné.
+    BeatTimeout(u64),
 }
 
 pub struct SimHandle {
     pub tx: mpsc::Sender<SimMsg>,
+    /// Session de débogage : reprise telle quelle si la simulation est relancée.
+    pub debug: Option<DebugConfig>,
 }
 
 impl SimHandle {
@@ -70,6 +135,13 @@ impl SimHandle {
 
     pub async fn send(&self, m: SimMsg) -> CoreResult<()> {
         self.tx.send(m).await.map_err(|_| CoreError::ActorGone)
+    }
+
+    /// Arrête la simulation et attend la fin de l'acteur (firmware tué).
+    pub async fn stop_and_wait(&self) {
+        if self.tx.send(SimMsg::Stop).await.is_ok() {
+            self.tx.closed().await;
+        }
     }
 }
 
@@ -81,6 +153,17 @@ pub struct SimConfig {
     pub board_id: u16,
     /// Instances de composants (carte puis projet), modèles résolus.
     pub components: Vec<InstanceSpec>,
+    /// Session de débogage : le firmware est lancé par le débogueur.
+    pub debug: Option<DebugConfig>,
+}
+
+/// Session de débogage (section 10.2).
+#[derive(Clone)]
+pub struct DebugConfig {
+    /// Adresse fixe du projet, inscrite dans .vscode/launch.json.
+    pub address: String,
+    /// Exécutable lancé par le débogueur (copie, remplacée entre deux sessions).
+    pub program: PathBuf,
 }
 
 // --- Événements vers l'interface ------------------------------------------------
@@ -104,11 +187,31 @@ struct WarnEvent {
     text: String,
 }
 
+/// Mesure du firmware pour l'indicateur de la barre d'état.
+#[derive(Clone, Serialize)]
+struct UsageEvent {
+    /// Pourcentage d'un cœur.
+    cpu: f32,
+    /// Octets.
+    memory: u64,
+    memory_limit: u64,
+}
+
+/// Intervention d'un garde-fou, annoncée par une bannière.
+#[derive(Clone, Serialize)]
+struct GuardEvent {
+    /// « cpu » (pause automatique) ou « memory » (firmware arrêté).
+    kind: &'static str,
+    text: String,
+}
+
 // --- Liaison avec le processus firmware --------------------------------------------
 
 struct FirmwareLink {
     writer: mpsc::Sender<Vec<u8>>,
     kill: Option<oneshot::Sender<()>>,
+    /// Lecture du canal : interrompue pour fermer le canal (fin de session de débogage).
+    reader: tauri::async_runtime::JoinHandle<()>,
 }
 
 /// État d'une broche vu du firmware (GPIO_CONFIG / GPIO_WRITE).
@@ -159,10 +262,38 @@ struct Actor<R: Runtime> {
     echo: Option<String>,
     unknown_warned: HashSet<u16>,
     unknown_pins: HashSet<(u8, u8)>,
+    guards: Guards,
+    /// Nombre de lancements du firmware : nom de canal propre à chacun.
+    launches: u32,
+    /// Débogage : attente de connexion du firmware lancé par le débogueur.
+    debug_accept: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Débogage : numéro du dernier HEARTBEAT, firmware figé.
+    beat_seq: u64,
+    at_breakpoint: bool,
+}
+
+/// État des garde-fous du firmware en cours.
+#[derive(Default)]
+struct Guards {
+    pid: Option<u32>,
+    monitor: Option<tauri::async_runtime::JoinHandle<()>>,
+    paused: bool,
+    suspended: bool,
+    pause_seq: u64,
+    /// Durée cumulée au-delà de CPU_LIMIT_PCT, remise à zéro sous le seuil.
+    busy: Duration,
+    last_memory: u64,
+    /// Message de fin imposé par un garde-fou (arrêt pour mémoire).
+    stop_reason: Option<String>,
+    /// Message d'état « en cours », rétabli à la reprise.
+    running_message: String,
+    /// Exécutable qui remplace le firmware arrêté (rechargement à chaud).
+    reload: Option<PathBuf>,
 }
 
 pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
     let (tx, rx) = mpsc::channel(ACTOR_QUEUE);
+    let debug = cfg.debug.clone();
     let echo = cfg
         .components
         .iter()
@@ -184,9 +315,14 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         echo,
         unknown_warned: HashSet::new(),
         unknown_pins: HashSet::new(),
+        guards: Guards::default(),
+        launches: 0,
+        debug_accept: None,
+        beat_seq: 0,
+        at_breakpoint: false,
     };
     tauri::async_runtime::spawn(async move { actor.run(rx).await });
-    SimHandle { tx }
+    SimHandle { tx, debug }
 }
 
 impl<R: Runtime> Actor<R> {
@@ -210,9 +346,32 @@ impl<R: Runtime> Actor<R> {
         while let Some(m) = rx.recv().await {
             match m {
                 SimMsg::Frame(h, payload) => self.on_frame(h, &payload).await,
-                SimMsg::Disconnected => {}
+                SimMsg::Disconnected => {
+                    if self.cfg.debug.is_some() {
+                        self.on_debug_session_end().await;
+                    }
+                }
+                SimMsg::DebugAttach(stream) => {
+                    self.attach(stream, None);
+                    self.status(
+                        "starting",
+                        "débogueur connecté, démarrage du firmware".into(),
+                    );
+                }
+                SimMsg::BeatTimeout(seq) => self.on_beat_timeout(seq),
                 SimMsg::Exited(code) => {
-                    if code == Some(EXIT_RESET) {
+                    self.stop_monitor();
+                    let reload = self.guards.reload.take();
+                    if let Some(firmware) = reload {
+                        self.cfg.firmware = firmware;
+                        self.status("starting", "rechargement du firmware".into());
+                        self.log("firmware rechargé après le build");
+                        self.reset_firmware_state();
+                        if let Err(e) = self.launch().await {
+                            self.status("error", e.to_string());
+                            return;
+                        }
+                    } else if code == Some(EXIT_RESET) {
                         self.status("starting", "redémarrage du firmware (reset)".into());
                         self.reset_firmware_state();
                         if let Err(e) = self.launch().await {
@@ -220,10 +379,7 @@ impl<R: Runtime> Actor<R> {
                             return;
                         }
                     } else {
-                        let msg = match code {
-                            Some(c) => format!("firmware arrêté (code {c})"),
-                            None => "firmware arrêté par un signal (plantage ?)".into(),
-                        };
+                        let msg = self.exit_message(code);
                         self.status("stopped", msg);
                         return;
                     }
@@ -239,8 +395,43 @@ impl<R: Runtime> Actor<R> {
                 }),
                 SimMsg::Model(event) => self.on_model(event).await,
                 SimMsg::FlushUi => self.flush_ui(),
-                SimMsg::Reset => self.send(msg::RESET, 0, 0, &[]).await,
+                SimMsg::Reset => {
+                    self.resume().await;
+                    self.send(msg::RESET, 0, 0, &[]).await;
+                }
+                SimMsg::Pause => self.pause(None).await,
+                SimMsg::Resume => self.resume().await,
+                SimMsg::Usage {
+                    cpu_pct,
+                    memory,
+                    span,
+                } => self.on_usage(cpu_pct, memory, span).await,
+                SimMsg::Suspend(seq) => self.suspend(seq),
+                SimMsg::Reload(firmware) if self.cfg.debug.is_some() => {
+                    self.debug_reload(firmware);
+                }
+                SimMsg::Reload(firmware) => {
+                    if let Some(kill) = self.link.as_mut().and_then(|l| l.kill.take()) {
+                        self.guards.reload = Some(firmware);
+                        let _ = kill.send(());
+                    } else {
+                        // Firmware pas encore lancé : remplacé au prochain lancement.
+                        self.cfg.firmware = firmware;
+                    }
+                }
                 SimMsg::Stop => {
+                    self.stop_monitor();
+                    if let Some(task) = self.debug_accept.take() {
+                        task.abort();
+                    }
+                    if let Some(link) = self.link.take() {
+                        link.reader.abort(); // ferme le canal : fin de la session de débogage
+                        if let Some(kill) = link.kill {
+                            let _ = kill.send(());
+                        }
+                        self.status("stopped", "simulation arrêtée".into());
+                        return;
+                    }
                     if let Some(kill) = self.link.as_mut().and_then(|l| l.kill.take()) {
                         let _ = kill.send(());
                     }
@@ -443,6 +634,17 @@ impl<R: Runtime> Actor<R> {
         let _ = self.app.emit("sim:status", StatusEvent { state, message });
     }
 
+    fn log(&self, text: &str) {
+        let _ = self.app.emit(
+            "sim:log",
+            LogEvent {
+                source: "prebench",
+                level: 2,
+                text: text.to_string(),
+            },
+        );
+    }
+
     fn warn(&self, code: u16, text: String) {
         let _ = self.app.emit("sim:warn", WarnEvent { code, text });
     }
@@ -514,6 +716,7 @@ impl<R: Runtime> Actor<R> {
                     },
                 );
             }
+            msg::HEARTBEAT => self.on_heartbeat(),
             msg::PING => {
                 let target = r.u8();
                 match (target, &self.echo) {
@@ -560,9 +763,9 @@ impl<R: Runtime> Actor<R> {
 
     async fn on_hello(&mut self, h: Header, r: &mut Reader<'_>) {
         let major = r.u8();
-        let _minor = r.u8();
+        let minor = r.u8();
         let _api = (r.u8(), r.u8());
-        let _pid = r.u32();
+        let pid = r.u32();
         let board = r.str();
         let framework = r.str();
         let version = r.str();
@@ -613,28 +816,52 @@ impl<R: Runtime> Actor<R> {
             self.send_input(name).await;
         }
         let mut w = Writer::default();
+        // Version retenue : la plus petite des deux mineures (docs/protocol.md, 3.2).
         w.u8(protocol::PROTOCOL_MAJOR)
-            .u8(protocol::PROTOCOL_MINOR)
+            .u8(minor.min(protocol::PROTOCOL_MINOR))
             .u8(self.cfg.board.adc_bits)
             .u8(0)
-            .u32(SYNC_TIMEOUT_MS);
+            .u32(if self.cfg.debug.is_some() {
+                DEBUG_SYNC_TIMEOUT_MS
+            } else {
+                SYNC_TIMEOUT_MS
+            });
         self.send(msg::WELCOME, FLAG_REPLY, h.seq, &w.buf).await;
-        self.status(
-            "running",
-            format!("{} — {framework}, libvmcu {version}", self.cfg.board.name),
-        );
+        self.guards.running_message =
+            format!("{} — {framework}, libvmcu {version}", self.cfg.board.name);
+        if self.cfg.debug.is_some() {
+            // Processus lancé par le débogueur : mesuré pour l'indicateur seulement.
+            self.guards.pid = Some(pid);
+            self.guards.paused = false;
+            self.guards.busy = Duration::ZERO;
+            self.start_monitor();
+            self.at_breakpoint = false;
+            self.on_heartbeat();
+            self.guards.running_message.push_str(" (débogage)");
+            self.log(
+                "débogage : le firmware est lancé par le débogueur, à la priorité que celui-ci lui donne \
+                 (ni priorité basse, ni cœurs économes) ; pause automatique CPU désactivée pendant la session",
+            );
+        }
+        self.status("running", self.guards.running_message.clone());
     }
 
-    /// Lance le processus firmware et attend sa connexion.
+    /// Lance le processus firmware et attend sa connexion ; en débogage, attend
+    /// le firmware lancé par le débogueur.
     async fn launch(&mut self) -> CoreResult<()> {
-        let address = platform::socket_address(self.cfg.board_id);
+        if self.cfg.debug.is_some() {
+            self.listen_debug();
+            return Ok(());
+        }
+        self.launches = self.launches.wrapping_add(1);
+        let address = platform::socket_address(self.cfg.board_id, self.launches);
         let name = address.as_str().to_fs_name::<GenericFilePath>()?;
         let listener = ListenerOptions::new()
             .name(name)
             .try_overwrite(true)
             .create_tokio()?;
 
-        let mut child = platform::firmware_command(&self.cfg.firmware)
+        let mut child = platform::firmware_command(&self.cfg.firmware, MEMORY_BACKSTOP)
             .env("PREBENCH_SOCKET", &address)
             .env("PREBENCH_BOARD_ID", self.cfg.board_id.to_string())
             .current_dir(&self.cfg.project_dir)
@@ -643,7 +870,12 @@ impl<R: Runtime> Actor<R> {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
-        platform::after_firmware_spawn(&child);
+        let guard = platform::after_firmware_spawn(&child, MEMORY_BACKSTOP);
+        self.guards.pid = child.id();
+        self.guards.paused = false;
+        self.guards.suspended = false;
+        self.guards.busy = Duration::ZERO;
+        self.start_monitor();
         if let Some(out) = child.stdout.take() {
             self.forward_lines(out, "stdout");
         }
@@ -654,6 +886,8 @@ impl<R: Runtime> Actor<R> {
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let tx = self.tx_self.clone();
         tauri::async_runtime::spawn(async move {
+            // Le Job Object (Windows) vit aussi longtemps que le processus.
+            let _guard = guard;
             let code = tokio::select! {
                 status = child.wait() => status.ok().and_then(|s| s.code()),
                 _ = kill_rx => {
@@ -668,6 +902,12 @@ impl<R: Runtime> Actor<R> {
             .await
             .map_err(|_| CoreError::ConnectTimeout)??;
         drop(listener);
+        self.attach(stream, Some(kill_tx));
+        Ok(())
+    }
+
+    /// Relie l'acteur à un firmware connecté : écriture par lots et lecture des trames.
+    fn attach(&mut self, stream: LocalStream, kill: Option<oneshot::Sender<()>>) {
         // &Stream implémente AsyncRead et AsyncWrite : lecture et écriture
         // concurrentes sur le même flux partagé.
         let stream = Arc::new(stream);
@@ -692,7 +932,7 @@ impl<R: Runtime> Actor<R> {
         // Lecture : trames du firmware vers l'acteur.
         let tx = self.tx_self.clone();
         let board_id = self.cfg.board_id;
-        tauri::async_runtime::spawn(async move {
+        let reader = tauri::async_runtime::spawn(async move {
             let mut raw = [0u8; HEADER_SIZE];
             let mut reader = &*recv;
             loop {
@@ -716,9 +956,297 @@ impl<R: Runtime> Actor<R> {
 
         self.link = Some(FirmwareLink {
             writer: wtx,
-            kill: Some(kill_tx),
+            kill,
+            reader,
         });
-        Ok(())
+    }
+
+    // --- Débogage (section 10.2) ---------------------------------------------------------
+
+    /// Attend, sans délai, le firmware lancé par le débogueur sur l'adresse du projet.
+    fn listen_debug(&mut self) {
+        let Some(debug) = &self.cfg.debug else { return };
+        let address = debug.address.clone();
+        let tx = self.tx_self.clone();
+        let app = self.app.clone();
+        self.status(
+            "debug-wait",
+            "en attente du débogueur : lancez « Prebench : déboguer le firmware » dans VS Code (F5)"
+                .into(),
+        );
+        self.debug_accept = Some(tauri::async_runtime::spawn(async move {
+            let mut last_error = String::new();
+            for _ in 0..DEBUG_LISTEN_TRIES {
+                let listener = address
+                    .as_str()
+                    .to_fs_name::<GenericFilePath>()
+                    .and_then(|name| {
+                        ListenerOptions::new()
+                            .name(name)
+                            .try_overwrite(true)
+                            .create_tokio()
+                    });
+                match listener {
+                    Ok(listener) => {
+                        if let Ok(stream) = listener.accept().await {
+                            let _ = tx.send(SimMsg::DebugAttach(stream)).await;
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        last_error = e.to_string();
+                        tokio::time::sleep(DEBUG_LISTEN_RETRY).await;
+                    }
+                }
+            }
+            let _ = app.emit(
+                "sim:status",
+                StatusEvent {
+                    state: "error",
+                    message: format!("canal de débogage impossible à ouvrir : {last_error}"),
+                },
+            );
+        }));
+    }
+
+    /// Fin d'une session (firmware terminé, débogueur arrêté, reset) : la
+    /// paillasse reste, l'acteur attend la session suivante.
+    async fn on_debug_session_end(&mut self) {
+        self.stop_monitor();
+        self.link = None;
+        self.guards.pid = None;
+        self.at_breakpoint = false;
+        self.beat_seq += 1; // annule l'échéance en cours
+        self.reset_firmware_state();
+        if let Some(firmware) = self.guards.reload.take() {
+            self.debug_reload(firmware);
+        }
+        self.log("session de débogage terminée ; relancez-la dans VS Code (F5)");
+        self.listen_debug();
+    }
+
+    /// Nouvel exécutable compilé pendant une session de débogage : copié pour
+    /// la session suivante (celui en cours est verrouillé sous Windows).
+    fn debug_reload(&mut self, firmware: PathBuf) {
+        let Some(debug) = &self.cfg.debug else { return };
+        if self.link.is_some() {
+            // Une seule fois par session : les builds suivants remplacent le précédent.
+            if self.guards.reload.replace(firmware).is_none() {
+                self.log("firmware recompilé : arrêtez puis relancez la session de débogage (Maj+F5, puis F5) pour l'utiliser");
+            }
+            return;
+        }
+        let program = debug.program.clone();
+        let app = self.app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(e) = crate::debug::install_program(&firmware, &program) {
+                let _ = app.emit(
+                    "sim:warn",
+                    WarnEvent {
+                        code: 0,
+                        text: format!("firmware pour le débogueur non mis à jour : {e}"),
+                    },
+                );
+            }
+        });
+    }
+
+    fn on_heartbeat(&mut self) {
+        self.beat_seq += 1;
+        if self.at_breakpoint {
+            self.at_breakpoint = false;
+            let message = self.guards.running_message.clone();
+            self.status("running", message);
+        }
+        let seq = self.beat_seq;
+        let tx = self.tx_self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(BREAKPOINT_AFTER).await;
+            let _ = tx.send(SimMsg::BeatTimeout(seq)).await;
+        });
+    }
+
+    fn on_beat_timeout(&mut self, seq: u64) {
+        if seq != self.beat_seq || self.at_breakpoint || self.link.is_none() {
+            return;
+        }
+        self.at_breakpoint = true;
+        self.status("breakpoint", "le débogueur a arrêté le firmware".into());
+    }
+
+    // --- Garde-fous (section 11.2) -----------------------------------------------------
+
+    /// Minuteur à 1 Hz (4 Hz au-delà de la moitié du plafond mémoire), actif
+    /// seulement pendant que le firmware tourne.
+    fn start_monitor(&mut self) {
+        self.stop_monitor();
+        let Some(pid) = self.guards.pid else { return };
+        let tx = self.tx_self.clone();
+        self.guards.monitor = Some(tauri::async_runtime::spawn(async move {
+            let mut prev: Option<(Instant, Duration)> = None;
+            while let Some(usage) = platform::process_usage(pid) {
+                let now = Instant::now();
+                if let Some((then, cpu)) = prev {
+                    let span = now.duration_since(then);
+                    let busy = usage.cpu_time.saturating_sub(cpu).as_secs_f64();
+                    let wall = span.as_secs_f64();
+                    let cpu_pct = if wall > 0.0 {
+                        (busy / wall * 100.0) as f32
+                    } else {
+                        0.0
+                    };
+                    let m = SimMsg::Usage {
+                        cpu_pct,
+                        memory: usage.memory,
+                        span,
+                    };
+                    if tx.send(m).await.is_err() {
+                        break;
+                    }
+                }
+                prev = Some((now, usage.cpu_time));
+                let period = if usage.memory > MEMORY_LIMIT / 2 {
+                    MONITOR_PERIOD_FAST
+                } else {
+                    MONITOR_PERIOD
+                };
+                tokio::time::sleep(period).await;
+            }
+        }));
+    }
+
+    fn stop_monitor(&mut self) {
+        if let Some(task) = self.guards.monitor.take() {
+            task.abort();
+        }
+    }
+
+    async fn on_usage(&mut self, cpu_pct: f32, memory: u64, span: Duration) {
+        if self.guards.paused {
+            return;
+        }
+        self.guards.last_memory = memory;
+        let _ = self.app.emit(
+            "sim:usage",
+            UsageEvent {
+                cpu: cpu_pct,
+                memory,
+                memory_limit: MEMORY_LIMIT,
+            },
+        );
+        if self.cfg.debug.is_some() {
+            return; // session de débogage : l'utilisateur garde la main
+        }
+        if memory > MEMORY_LIMIT {
+            let text = format!(
+                "Firmware arrêté : il a dépassé la limite de {} Mo de mémoire. \
+                 Cherchez une allocation répétée sans libération (malloc sans free).",
+                MEMORY_LIMIT / (1024 * 1024)
+            );
+            self.guard_event("memory", text.clone());
+            self.guards.stop_reason = Some(text);
+            self.stop_monitor();
+            if let Some(kill) = self.link.as_mut().and_then(|l| l.kill.take()) {
+                let _ = kill.send(());
+            }
+            return;
+        }
+        if cpu_pct > CPU_LIMIT_PCT {
+            self.guards.busy += span;
+            if self.guards.busy >= CPU_LIMIT_TIME {
+                let text = format!(
+                    "Simulation mise en pause : le firmware a occupé plus de {CPU_LIMIT_PCT:.0} % \
+                     d'un cœur pendant {} s. Une boucle sans délai tourne \
+                     probablement à vide : ajoutez un HAL_Delay ou une attente d'interruption, \
+                     puis reprenez.",
+                    CPU_LIMIT_TIME.as_secs()
+                );
+                self.pause(Some(text)).await;
+            }
+        } else {
+            self.guards.busy = Duration::ZERO;
+        }
+    }
+
+    /// PAUSE au firmware, puis suspension du processus après `SUSPEND_DELAY`.
+    /// `reason` : pause automatique, annoncée par une bannière.
+    async fn pause(&mut self, reason: Option<String>) {
+        if self.guards.paused || self.link.is_none() {
+            return;
+        }
+        self.send(msg::PAUSE, 0, 0, &[]).await;
+        self.guards.paused = true;
+        self.guards.busy = Duration::ZERO;
+        self.guards.pause_seq += 1;
+        self.stop_monitor();
+        let seq = self.guards.pause_seq;
+        let tx = self.tx_self.clone();
+        if self.cfg.debug.is_none() {
+            // En débogage, le processus appartient au débogueur : PAUSE seulement.
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(SUSPEND_DELAY).await;
+                let _ = tx.send(SimMsg::Suspend(seq)).await;
+            });
+        }
+        match reason {
+            Some(text) => {
+                self.guard_event("cpu", text);
+                self.status("paused", "pause automatique (CPU)".into());
+            }
+            None => self.status("paused", "simulation en pause".into()),
+        }
+    }
+
+    fn suspend(&mut self, seq: u64) {
+        if !self.guards.paused || self.guards.suspended || seq != self.guards.pause_seq {
+            return;
+        }
+        let Some(pid) = self.guards.pid else { return };
+        match platform::suspend_process(pid) {
+            Ok(()) => self.guards.suspended = true,
+            Err(e) => self.warn(0, format!("suspension du firmware impossible : {e}")),
+        }
+    }
+
+    async fn resume(&mut self) {
+        if !self.guards.paused {
+            return;
+        }
+        if self.guards.suspended {
+            if let Some(pid) = self.guards.pid {
+                if let Err(e) = platform::resume_process(pid) {
+                    self.warn(0, format!("reprise du firmware impossible : {e}"));
+                }
+            }
+            self.guards.suspended = false;
+        }
+        self.guards.paused = false;
+        self.send(msg::RESUME, 0, 0, &[]).await;
+        self.start_monitor();
+        self.status("running", self.guards.running_message.clone());
+    }
+
+    fn guard_event(&self, kind: &'static str, text: String) {
+        let _ = self.app.emit("sim:guard", GuardEvent { kind, text });
+    }
+
+    /// Message de fin du firmware ; signale une limite mémoire probable.
+    fn exit_message(&mut self, code: Option<i32>) -> String {
+        if let Some(reason) = self.guards.stop_reason.take() {
+            return reason;
+        }
+        let base = match code {
+            Some(c) => format!("firmware arrêté (code {c})"),
+            None => "firmware arrêté par un signal (plantage ?)".into(),
+        };
+        if code != Some(0) && self.guards.last_memory >= MEMORY_LIMIT / 4 * 3 {
+            format!(
+                "{base} : mémoire proche de la limite de {} Mo, une allocation a probablement été refusée",
+                MEMORY_LIMIT / (1024 * 1024)
+            )
+        } else {
+            base
+        }
     }
 
     fn forward_lines<S>(&self, stream: S, source: &'static str)

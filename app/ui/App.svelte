@@ -1,31 +1,114 @@
 <!--
-  app/ui/App.svelte — Fenêtre de Prebench (phase 1).
-  Barre d'outils, paillasse (carte et composants), panneaux Journal et ⚠
-  (disposition de la section 10.3, réduite au prototype).
+  app/ui/App.svelte — Écran principal de Prebench (charte docs/design.md, section 4 ;
+  maquette docs/design/maquette-ecran-principal.html).
+
+  Barre d'outils 40 px ; bannières pleine largeur ; paillasse (tapis ESD) et
+  inspecteur 280 px repliable ; panneau d'onglets 220 px repliable ; barre
+  d'état 24 px. Raccourcis (section 10.6) : Espace met en pause ou reprend,
+  R réinitialise le firmware.
 -->
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import { bench } from './lib/bench.svelte';
+  import Board from './lib/Board.svelte';
+  import BuildPanel from './lib/BuildPanel.svelte';
   import ComponentHost from './lib/ComponentHost.svelte';
-  import type { TemplateInfo } from './lib/types';
+  import ProjectMenu from './lib/ProjectMenu.svelte';
+  import { THEME_LABEL, theme } from './lib/theme.svelte';
+  import type { SimState } from './lib/types';
+  import Banner from './lib/ui/Banner.svelte';
+  import Button from './lib/ui/Button.svelte';
+  import Icon from './lib/ui/Icon.svelte';
+  import IconButton from './lib/ui/IconButton.svelte';
+  import PropList, { type Prop } from './lib/ui/PropList.svelte';
+  import Tabs from './lib/ui/Tabs.svelte';
+
+  /** Modèle de « Créer mon premier projet ». */
+  const FIRST_TEMPLATE = 'blinky-stm32-hal';
+
+  const STATE_LABEL: Record<SimState, string> = {
+    idle: 'Prête',
+    building: 'Compilation',
+    starting: 'Démarrage',
+    running: 'En cours',
+    paused: 'En pause',
+    'debug-wait': 'En attente du débogueur',
+    breakpoint: "Arrêté sur un point d'arrêt",
+    stopped: 'Arrêtée',
+    error: 'Erreur',
+  };
+
+  const FRAMEWORK_LABEL: Record<string, string> = {
+    'stm32-hal': 'STM32 HAL',
+    'esp-idf': 'ESP-IDF',
+    arduino: 'Arduino',
+  };
 
   let path = $state('');
-  let tab = $state<'log' | 'warn'>('log');
+  let menuOpen = $state(false);
+  let menu: ProjectMenu | undefined = $state();
+  let tab = $state('log');
+  let inspectorOpen = $state(true);
+  let dockOpen = $state(true);
   let update = $state<{ version: string } | null>(null);
   let updating = $state('');
-  // Formulaire « Nouveau projet » : copie d'un modèle (section 10.1).
-  let templates = $state<TemplateInfo[] | null>(null);
-  let template = $state('');
-  let dest = $state('');
-  let createError = $state('');
 
-  const running = $derived(['building', 'starting', 'running'].includes(bench.status.state));
+  /** Simulation active : en compilation, au démarrage, en cours ou en pause. */
+  const running = $derived(
+    ['building', 'starting', 'running', 'paused', 'debug-wait', 'breakpoint'].includes(bench.status.state),
+  );
+  const missingDebugTools = $derived(bench.debug?.tools.filter((t) => !t.present) ?? []);
+  const live = $derived(bench.status.state === 'running' || bench.status.state === 'paused');
   const onboard = $derived(bench.instances.filter((i) => i.onboard));
   const placed = $derived(bench.instances.filter((i) => !i.onboard));
-  const missing = $derived(bench.prerequisites?.tools.filter((t) => t.path === null) ?? []);
+  const tools = $derived(bench.prerequisites?.tools ?? []);
+  const missing = $derived(tools.filter((t) => t.path === null));
   // Une commande partagée par deux outils (gcc et make de MSYS2) n'est affichée qu'une fois.
   const installs = $derived([...new Set(missing.map((t) => t.install))]);
+
+  const projectProps = $derived<Prop[]>(
+    bench.project
+      ? [
+          { label: 'Dossier', value: bench.project.path, data: true, full: bench.project.path },
+          { label: 'Framework', value: FRAMEWORK_LABEL[bench.project.framework] ?? bench.project.framework },
+          { label: 'Composants', value: String(bench.instances.length), data: true },
+        ]
+      : [],
+  );
+  const toolProps = $derived<Prop[]>(
+    tools.map((t) => ({
+      label: t.label,
+      value: t.path === null ? 'Absent' : 'Présent',
+      tone: t.path === null ? 'conflict' : 'ok',
+      full: t.path ?? t.install,
+    })),
+  );
+
+  // Build en échec : l'onglet Build s'affiche, panneau déplié (section 10.2).
+  let shownFailure: object | null = null;
+  $effect(() => {
+    const r = bench.build.result;
+    if (r !== null && r !== shownFailure && r.errors > 0) {
+      shownFailure = r;
+      tab = 'build';
+      dockOpen = true;
+    }
+  });
+
+  /** Durée d'un build, en secondes avec une décimale. */
+  function formatSeconds(ms: number): string {
+    return `${(ms / 1000).toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} s`;
+  }
+
+  const debugProps = $derived<Prop[]>(
+    (bench.debug?.tools ?? []).map((t) => ({
+      label: t.label,
+      value: t.present ? 'Présent' : 'Absent',
+      tone: t.present ? 'ok' : 'conflict',
+      full: t.path ?? t.install,
+    })),
+  );
 
   onMount(async () => {
     await bench.init();
@@ -33,7 +116,11 @@
     const first = await bench.defaultProject();
     if (first !== null) {
       path = first;
-      await open();
+      try {
+        await bench.open(path);
+      } catch (e) {
+        bench.status = { state: 'error', message: String(e) };
+      }
     }
     // Hors ligne, la vérification échoue sans bruit (D10).
     update = await invoke<{ version: string } | null>('check_update').catch(() => null);
@@ -48,366 +135,503 @@
     }
   }
 
-  /** Modèle de « Créer mon premier projet ». */
-  const FIRST_TEMPLATE = 'blinky-stm32-hal';
-
-  async function showNewProject(preselect?: string): Promise<void> {
-    createError = '';
-    try {
-      templates = await bench.listTemplates();
-      const chosen = templates.find((t) => t.id === preselect) ?? templates[0];
-      if (chosen !== undefined) {
-        template = chosen.id;
-        dest = chosen.suggested_dir;
-      }
-    } catch (e) {
-      templates = null;
-      bench.status = { state: 'error', message: String(e) };
-    }
+  function togglePause(): void {
+    if (bench.status.state === 'running') void bench.pause();
+    else if (bench.status.state === 'paused') void bench.resume();
   }
 
-  function chooseTemplate(id: string): void {
-    template = id;
-    dest = templates?.find((t) => t.id === id)?.suggested_dir ?? dest;
+  /** CPU du firmware, en % d'un cœur, sans décimale. */
+  function formatCpu(pct: number): string {
+    return `${Math.round(pct).toLocaleString('fr-FR')} %`;
   }
 
-  async function createProject(): Promise<void> {
-    createError = '';
-    try {
-      path = await bench.createProject(template, dest);
-      templates = null;
-      await open();
-    } catch (e) {
-      createError = String(e);
-    }
+  /** Mémoire en Mo : une décimale sous 10 Mo. */
+  function formatMemory(bytes: number): string {
+    const mo = bytes / (1024 * 1024);
+    return `${mo.toLocaleString('fr-FR', { maximumFractionDigits: mo < 10 ? 1 : 0, minimumFractionDigits: mo < 10 ? 1 : 0 })} Mo`;
   }
 
-  async function open(): Promise<void> {
-    try {
-      await bench.open(path);
-    } catch (e) {
-      bench.status = { state: 'error', message: String(e) };
+  function onkeydown(e: KeyboardEvent): void {
+    if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+    const target = e.target as Element | null;
+    if (target?.closest('input, select, textarea, [contenteditable]')) return;
+    if (e.key === ' ') {
+      // Espace garde son rôle sur un bouton ou un onglet qui a le focus.
+      if (target?.closest('button, [role="button"], [role="tab"], a')) return;
+      e.preventDefault();
+      togglePause();
+    } else if (e.key === 'r' || e.key === 'R') {
+      if (live) void bench.reset();
     }
   }
 </script>
 
-<div class="layout">
-  <div class="top">
-  {#if update}
-    <div class="update">
-      Prebench {update.version} est disponible.
-      {#if updating}
-        <span>{updating}</span>
-      {:else}
-        <button onclick={installUpdate}>Installer et redémarrer</button>
-        <button onclick={() => (update = null)}>Plus tard</button>
-      {/if}
-    </div>
-  {/if}
-  {#if missing.length > 0}
-    <div class="prereq" role="alert">
-      <div class="prereq-title">
-        Prérequis manquants pour simuler :
-        {#each bench.prerequisites?.tools ?? [] as t (t.kind)}
-          <span class="tool">{t.path === null ? '❌' : '✅'} {t.label}</span>
-        {/each}
-        <button onclick={() => bench.checkPrerequisites()} disabled={running}>Revérifier</button>
-      </div>
-      <div>Commande à lancer dans un terminal, puis cliquer sur Revérifier :</div>
-      {#each installs as command (command)}
-        <pre>{command}</pre>
-      {/each}
-      <div class="readme">Voir le {bench.prerequisites?.readme}</div>
-    </div>
-  {/if}
-  <header>
-    <strong class="brand">Prebench</strong>
-    <input bind:value={path} spellcheck="false" aria-label="Dossier du projet" disabled={running} />
-    <button onclick={open} disabled={running}>Ouvrir</button>
-    <button onclick={() => showNewProject()} disabled={running}>Nouveau projet…</button>
+<svelte:window {onkeydown} />
+
+<div class="app" class:no-inspector={!inspectorOpen} class:no-dock={!dockOpen}>
+  <header class="toolbar">
+    <ProjectMenu bind:this={menu} bind:open={menuOpen} bind:path disabled={running} />
+    {#if bench.project}
+      <span class="board-name"><span class="quiet">Carte</span>{bench.project.board_name}</span>
+    {/if}
     <span class="sep"></span>
-    <button class="primary" onclick={() => bench.start()} disabled={running || !bench.project}>▶ Démarrer</button>
-    <button onclick={() => bench.stop()} disabled={!running}>■ Arrêter</button>
-    <button onclick={() => bench.reset()} disabled={bench.status.state !== 'running'}>⟲ Reset</button>
-    <span class="status {bench.status.state}" title={bench.status.message}>
-      {bench.status.message || bench.status.state}
-    </span>
+    {#if bench.status.state === 'running'}
+      <Button variant="primary" icon="pause" title="Mettre en pause (Espace)" onclick={togglePause}>Mettre en pause</Button>
+    {:else if bench.status.state === 'paused'}
+      <Button variant="primary" icon="play" title="Reprendre (Espace)" onclick={togglePause}>Reprendre</Button>
+    {:else}
+      <Button variant="primary" icon="play" disabled={running || !bench.project} onclick={() => bench.start()}>Démarrer</Button>
+    {/if}
+    {#if !running}
+      <Button icon="bug" disabled={!bench.project} title="Déboguer dans VS Code" onclick={() => bench.startDebug()}>Déboguer</Button>
+    {/if}
+    <IconButton icon="reset" label="Réinitialiser" shortcut="R" disabled={!live} onclick={() => bench.reset()} />
+    <IconButton icon="stop" label="Arrêter la simulation" disabled={!running} onclick={() => bench.stop()} />
+    <span class="spacer"></span>
+    <IconButton
+      icon="panel-right"
+      label={inspectorOpen ? "Masquer l'inspecteur" : "Afficher l'inspecteur"}
+      onclick={() => (inspectorOpen = !inspectorOpen)}
+    />
+    <IconButton
+      icon={`theme-${theme.preference}`}
+      label="{THEME_LABEL[theme.preference]} (suivant : {THEME_LABEL[theme.next].toLowerCase()})"
+      align="end"
+      onclick={() => theme.cycle()}
+    />
   </header>
-  {#if templates !== null}
-    <form class="new-project" onsubmit={(e) => { e.preventDefault(); void createProject(); }}>
-      <label>
-        Modèle
-        <select value={template} onchange={(e) => chooseTemplate(e.currentTarget.value)}>
-          {#each templates as t (t.id)}
-            <option value={t.id}>{t.id}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="dest">
-        Dossier du nouveau projet
-        <input bind:value={dest} spellcheck="false" />
-      </label>
-      <button class="primary" type="submit" disabled={!template || !dest}>Créer</button>
-      <button type="button" onclick={() => (templates = null)}>Annuler</button>
-      {#if createError}
-        <div class="create-error">{createError}</div>
-      {/if}
-    </form>
-  {/if}
+
+  <div class="banners">
+    {#if bench.status.state === 'debug-wait' && bench.debug}
+      <Banner
+        tone="info"
+        message="Session de débogage prête. Dans VS Code, choisissez « {bench.debug.config_name} » puis lancez le débogage (F5).{bench.debug.launch_json_state === 'created' || bench.debug.launch_json_state === 'updated' ? ' La configuration a été ajoutée à .vscode/launch.json.' : ''}"
+      >
+        {#snippet actions()}
+          <Button icon="stop" onclick={() => bench.stop()}>Arrêter le débogage</Button>
+        {/snippet}
+      </Banner>
+    {/if}
+    {#if bench.debug?.launch_json_error}
+      <Banner tone="warn" message="{bench.debug.launch_json_error}." />
+    {/if}
+    {#if missingDebugTools.length > 0}
+      <Banner
+        tone="warn"
+        message="{missingDebugTools.map((t) => t.label).join(', ')} introuvable : nécessaire pour déboguer. Installez-le avec la commande ci-dessous, puis relancez le débogage."
+      >
+        {#each missingDebugTools as t (t.label)}
+          <pre class="data command">{t.install}</pre>
+        {/each}
+        <span class="quiet">Détails : README, section « Déboguer le firmware ».</span>
+      </Banner>
+    {/if}
+    {#if bench.guard?.kind === 'cpu' && bench.status.state === 'paused'}
+      <Banner tone="warn" message={bench.guard.text}>
+        {#snippet actions()}
+          <Button icon="play" onclick={() => bench.resume()}>Reprendre</Button>
+        {/snippet}
+      </Banner>
+    {:else if bench.guard?.kind === 'memory'}
+      <Banner tone="conflict" message={bench.guard.text}>
+        {#snippet actions()}
+          <Button onclick={() => (bench.guard = null)}>Fermer</Button>
+        {/snippet}
+      </Banner>
+    {/if}
+    {#if update}
+      <Banner tone="info" message="Prebench {update.version} est disponible.">
+        {#snippet actions()}
+          {#if updating}
+            <span class="quiet">{updating}</span>
+          {:else}
+            <Button variant="primary" icon="download" onclick={installUpdate}>Installer et redémarrer</Button>
+            <Button onclick={() => (update = null)}>Plus tard</Button>
+          {/if}
+        {/snippet}
+      </Banner>
+    {/if}
+    {#if missing.length > 0}
+      <Banner
+        tone="warn"
+        message="{missing.map((t) => t.label).join(', ')} introuvable. Installez {missing.length > 1
+          ? 'ces outils'
+          : 'cet outil'} avec la commande ci-dessous dans un terminal, puis cliquez sur Revérifier."
+      >
+        {#each installs as command (command)}
+          <pre class="data command">{command}</pre>
+        {/each}
+        <span class="quiet">Détails : {bench.prerequisites?.readme}</span>
+        {#snippet actions()}
+          <Button icon="reset" disabled={running} onclick={() => bench.checkPrerequisites()}>Revérifier</Button>
+        {/snippet}
+      </Banner>
+    {/if}
   </div>
 
-  <main class="paillasse">
+  <main class="bench" aria-label="Paillasse">
     {#if bench.project}
-      <section class="board" aria-label={bench.project.board_name}>
-        <div class="board-title">{bench.project.board_name}</div>
-        <div class="board-mcu">{bench.project.mcu}</div>
+      <Board name={bench.project.board_name} mcu={bench.project.mcu}>
         {#each onboard as inst (inst.id)}
           <ComponentHost {inst} mode="simulate" />
         {/each}
-      </section>
+      </Board>
       {#each placed as inst (inst.id)}
         <ComponentHost {inst} mode="simulate" />
       {/each}
-    {:else if templates === null}
-      <div class="welcome">
-        <p>Bienvenue dans Prebench. Pour commencer, crée un projet à partir du modèle blinky STM32 HAL : il sera copié dans un dossier que tu pourras modifier.</p>
-        <button class="primary" onclick={() => showNewProject(FIRST_TEMPLATE)}>Créer mon premier projet</button>
+    {:else if !menuOpen}
+      <div class="empty">
+        <p>Aucun projet ouvert. Créez votre premier projet à partir du modèle blinky STM32 HAL : il sera copié dans un dossier que vous pourrez modifier.</p>
+        <Button variant="primary" icon="plus" onclick={() => menu?.show(FIRST_TEMPLATE)}>Créer mon premier projet</Button>
       </div>
     {/if}
   </main>
 
-  <footer>
-    <nav>
-      <button class:active={tab === 'log'} onclick={() => (tab = 'log')}>Journal</button>
-      <button class:active={tab === 'warn'} onclick={() => (tab = 'warn')}>⚠ {bench.warnings.length}</button>
-    </nav>
-    <div class="panel">
-      {#if tab === 'log'}
+  <aside class="inspector" aria-label="Inspecteur" inert={!inspectorOpen}>
+    {#if bench.project}
+      <div class="insp-head">
+        <h2>{bench.project.board_name}</h2>
+        <p>Microcontrôleur <span class="data">{bench.project.mcu}</span></p>
+      </div>
+      <section class="insp-section">
+        <h3>Projet</h3>
+        <PropList props={projectProps} />
+      </section>
+    {:else}
+      <div class="insp-head">
+        <h2>Aucun projet</h2>
+        <p>Ouvrez ou créez un projet depuis la barre d'outils.</p>
+      </div>
+    {/if}
+    {#if bench.debug}
+      <section class="insp-section">
+        <h3>Débogage</h3>
+        <PropList props={debugProps} />
+      </section>
+    {/if}
+    {#if toolProps.length > 0}
+      <section class="insp-section">
+        <h3>Outils de build</h3>
+        <PropList props={toolProps} />
+      </section>
+    {/if}
+  </aside>
+
+  <section class="dock" aria-label="Instruments">
+    <Tabs
+      label="Instruments"
+      bind:active={tab}
+      tabs={[
+        { id: 'log', label: 'Journal' },
+        {
+          id: 'build',
+          label: 'Build',
+          count: bench.build.result?.errors || bench.build.result?.warnings || 0,
+          tone: bench.build.result?.errors ? 'conflict' : 'warn',
+        },
+        { id: 'warn', label: 'Avertissements', icon: 'warn', count: bench.warnings.length },
+      ]}
+    >
+      {#snippet tools()}
+        <IconButton
+          icon="panel-bottom"
+          label={dockOpen ? 'Replier le panneau' : 'Déplier le panneau'}
+          align="end"
+          onclick={() => (dockOpen = !dockOpen)}
+        />
+      {/snippet}
+    </Tabs>
+    <div class="dock-body" role="tabpanel" inert={!dockOpen}>
+      {#if tab === 'build'}
+        <BuildPanel />
+      {:else if tab === 'log'}
         {#each bench.logs as line, i (i)}
           <div class="line"><span class="src">{line.source}</span>{line.text}</div>
+        {:else}
+          <p class="empty-line">Le journal est vide. Il affiche le build, le démarrage et les messages du firmware.</p>
         {/each}
       {:else}
         {#each bench.warnings as text (text)}
-          <div class="line warn">⚠ {text}</div>
+          <div class="line warn-line"><Icon name="warn" /><span>{text}</span></div>
+        {:else}
+          <p class="empty-line">Aucun avertissement.</p>
         {/each}
       {/if}
     </div>
+  </section>
+
+  <footer class="status">
+    <span class="run {bench.status.state}"><span class="dot"></span>{STATE_LABEL[bench.status.state]}</span>
+    {#if bench.status.message && bench.status.message !== STATE_LABEL[bench.status.state]}
+      <span class="message" title={bench.status.message}>{bench.status.message}</span>
+    {/if}
+    <span class="right">
+      {#if bench.build.running}
+        <span>Build en cours</span>
+      {:else if bench.build.result?.ok === false}
+        <span class="build-failed"><Icon name="error" />Build en échec</span>
+      {:else if bench.build.result}
+        <span>Build sim <span class="data">{formatSeconds(bench.build.result.duration_ms)}</span></span>
+      {/if}
+      {#if bench.usage}
+        <span title="Processeur utilisé par le firmware, en pourcentage d'un cœur. Pause automatique au-delà de 80 % pendant 5 s.">
+          CPU <span class="data meter cpu">{formatCpu(bench.usage.cpu)}</span>
+        </span>
+        <span title="Mémoire du firmware. Arrêt au-delà de {formatMemory(bench.usage.memory_limit)}.">
+          RAM <span class="data meter ram">{formatMemory(bench.usage.memory)}</span>
+        </span>
+      {/if}
+      <span>Prebench <span class="data">{__APP_VERSION__}</span></span>
+    </span>
   </footer>
 </div>
 
 <style>
-  .layout {
+  .app {
     display: grid;
-    grid-template-rows: auto 1fr 200px;
     height: 100%;
+    min-width: 960px;
+    min-height: 600px;
+    grid-template-rows: 40px auto minmax(0, 1fr) 220px 24px;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    grid-template-areas:
+      'toolbar toolbar'
+      'banners banners'
+      'bench inspector'
+      'dock dock'
+      'status status';
+    transition:
+      grid-template-columns var(--pb-panel-motion),
+      grid-template-rows var(--pb-panel-motion);
   }
-  .update {
+  .app.no-inspector {
+    grid-template-columns: minmax(0, 1fr) 0;
+  }
+  .app.no-dock {
+    grid-template-rows: 40px auto minmax(0, 1fr) 33px 24px;
+  }
+
+  /* Barre d'outils */
+  .toolbar {
+    grid-area: toolbar;
     display: flex;
-    gap: 8px;
     align-items: center;
-    padding: 6px 12px;
-    background: var(--accent);
-    color: #062016;
-  }
-  .prereq {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 12px;
-    background: var(--panel);
-    border-bottom: 2px solid var(--error);
-    font-size: 12px;
-  }
-  .prereq-title {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: center;
-    font-weight: 600;
-  }
-  .prereq .tool {
-    font-weight: normal;
-  }
-  .prereq pre {
-    margin: 0;
-    padding: 4px 8px;
-    border-radius: 4px;
-    background: var(--bg);
-    white-space: pre-wrap;
-    user-select: text;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-  }
-  .readme {
-    color: var(--text-muted);
-    user-select: text;
-  }
-  .new-project {
-    display: flex;
-    flex-wrap: wrap;
     gap: 8px;
-    align-items: flex-end;
-    padding: 8px 12px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--pb-line);
   }
-  .new-project label {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    color: var(--text-muted);
+  .board-name {
+    display: inline-flex;
+    gap: 6px;
+    padding: 0 8px;
   }
-  .new-project .dest {
-    flex: 1;
-  }
-  .new-project select {
-    padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-  }
-  .create-error {
-    flex-basis: 100%;
-    color: var(--error);
-  }
-  header {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    padding: 8px 12px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-  }
-  .brand {
-    margin-right: 8px;
-  }
-  input {
-    flex: 1;
-    min-width: 120px;
-    padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 12px;
-  }
-  button {
-    padding: 5px 10px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    cursor: pointer;
-  }
-  button:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-  button.primary:not(:disabled) {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #062016;
+  .quiet {
+    color: var(--pb-text-quiet);
   }
   .sep {
-    width: 8px;
+    width: 1px;
+    height: 20px;
+    margin: 0 4px;
+    background: var(--pb-line);
   }
-  .status {
-    max-width: 320px;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
+  .spacer {
+    flex: 1;
+  }
+
+  /* Bannières */
+  .banners {
+    grid-area: banners;
+  }
+  .command {
+    margin: 0;
+    padding: 4px 8px;
+    border: 1px solid var(--pb-line);
+    border-radius: 3px;
+    background: var(--pb-chrome);
     font-size: 12px;
-    color: var(--text-muted);
+    white-space: pre-wrap;
   }
-  .status.running {
-    color: var(--accent);
-  }
-  .status.error {
-    color: var(--error);
-  }
-  .paillasse {
+
+  /* Paillasse : tapis antistatique quadrillé (charte 2.2) */
+  .bench {
+    grid-area: bench;
     position: relative;
     overflow: auto;
-    background-image: radial-gradient(var(--border) 1px, transparent 1px);
-    background-size: 20px 20px;
+    background-color: var(--pb-mat);
+    background-image:
+      linear-gradient(var(--pb-mat-grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--pb-mat-grid) 1px, transparent 1px);
+    background-size: 24px 24px;
   }
-  .welcome {
-    max-width: 420px;
-    margin: 80px auto;
-    padding: 20px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--panel);
-    text-align: center;
-  }
-  .welcome p {
-    margin: 0 0 16px;
-    line-height: 1.5;
-  }
-  .board {
+  .empty {
     position: absolute;
-    left: 40px;
-    top: 40px;
-    width: 420px;
-    height: 260px;
-    border-radius: 10px;
-    background: var(--pcb);
-    border: 3px solid var(--pcb-edge);
-  }
-  .board-title {
-    position: absolute;
-    left: 16px;
-    top: 12px;
-    font-weight: 600;
-    color: #e8f5ee;
-  }
-  .board-mcu {
-    position: absolute;
-    left: 16px;
-    top: 32px;
-    font-size: 12px;
-    color: #b9dcc9;
-  }
-  footer {
+    left: 50%;
+    top: 40%;
+    translate: -50% -50%;
+    width: 440px;
     display: flex;
     flex-direction: column;
-    min-height: 0;
-    border-top: 1px solid var(--border);
-    background: var(--panel);
+    align-items: flex-start;
+    gap: 12px;
+    color: var(--pb-mat-ink);
   }
-  nav {
-    display: flex;
-    gap: 4px;
-    padding: 4px 8px;
+  .empty p {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.5;
   }
-  nav button {
-    border: none;
-    background: none;
-    color: var(--text-muted);
+
+  /* Inspecteur */
+  .inspector {
+    grid-area: inspector;
+    overflow: hidden auto;
+    border-left: 1px solid var(--pb-line);
+    background: var(--pb-panel);
   }
-  nav button.active {
-    color: var(--text);
-    border-bottom: 2px solid var(--accent);
-    border-radius: 0;
+  .no-inspector .inspector {
+    border-left: 0;
   }
-  .panel {
-    flex: 1;
-    overflow: auto;
-    padding: 4px 12px;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
+  .insp-head {
+    min-width: 280px;
+    padding: 12px 12px 8px;
+    border-bottom: 1px solid var(--pb-line);
+  }
+  .insp-head h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .insp-head p {
+    margin: 4px 0 0;
+    color: var(--pb-text-quiet);
     font-size: 12px;
+  }
+  .insp-section {
+    min-width: 280px;
+    padding: 8px 12px 12px;
+    border-bottom: 1px solid var(--pb-line);
+  }
+  .insp-section h3 {
+    margin: 4px 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  /* Panneau du bas */
+  .dock {
+    grid-area: dock;
+    display: grid;
+    grid-template-rows: 32px minmax(0, 1fr);
+    min-height: 0;
+    border-top: 1px solid var(--pb-line);
+    background: var(--pb-panel);
+  }
+  .dock-body {
+    overflow: auto;
+    padding: 6px 12px;
+    font: 12px/20px var(--pb-font-data);
+    font-variant-numeric: tabular-nums;
+    user-select: text;
   }
   .line {
     white-space: pre-wrap;
   }
   .src {
     display: inline-block;
-    min-width: 72px;
-    color: var(--text-muted);
+    min-width: 80px;
+    color: var(--pb-text-quiet);
   }
-  .warn {
-    color: var(--warn);
+  .warn-line {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 2px 0;
+  }
+  .warn-line :global(.icon) {
+    margin-top: 2px;
+    color: var(--pb-warn);
+  }
+  .empty-line {
+    margin: 0;
+    color: var(--pb-text-quiet);
+    font-family: var(--pb-font-ui);
+  }
+
+  /* Barre d'état */
+  .status {
+    grid-area: status;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: 0;
+    padding: 0 12px;
+    border-top: 1px solid var(--pb-line);
+    color: var(--pb-text-quiet);
+    font-size: 11px;
+  }
+  .run {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    color: var(--pb-text);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--pb-low);
+  }
+  .running .dot {
+    background: var(--pb-ok);
+  }
+  .building .dot,
+  .starting .dot {
+    background: transparent;
+    border: 1.5px solid var(--pb-text-quiet);
+  }
+  .paused .dot,
+  .breakpoint .dot {
+    background: var(--pb-warn);
+  }
+  .debug-wait .dot {
+    background: transparent;
+    border: 1.5px solid var(--pb-accent);
+  }
+  .error .dot {
+    background: var(--pb-conflict);
+  }
+  .message {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .right {
+    margin-left: auto;
+    flex: none;
+    display: flex;
+    gap: 16px;
+  }
+  .build-failed {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--pb-conflict);
+  }
+  .build-failed :global(.icon) {
+    width: 12px;
+    height: 12px;
+  }
+  /* Valeurs qui changent chaque seconde : largeur fixe, alignées à droite */
+  .meter {
+    display: inline-block;
+    text-align: right;
+  }
+  .cpu {
+    min-width: 5ch;
+  }
+  .ram {
+    min-width: 6ch;
   }
 </style>

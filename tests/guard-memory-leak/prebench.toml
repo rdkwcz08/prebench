@@ -1,0 +1,10 @@
+#:schema ../../docs/prebench.schema.json
+# Garde-fou mémoire (section 11.2) : allocation répétée sans libération.
+# Attendu : firmware arrêté au-delà de 256 Mo, bannière explicative.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"

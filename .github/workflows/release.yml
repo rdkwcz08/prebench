@@ -178,7 +178,7 @@ jobs:
           STATUS=0
           env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
             "$EXE" --verifier-installation "$RUNNER_TEMP/Mes projets/blinky test" "$REPORT" || STATUS=$?
-          cat "$REPORT" 2>/dev/null || echo "rapport absent"
+          cat "$REPORT" 2>/dev/null || echo "rapport absent (voir stderr ci-dessus)"
           exit "$STATUS"
 
       - uses: actions/upload-artifact@v4

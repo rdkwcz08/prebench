@@ -1,6 +1,6 @@
 [package]
 name = "prebench"
-version = "0.1.1"
+version = "0.1.2"
 description = "Prebench — simulateur de cartes de développement"
 authors = ["Mathis Rudkiewicz"]
 license = "MIT"
@@ -33,11 +33,30 @@ tauri-plugin-updater = "2.14.1"
 # Chemins Windows sans le préfixe \\?\ (renvoyé par le dossier des ressources),
 # que make et CMake ne savent pas lire ; déjà présente dans l'arbre de Tauri.
 dunce = "1.0.5"
+# Surveillance du dossier du projet (section 10.2) : FSEvents (macOS),
+# ReadDirectoryChangesW (Windows), inotify (Linux). Purement événementielle
+# (règle 16.2.9) ; l'anti-rebond est fait au minuteur tokio (session.rs).
+notify = "8.2"
 
-# Priorité basse et EcoQoS du firmware (platform/windows.rs, section 11.2) ;
+# Garde-fous du firmware sous macOS et Linux (platform/macos.rs, section 11.2) :
+# setrlimit, proc_pid_rusage, SIGSTOP / SIGCONT ; déjà présente dans l'arbre de Tauri.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Priorité basse, EcoQoS, Job Object (plafond mémoire, kill on close), mesure
+# CPU / mémoire et suspension du firmware (platform/windows.rs, section 11.2) ;
 # déjà présente dans l'arbre de dépendances de Tauri.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 codegen-units = 1

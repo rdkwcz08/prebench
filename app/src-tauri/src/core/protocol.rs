@@ -9,7 +9,7 @@ pub const MAGIC: u16 = 0x4250;
 pub const HEADER_SIZE: usize = 24;
 pub const MAX_PAYLOAD: usize = 65536;
 pub const PROTOCOL_MAJOR: u8 = 1;
-pub const PROTOCOL_MINOR: u8 = 0;
+pub const PROTOCOL_MINOR: u8 = 1;
 
 #[allow(dead_code)] // posé par le firmware ; le cœur n'émet pas encore de requête SYNC
 pub const FLAG_SYNC: u16 = 0x0001;
@@ -22,17 +22,17 @@ pub mod msg {
     pub const GPIO_WRITE: u16 = 0x0011;
     pub const WARN: u16 = 0x0080;
     pub const LOG: u16 = 0x0081;
+    /// Protocole 1.1 : firmware lancé par le débogueur (PREBENCH_DEBUG=1).
+    pub const HEARTBEAT: u16 = 0x0090;
     pub const PING: u16 = 0x00F0;
 
     pub const WELCOME: u16 = 0x8001;
     pub const REJECT: u16 = 0x8002;
     pub const GPIO_INPUT: u16 = 0x8010;
     pub const RESET: u16 = 0x80E0;
-    // Pause, reprise et arrêt propre : barre d'outils de la phase 2.
-    #[allow(dead_code)]
     pub const PAUSE: u16 = 0x80E1;
-    #[allow(dead_code)]
     pub const RESUME: u16 = 0x80E2;
+    // Arrêt propre : pas encore utilisé (l'arrêt ferme le socket).
     #[allow(dead_code)]
     pub const SHUTDOWN: u16 = 0x80E3;
     pub const PONG: u16 = 0x80F0;

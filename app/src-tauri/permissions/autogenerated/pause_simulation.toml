@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pause-simulation"
+description = "Enables the pause_simulation command without any pre-configured scope."
+commands.allow = ["pause_simulation"]
+
+[[permission]]
+identifier = "deny-pause-simulation"
+description = "Denies the pause_simulation command without any pre-configured scope."
+commands.deny = ["pause_simulation"]

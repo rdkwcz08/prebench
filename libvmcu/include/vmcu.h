@@ -49,7 +49,7 @@ extern "C" {
 
 /** Version du protocole firmware <-> app implémentée (docs/protocol.md). */
 #define VMCU_PROTOCOL_VERSION_MAJOR 1
-#define VMCU_PROTOCOL_VERSION_MINOR 0
+#define VMCU_PROTOCOL_VERSION_MINOR 1
 
 /* Vérification du format printf, sans extension MSVC. */
 #if defined(__MINGW32__) && defined(__MINGW_PRINTF_FORMAT)
