@@ -121,6 +121,24 @@ impl Network {
         self.update(node)
     }
 
+    /// Reprend les sorties et tirages du firmware et des composants d'un ancien
+    /// réseau (câblage modifié pendant la simulation : le nouveau réseau a ses
+    /// propres liaisons, les contributions de la carte sont déjà posées).
+    pub fn carry_over(&mut self, old: &Network) {
+        for ((node, source), drive) in &old.drives {
+            if *source != Source::Board {
+                self.add_node(node.clone());
+                self.drives.insert((node.clone(), *source), *drive);
+            }
+        }
+        for ((node, source), pull) in &old.pulls {
+            if *source != Source::Board {
+                self.add_node(node.clone());
+                self.pulls.insert((node.clone(), *source), *pull);
+            }
+        }
+    }
+
     /// Recalcule tous les nets (après construction). Renvoie tous les nœuds.
     pub fn resolve_all(&mut self) -> Vec<Node> {
         let roots: BTreeSet<Node> = self.parent.keys().map(|n| self.find(n)).collect();
@@ -216,6 +234,21 @@ mod tests {
         assert_eq!(net.level(&comp("led", "A")), Level::High);
         net.set_drive(&comp("led", "A"), Source::Component, Drive::Low);
         assert_eq!(net.level(&board("PA5")), Level::Conflict);
+    }
+
+    /// Câblage modifié en cours de simulation : la sortie du firmware est
+    /// reprise, le nouveau fil propage son niveau.
+    #[test]
+    fn rewire_keeps_firmware_outputs() {
+        let mut old = Network::default();
+        old.add_node(board("PA5"));
+        old.set_drive(&board("PA5"), Source::Firmware, Drive::High);
+        old.resolve_all();
+        let mut new = Network::default();
+        new.connect(board("PA5"), comp("led1", "A"));
+        new.carry_over(&old);
+        new.resolve_all();
+        assert_eq!(new.level(&comp("led1", "A")), Level::High);
     }
 
     #[test]

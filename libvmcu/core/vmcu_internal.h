@@ -16,7 +16,7 @@
 #ifndef VMCU_DEFAULT_FRAMEWORK
 #define VMCU_DEFAULT_FRAMEWORK "stm32-hal"
 #endif
-#define VMCU_LIBVMCU_VERSION "0.1.2"
+#define VMCU_LIBVMCU_VERSION "0.1.3"
 
 /* Garde-fous (section 5.5). */
 #define VMCU_GUARD_CALLS       10000u   /* appels sans sommeil avant micro-pause */
@@ -47,10 +47,16 @@ vmcu_status_t vmcu__request(uint16_t type, const uint8_t *payload, size_t len,
 void vmcu__flush(void);
 
 /** Événement remis au fil IRQ. */
+/** Nature d'un événement de la file IRQ. */
+enum { VMCU__IRQ_GPIO = 0, VMCU__IRQ_UART = 1, VMCU__IRQ_POST = 2 };
+
 typedef struct {
-    uint8_t port;
+    uint8_t kind; /* VMCU__IRQ_* */
+    uint8_t port; /* GPIO : port ; UART : identifiant */
     uint8_t pin;
     uint8_t edge; /* vmcu_gpio_edge_t détecté */
+    void (*fn)(void *arg); /* VMCU__IRQ_POST */
+    void *arg;
 } vmcu__irq_event_t;
 
 /** Ajoute un événement à la file IRQ bornée. false si la file est pleine. */
@@ -80,6 +86,14 @@ void     vmcu__guard_reset(void);
 void vmcu__gpio_init(void);
 void vmcu__gpio_on_input(uint8_t port, uint8_t pin, uint8_t level);
 void vmcu__gpio_dispatch(const vmcu__irq_event_t *ev);
+
+/* --- UART (vmcu_uart.c) ---------------------------------------------------------- */
+
+void vmcu__uart_init(void);
+/** Fil E/S : octets reçus de l'app (UART_RX). */
+void vmcu__uart_on_rx(uint8_t id, const uint8_t *data, size_t len);
+/** Fil IRQ : octets en attente remis au callback de réception. */
+void vmcu__uart_dispatch(uint8_t id);
 
 /* --- Diagnostic (vmcu_diag.c) -------------------------------------------------- */
 

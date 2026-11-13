@@ -38,6 +38,11 @@
       "type": "array",
       "items": { "$ref": "#/$defs/wire" }
     },
+    "notes": {
+      "description": "Notes libres posées sur la paillasse pour se repérer (« Bloc alimentation »).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/note" }
+    },
     "environment": {
       "description": "Valeurs du panneau environnement (section 8.5), conservées entre deux sessions.",
       "type": "object",
@@ -82,6 +87,12 @@
           "pattern": "^[a-z][a-z0-9_]{0,31}$",
           "not": { "const": "board" }
         },
+        "name": {
+          "description": "Nom affiché sur la paillasse, dans l'inspecteur et les avertissements (« LED rouge ») ; l'identifiant reste celui des fils.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
         "type": {
           "description": "Identifiant d'un composant de components/.",
           "type": "string",
@@ -101,10 +112,25 @@
         }
       }
     },
+    "note": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "pos"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "pos": {
+          "description": "Coin haut-gauche [x, y], en unités du canevas.",
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
     "endpoint": {
-      "description": "« <id>.<broche> » : broche d'un composant (oled1.SDA) ou de la carte (board.PB9, board.GND).",
+      "description": "Broche d'un composant « <id>.<broche> » (oled1.SDA) ; pastille de la carte « board.<connecteur>:<n> » (board.CN6:4, n à partir de 1 comme sur la carte, layout.headers du fichier de carte) ; ou signal de la carte « board.<signal> » (board.PB9, dessiné sur sa première pastille). Le réseau logique fusionne les pastilles d'un même signal.",
       "type": "string",
-      "pattern": "^[a-z][a-z0-9_]{0,31}\\.[A-Za-z0-9_+-]{1,16}$"
+      "pattern": "^(board\\.[A-Za-z][A-Za-z0-9_]{0,15}:[1-9][0-9]{0,2}|[a-z][a-z0-9_]{0,31}\\.[A-Za-z0-9_+-]{1,16})$"
     },
     "wire": {
       "type": "object",
@@ -112,7 +138,12 @@
       "required": ["from", "to"],
       "properties": {
         "from": { "$ref": "#/$defs/endpoint" },
-        "to": { "$ref": "#/$defs/endpoint" }
+        "to": { "$ref": "#/$defs/endpoint" },
+        "color": {
+          "description": "Couleur du fil (charte de design, section 2.4) ; absente : selon la fonction de la pastille de la carte.",
+          "type": "string",
+          "enum": ["red", "black", "yellow", "green", "blue", "orange", "purple"]
+        }
       }
     }
   }

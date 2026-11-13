@@ -2,8 +2,11 @@
 //
 // Préférence « system » (défaut), « light » ou « dark ». Le thème effectif est
 // posé sur <html data-theme> ; en mode « system », il suit prefers-color-scheme
-// en direct. Le choix manuel est mémorisé dans le navigateur de la WebView :
-// s'il est illisible (stockage indisponible), on revient au thème du système.
+// en direct. Le choix est un réglage de l'app (section 10.7, settings.toml) ;
+// une copie dans le stockage de la WebView évite seulement l'éclair d'un
+// mauvais thème au démarrage, avant la réponse du cœur.
+
+import { settings } from './settings.svelte';
 
 export type ThemePreference = 'system' | 'light' | 'dark';
 
@@ -38,6 +41,16 @@ class Theme {
     this.apply();
   }
 
+  /** Préférence lue dans les réglages de l'app (fait foi sur la copie locale). */
+  adoptSetting(): void {
+    const v = settings.text('theme', this.preference);
+    if (v === 'system' || v === 'light' || v === 'dark') {
+      this.preference = v;
+      this.cache(v);
+      this.apply();
+    }
+  }
+
   /** Préférence suivante : système, clair, sombre. */
   get next(): ThemePreference {
     return ORDER[(ORDER.indexOf(this.preference) + 1) % ORDER.length] ?? 'system';
@@ -49,12 +62,19 @@ class Theme {
 
   set(preference: ThemePreference): void {
     this.preference = preference;
+    this.cache(preference);
+    this.apply();
+    settings.set('theme', preference).catch(() => {
+      // non enregistré : le thème reste appliqué pour cette session
+    });
+  }
+
+  private cache(preference: ThemePreference): void {
     try {
       localStorage.setItem(KEY, preference);
     } catch {
-      // non mémorisé : sans conséquence
+      // copie locale indisponible : sans conséquence
     }
-    this.apply();
   }
 
   private apply(): void {

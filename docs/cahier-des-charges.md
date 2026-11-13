@@ -526,6 +526,27 @@ Un seul écran : canevas au centre, panneaux en onglets en bas, inspecteur à dr
 - Câblage assisté : en tirant un fil depuis une broche de composant, seules les broches compatibles de la carte s'allument.
 - Extension VS Code (commandes, état, sortie série) : Plus tard, non nécessaire grâce à la surveillance du dossier, aux liens cliquables et à la CLI.
 
+### 10.7 Réglages
+
+**Principe.** Toute valeur réglable est déclarée à un seul endroit (`app/src-tauri/src/settings.rs`), avec sa portée et sa valeur par défaut ; le cœur lit ces défauts, l'interface reçoit la liste (`get_settings`). Deux niveaux :
+
+- **app** : préférences de l'utilisateur, dans `settings.toml` du dossier de configuration de l'app (`~/Library/Application Support/dev.prebench.app`, `%APPDATA%\dev.prebench.app`) ;
+- **projet** : réglages propres à un montage, dans une table `[settings]` de `prebench.toml`, ajoutée au schéma (ajout compatible) avec le premier réglage de projet modifiable. Une valeur du projet l'emporte sur celle de l'app.
+
+Chaque brique arrive quand elle devient utile : un réglage peut être déclaré « fixe » (sa valeur par défaut fait foi, rien ne la modifie encore), puis devenir modifiable. Un fichier modifié à la main avec une valeur invalide est ignoré : la valeur par défaut s'applique.
+
+| Réglage | Portée | Défaut | État |
+| --- | --- | --- | --- |
+| Thème (`system`, `light`, `dark`) | app | `system` | Modifiable (bouton de la barre d'outils) |
+| Éditeur pour ouvrir `fichier:ligne` | app | VS Code | Fixe ; autres éditeurs : Plus tard |
+| Images par seconde, sur secteur / sur batterie | app | 60 / 30 | Fixe |
+| Pause automatique : CPU du firmware et durée | projet | 80 % d'un cœur, 5 s | Fixe |
+| Plafond mémoire du firmware | projet | 256 Mo | Fixe ; modifiable : Plus tard |
+| Simulation quand la fenêtre est masquée | app | continue | Prévu |
+| Accès internet du shim Wi-Fi | projet | non (localhost) | Prévu (déjà `network.internet` dans le schéma, V2) |
+
+**Écran des réglages** : Plus tard ; en attendant, seuls les contrôles existants (bouton de thème) modifient un réglage.
+
 ## 11. Performance, ressources et sécurité
 
 Aucun bug du firmware ne doit pouvoir geler l'ordinateur : au pire, la simulation se met en pause avec un message clair.
@@ -546,7 +567,7 @@ Taille de l'app visée : de l'ordre de 10 à 20 Mo, hors toolchains.
 | Garde-fou | macOS | Windows | Défaut |
 | --- | --- | --- | --- |
 | Plafond mémoire par firmware | Surveillance de l'empreinte mémoire (`proc_pid_rusage`) à 1 Hz, à 4 Hz au-delà de la moitié du plafond, et arrêt au-delà du plafond : macOS n'applique pas `setrlimit` (`RLIMIT_AS`, `RLIMIT_DATA`) | Même surveillance + Job Object (plafond système au double) ; Linux : même surveillance + `RLIMIT_AS` au double | 256 Mo surveillés, arrêt du firmware + bannière ; limite réglable dans `prebench.toml` : Plus tard ; plafond système sous macOS par `taskpolicy -m <Mo>` au lancement (option à évaluer) : Plus tard |
-| Surveillance CPU par enfant | `proc_pid_rusage` | `GetProcessTimes` (windows-sys, sans crate supplémentaire) | Minuteur à 1 Hz, actif seulement pendant une simulation et hors pause ; > 80 % d'un cœur pendant 5 s → pause (`PAUSE`, puis suspension du processus) + bannière « Reprendre » |
+| Surveillance CPU par enfant | `proc_pid_rusage` | `GetProcessTimes` (windows-sys, sans crate supplémentaire) | Minuteur à 1 Hz, actif seulement pendant une simulation et hors pause ; 5 s de temps CPU consommé à plus de 80 % d'un cœur (temps CPU du processus, pas durée écoulée : indépendant de la charge de la machine) → pause (`PAUSE`, puis suspension du processus) + bannière « Reprendre » |
 | Cœurs économes | QoS « utility » (cœurs E) | EcoQoS (Windows 11) | Activé |
 | Cartes simultanées | Limite de l'app | Limite de l'app | 4 |
 | Plantage firmware | Processus séparé, crash et pile d'appels affichés | Idem |  |

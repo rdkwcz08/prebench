@@ -58,7 +58,10 @@ int main(void)
     CHECK(f.data[2] == VMCU_GPIO_MODE_ALTERNATE_PP && f.data[5] == 7);
     CHECK(fake_app_wait(fa, VMCU_MSG_GPIO_CONFIG, 0, 3, 1, 3000, &f));
     CHECK(f.data[2] == VMCU_GPIO_MODE_ALTERNATE_PP && f.data[5] == 7);
-    CHECK(warned(fa, "HAL_UART_Init"));
+    /* USART2 simulée : débit annoncé (115 200 bauds), sans avertissement « non simulé » */
+    CHECK(fake_app_wait(fa, VMCU_MSG_UART_CONFIG, 2, -1, 1, 3000, &f));
+    CHECK(f.data[4] == 0x00 && f.data[5] == 0xC2 && f.data[6] == 0x01);
+    CHECK(!warned(fa, "HAL_UART_Init"));
 
     /* Appui sur B1 : traité par EXTI15_10_IRQHandler du projet, sans plantage */
     fake_app_send_gpio_input(fa, 2, 13, 0);

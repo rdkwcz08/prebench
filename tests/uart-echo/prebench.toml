@@ -1,0 +1,11 @@
+#:schema ../../docs/prebench.schema.json
+# Moniteur série et traceur : USART2 (port série du ST-LINK) à 115 200 bauds.
+# Le firmware renvoie chaque octet reçu (écho) et émet une mesure toutes les
+# 500 ms au format du traceur : « temp:21.4,hum:55 ».
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"

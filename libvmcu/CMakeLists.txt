@@ -46,6 +46,7 @@ add_library(vmcu STATIC
   core/vmcu_client.c
   core/vmcu_time.c
   core/vmcu_gpio.c
+  core/vmcu_uart.c
   core/vmcu_diag.c
   core/vmcu_unsupported.c
   ${_vmcu_platform}

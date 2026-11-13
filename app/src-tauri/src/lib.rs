@@ -15,11 +15,15 @@ mod install_check;
 mod platform;
 mod project;
 mod session;
+mod settings;
 mod update;
 
 pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Fenêtre « Enregistrer sous » ouverte par le cœur (export série) ;
+        // aucune permission de dialogue n'est donnée à l'interface.
+        .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::default())
         .setup(|app| {
             // Vérification de l'app installée : sans fenêtre (install_check.rs).
@@ -48,17 +52,31 @@ pub fn run() {
             commands::pause_simulation,
             commands::resume_simulation,
             commands::component_control,
+            commands::uart_send,
+            commands::export_serial,
             commands::open_in_editor,
             commands::start_debug,
+            commands::save_bench,
+            commands::preview_states,
+            commands::get_settings,
+            commands::set_setting,
             commands::check_prerequisites,
             commands::list_templates,
             commands::create_project,
             update::check_update,
             update::install_update,
         ])
-        .run(tauri::generate_context!());
-    if let Err(e) = result {
-        eprintln!("Prebench n'a pas pu démarrer : {e}");
-        std::process::exit(1);
+        .build(tauri::generate_context!());
+    match result {
+        Ok(app) => app.run(|handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                let state = tauri::Manager::state::<commands::AppState>(handle);
+                tauri::async_runtime::block_on(commands::shutdown(&state));
+            }
+        }),
+        Err(e) => {
+            eprintln!("Prebench n'a pas pu démarrer : {e}");
+            std::process::exit(1);
+        }
     }
 }

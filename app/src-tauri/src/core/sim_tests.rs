@@ -22,27 +22,60 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
+/// Plafond de sécurité d'une attente : il évite qu'un test bloqué tourne sans
+/// fin. Ce n'est pas une mesure : les tests attendent des événements et
+/// mesurent le temps du firmware, jamais l'heure de réception.
+const CEILING: Duration = Duration::from_secs(120);
+
 /// Événements reçus par le faux client, dans l'ordre d'arrivée.
 struct Recorder {
     rx: mpsc::Receiver<(String, Value)>,
+    t0: Instant,
+    seen: std::cell::RefCell<Vec<String>>,
+    /// Dernier niveau écrit sur LD2 (PA5) par le firmware en cours.
+    ld2_level: std::cell::Cell<Option<u64>>,
+    /// Bascules de LD2 vues par `wait`, en temps du firmware (µs).
+    ld2: std::cell::RefCell<Vec<u64>>,
 }
 
 impl Recorder {
-    /// Attend un événement satisfaisant `pred` ; panique à l'expiration.
-    fn wait(
-        &self,
-        timeout: Duration,
-        mut pred: impl FnMut(&str, &Value) -> bool,
-    ) -> (String, Value) {
-        let deadline = Instant::now() + timeout;
+    /// Attend un événement satisfaisant `pred` ; panique au plafond de sécurité
+    /// en affichant les derniers événements reçus.
+    fn wait(&self, mut pred: impl FnMut(&str, &Value) -> bool) -> (String, Value) {
+        let deadline = Instant::now() + CEILING;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            let (name, v) = self
-                .rx
-                .recv_timeout(left)
-                .expect("événement attendu non reçu à temps");
+            let Ok((name, v)) = self.rx.recv_timeout(left) else {
+                panic!(
+                    "événement attendu non reçu ; derniers : {:#?}",
+                    self.seen.borrow()
+                );
+            };
+            {
+                let mut seen = self.seen.borrow_mut();
+                if seen.len() == 12 {
+                    seen.remove(0);
+                }
+                let mut line = format!("{:>6} ms {name} {v}", self.t0.elapsed().as_millis());
+                line.truncate(200);
+                seen.push(line);
+            }
             if name == "sim:status" && v["state"] == "error" {
                 panic!("erreur de simulation : {}", v["message"]);
+            }
+            if name == "sim:status"
+                && ["starting", "debug-wait", "stopped"]
+                    .contains(&v["state"].as_str().unwrap_or(""))
+            {
+                // Nouveau lancement : l'horloge du firmware repart de zéro.
+                self.ld2_level.set(None);
+            }
+            if name == "sim:test-gpio" && v["pin"] == "PA5" {
+                let level = v["level"].as_u64();
+                if self.ld2_level.get().is_some() && level != self.ld2_level.get() {
+                    self.ld2.borrow_mut().push(v["t_us"].as_u64().unwrap_or(0));
+                }
+                self.ld2_level.set(level);
             }
             if pred(&name, &v) {
                 return (name, v);
@@ -51,7 +84,25 @@ impl Recorder {
     }
 }
 
-fn start_project(dir: &Path) -> (tauri::App<tauri::test::MockRuntime>, SimHandle, Recorder) {
+/// Simulation d'un test, arrêtée à la fin du test même s'il échoue : sans
+/// cela, un firmware suspendu par le garde-fou resterait figé (état T) après
+/// la fin du binaire de test.
+struct Sim(SimHandle);
+
+impl std::ops::Deref for Sim {
+    type Target = SimHandle;
+    fn deref(&self) -> &SimHandle {
+        &self.0
+    }
+}
+
+impl Drop for Sim {
+    fn drop(&mut self) {
+        tauri::async_runtime::block_on(self.0.stop_and_wait());
+    }
+}
+
+fn start_project(dir: &Path) -> (tauri::App<tauri::test::MockRuntime>, Sim, Recorder) {
     start_project_with(&repo_root(), dir, &test_build_dir(dir))
 }
 
@@ -63,11 +114,35 @@ fn test_build_dir(dir: &Path) -> PathBuf {
     )
 }
 
+/// Build « sim » d'un projet. Plusieurs tests compilent le même projet dans
+/// le même dossier de build : un verrou par dossier évite deux CMake à la fois
+/// (l'app, elle, ne lance qu'un build à la fois).
+fn build_locked(root: &Path, dir: &Path, build_dir: &Path) -> PathBuf {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let lock = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(build_dir.to_path_buf())
+        .or_default()
+        .clone();
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    tauri::async_runtime::block_on(build_sim(
+        dir,
+        root,
+        build_dir,
+        &crate::platform::toolchain::Toolchain::detect(),
+    ))
+    .expect("build « sim »")
+}
+
 fn start_project_with(
     root: &Path,
     dir: &Path,
     build_dir: &Path,
-) -> (tauri::App<tauri::test::MockRuntime>, SimHandle, Recorder) {
+) -> (tauri::App<tauri::test::MockRuntime>, Sim, Recorder) {
     let (app, handle, rec, _) = start_project_full(root, dir, build_dir, None);
     (app, handle, rec)
 }
@@ -78,23 +153,12 @@ fn start_project_full(
     dir: &Path,
     build_dir: &Path,
     debug: Option<DebugConfig>,
-) -> (
-    tauri::App<tauri::test::MockRuntime>,
-    SimHandle,
-    Recorder,
-    PathBuf,
-) {
+) -> (tauri::App<tauri::test::MockRuntime>, Sim, Recorder, PathBuf) {
     let app = mock_builder()
         .build(mock_context(noop_assets()))
         .expect("app simulée");
     let (project, board, components) = resolve_for_tests(root, dir).expect("projet");
-    let firmware = tauri::async_runtime::block_on(build_sim(
-        dir,
-        root,
-        build_dir,
-        &crate::platform::toolchain::Toolchain::detect(),
-    ))
-    .expect("build « sim »");
+    let firmware = build_locked(root, dir, build_dir);
 
     let (tx, rx) = mpsc::channel();
     for name in [
@@ -104,6 +168,10 @@ fn start_project_full(
         "sim:warn",
         "sim:usage",
         "sim:guard",
+        "sim:nets",
+        "sim:uart",
+        "sim:uart-config",
+        "sim:test-gpio",
     ] {
         let tx = tx.clone();
         app.handle().listen_any(name, move |event| {
@@ -123,29 +191,41 @@ fn start_project_full(
             debug,
         },
     );
-    (app, handle, Recorder { rx }, firmware)
+    (
+        app,
+        Sim(handle),
+        Recorder {
+            rx,
+            t0: Instant::now(),
+            seen: Default::default(),
+            ld2_level: Default::default(),
+            ld2: Default::default(),
+        },
+        firmware,
+    )
 }
 
-/// Luminosité de LD2 calculée par le modèle led (QuickJS).
-fn ld2_level(v: &Value) -> Option<String> {
-    v["LD2"]["brightness"].as_f64().map(|b| format!("{b}"))
-}
-
-/// Temps moyen entre `n` bascules de LD2 (horodatage du firmware, en ms).
-fn mean_toggle_ms(rec: &Recorder, n: usize) -> f64 {
-    let mut stamps = Vec::new();
-    let mut last: Option<String> = None;
-    while stamps.len() < n + 1 {
-        let (_, v) = rec.wait(Duration::from_secs(5), |name, v| {
-            name == "sim:states" && ld2_level(v).is_some()
-        });
-        let level = ld2_level(&v);
-        if level != last {
-            last = level;
-            stamps.push(Instant::now());
-        }
+/// Instants (temps du firmware, µs) des `n` prochaines bascules de LD2 (PA5).
+/// Horodatage des trames : indépendant de la charge et du délai de livraison.
+fn ld2_toggles(rec: &Recorder, n: usize) -> Vec<u64> {
+    let start = rec.ld2.borrow().len();
+    while rec.ld2.borrow().len() < start + n {
+        rec.wait(|name, v| name == "sim:test-gpio" && v["pin"] == "PA5");
     }
-    (stamps[n] - stamps[1]).as_secs_f64() * 1000.0 / (n as f64 - 1.0)
+    rec.ld2.borrow()[start..start + n].to_vec()
+}
+
+/// Période moyenne de LD2 sur `n` intervalles, en ms de temps du firmware.
+fn mean_toggle_ms(rec: &Recorder, n: usize) -> f64 {
+    let t = ld2_toggles(rec, n + 1);
+    (t[n] - t[0]) as f64 / 1000.0 / n as f64
+}
+
+/// Intervalles successifs d'une suite d'instants, en ms.
+fn intervals_ms(t: &[u64]) -> Vec<f64> {
+    t.windows(2)
+        .map(|w| (w[1] - w[0]) as f64 / 1000.0)
+        .collect()
 }
 
 /// Critère de passage (partie cœur) : le blinky fait clignoter LD2 et B1
@@ -154,12 +234,10 @@ fn mean_toggle_ms(rec: &Recorder, n: usize) -> f64 {
 fn blinky_led_and_button() {
     let dir = repo_root().join("templates").join("blinky-stm32-hal");
     let (_app, sim, rec) = start_project(&dir);
-    rec.wait(Duration::from_secs(10), |name, v| {
-        name == "sim:status" && v["state"] == "running"
-    });
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
 
     // Priorité effective lue par le firmware lui-même (section 11.2).
-    let (_, log) = rec.wait(Duration::from_secs(5), |name, v| {
+    let (_, log) = rec.wait(|name, v| {
         name == "sim:log"
             && v["text"]
                 .as_str()
@@ -169,10 +247,14 @@ fn blinky_led_and_button() {
 
     let slow = mean_toggle_ms(&rec, 4);
     println!("LD2 : période {slow:.1} ms avant l'appui sur B1");
-    assert!((450.0..650.0).contains(&slow), "période lente {slow} ms");
+    // Bornes en temps du firmware : un HAL_Delay ne finit jamais en avance
+    // (borne basse stricte) ; la borne haute sépare seulement 500 ms de 100 ms,
+    // une machine chargée pouvant retarder le réveil.
+    assert!((450.0..1000.0).contains(&slow), "période lente {slow} ms");
 
     // Appui sur B1 par son contrôle : modèle button (QuickJS) -> drive -> net -> PC13.
-    for pressed in ["true", "false"] {
+    // Relâché une fois l'appui arrivé sur le net.
+    for (pressed, level) in [("true", "low"), ("false", "pulled-high")] {
         sim.tx
             .try_send(SimMsg::Control {
                 component: "B1".into(),
@@ -180,13 +262,21 @@ fn blinky_led_and_button() {
                 value_json: pressed.into(),
             })
             .expect("commande vers l'acteur");
-        std::thread::sleep(Duration::from_millis(30));
+        rec.wait(|name, v| name == "sim:nets" && v["PC13"] == level);
     }
-    // Laisse passer le délai de 500 ms en cours, puis mesure.
-    std::thread::sleep(Duration::from_millis(600));
+    // Le délai de 500 ms en cours se termine : on attend la première période
+    // courte, puis on mesure.
+    let mut previous = ld2_toggles(&rec, 1)[0];
+    loop {
+        let t = ld2_toggles(&rec, 1)[0];
+        if t - previous < 300_000 {
+            break;
+        }
+        previous = t;
+    }
     let fast = mean_toggle_ms(&rec, 6);
     println!("LD2 : période {fast:.1} ms après l'appui sur B1");
-    assert!((70.0..200.0).contains(&fast), "période rapide {fast} ms");
+    assert!((90.0..400.0).contains(&fast), "période rapide {fast} ms");
 
     let _ = sim.tx.try_send(SimMsg::Stop);
 }
@@ -198,23 +288,19 @@ fn blinky_led_and_button() {
 fn reset_relaunches_firmware() {
     let dir = repo_root().join("templates").join("blinky-stm32-hal");
     let (_app, sim, rec) = start_project(&dir);
-    rec.wait(Duration::from_secs(10), |name, v| {
-        name == "sim:status" && v["state"] == "running"
-    });
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
     for round in 1..=2 {
         sim.tx.try_send(SimMsg::Reset).expect("reset");
-        rec.wait(Duration::from_secs(5), |name, v| {
+        rec.wait(|name, v| {
             name == "sim:status"
                 && v["state"] == "starting"
                 && v["message"].as_str().is_some_and(|m| m.contains("reset"))
         });
-        rec.wait(Duration::from_secs(10), |name, v| {
-            name == "sim:status" && v["state"] == "running"
-        });
+        rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
         let period = mean_toggle_ms(&rec, 3);
         println!("reset {round} : LD2 repart, période {period:.0} ms");
         assert!(
-            (400.0..700.0).contains(&period),
+            (450.0..1000.0).contains(&period),
             "période {period} ms après le reset"
         );
     }
@@ -243,9 +329,7 @@ fn debug_session_breakpoint_without_time_jump() {
             program: program.clone(),
         }),
     );
-    rec.wait(Duration::from_secs(5), |name, v| {
-        name == "sim:status" && v["state"] == "debug-wait"
-    });
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "debug-wait");
 
     // « F5 » : le débogueur lance le firmware.
     let mut child = std::process::Command::new(&firmware)
@@ -257,54 +341,124 @@ fn debug_session_breakpoint_without_time_jump() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("firmware lancé par le « débogueur »");
-    rec.wait(Duration::from_secs(10), |name, v| {
-        name == "sim:status" && v["state"] == "running"
-    });
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
     let before = mean_toggle_ms(&rec, 3);
 
-    // Point d'arrêt juste après une bascule de LD2.
-    let level = |v: &Value| ld2_level(v);
-    let (_, first) = rec.wait(Duration::from_secs(5), |name, v| {
-        name == "sim:states" && level(v).is_some()
-    });
-    let last = level(&first);
-    let (_, toggled) = rec.wait(Duration::from_secs(5), |name, v| {
-        name == "sim:states" && level(v).is_some() && level(v) != last
-    });
-    let frozen_level = level(&toggled);
+    // Point d'arrêt juste après une bascule de LD2 (les bascules déjà reçues
+    // mais pas encore lues sont gardées : la mesure porte sur toute la suite).
+    ld2_toggles(&rec, 1);
+    let first = rec.ld2.borrow().len() - 1;
     crate::platform::suspend_process(child.id()).expect("arrêt");
     let frozen_at = Instant::now();
-    let (_, status) = rec.wait(Duration::from_secs(3), |name, v| {
-        name == "sim:status" && v["state"] != "running"
-    });
+    let (_, status) = rec.wait(|name, v| name == "sim:status" && v["state"] != "running");
     assert_eq!(status["state"], "breakpoint", "{status}");
+    // Durée de l'arrêt : une donnée du scénario, pas une attente de résultat.
     std::thread::sleep(Duration::from_millis(1500).saturating_sub(frozen_at.elapsed()));
 
     crate::platform::resume_process(child.id()).expect("reprise");
-    let resumed_at = Instant::now();
-    // États envoyés à chaque changement : la bascule suivante diffère du niveau figé.
-    rec.wait(Duration::from_secs(5), |name, v| {
-        name == "sim:states" && level(v).is_some() && level(v) != frozen_level
-    });
-    let next_toggle = resumed_at.elapsed();
+    ld2_toggles(&rec, 2);
+    let gaps = intervals_ms(&rec.ld2.borrow()[first..]);
     println!(
-        "période {before:.0} ms ; arrêt {:.1?} ; bascule suivante {next_toggle:.1?} après la reprise",
-        resumed_at - frozen_at
+        "période {before:.0} ms ; intervalles autour de l'arrêt (temps du firmware) : {gaps:.0?}"
     );
-    // Sans saut de temps, le délai de 500 ms en cours se termine après la reprise.
+    // Sans saut de temps, l'intervalle qui contient l'arrêt de 1,5 s reste
+    // une période ordinaire de 500 ms dans le temps du firmware (un saut
+    // donnerait au moins 1 500 ms).
     assert!(
-        (Duration::from_millis(250)..Duration::from_millis(700)).contains(&next_toggle),
-        "saut de temps : bascule {next_toggle:?} après la reprise"
+        gaps.iter().all(|g| *g < 1200.0),
+        "saut de temps : intervalles {gaps:.0?} ms"
     );
 
     // Fin de session dans le débogueur : la paillasse attend la suivante.
     let _ = child.kill();
     let _ = child.wait();
-    rec.wait(Duration::from_secs(5), |name, v| {
-        name == "sim:status" && v["state"] == "debug-wait"
-    });
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "debug-wait");
     let _ = sim.tx.try_send(SimMsg::Stop);
     let _ = std::fs::remove_file(&program);
+}
+
+/// Validations du réseau logique (section 9.2) pendant la simulation : entrée
+/// lue flottante, conflit de deux sorties ; niveaux des broches utilisées
+/// envoyés à l'interface (« sim:nets »).
+#[test]
+fn net_checks_floating_and_conflict() {
+    let dir = repo_root().join("tests").join("net-checks");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let (_, floating) = rec.wait(|name, v| name == "sim:warn" && v["code"] == 101);
+    assert!(
+        floating["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("A0 (PA0) est lue flottante")),
+        "{floating}"
+    );
+    rec.wait(|name, v| name == "sim:nets" && v["PA0"] == "floating" && v["PC13"] == "high");
+
+    // B1 appuyé : la masse contre la sortie haute du firmware.
+    sim.tx
+        .try_send(SimMsg::Control {
+            component: "B1".into(),
+            control: "press".into(),
+            value_json: "true".into(),
+        })
+        .expect("appui");
+    let (_, conflict) = rec.wait(|name, v| name == "sim:warn" && v["code"] == 100);
+    assert!(
+        conflict["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Conflit sur B1 (PC13)")),
+        "{conflict}"
+    );
+    rec.wait(|name, v| name == "sim:nets" && v["PC13"] == "conflict");
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Moniteur série (étape 6) : débit annoncé, octets émis par le firmware,
+/// envoi depuis le moniteur et écho, mesures au format du traceur.
+#[test]
+fn uart_echo_and_plotter_lines() {
+    let dir = repo_root().join("tests").join("uart-echo");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let text = |v: &Value| -> String {
+        v["data"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|b| b.as_u64().map(|x| x as u8))
+                    .collect::<Vec<u8>>()
+            })
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default()
+    };
+    let mut received = String::new();
+    let mut baud = None;
+    rec.wait(|name, v| {
+        if name == "sim:uart-config" && v["id"] == 2 {
+            baud = v["baud"].as_u64();
+        }
+        if name == "sim:uart" && v["id"] == 2 {
+            received.push_str(&text(v));
+        }
+        received.contains("temp:")
+    });
+    assert_eq!(baud, Some(115_200));
+    assert!(received.contains("écho USART2 prêt"), "{received}");
+
+    sim.tx
+        .try_send(SimMsg::UartSend {
+            id: 2,
+            data: b"Bonjour\n".to_vec(),
+        })
+        .expect("envoi");
+    let mut echoed = String::new();
+    rec.wait(|name, v| {
+        if name == "sim:uart" && v["id"] == 2 {
+            echoed.push_str(&text(v));
+        }
+        echoed.contains("Bonjour")
+    });
+    let _ = sim.tx.try_send(SimMsg::Stop);
 }
 
 /// Critère de passage de la phase 2 (garde-fou CPU, section 11.2) : une boucle
@@ -314,49 +468,71 @@ fn debug_session_breakpoint_without_time_jump() {
 fn guard_busy_loop_pauses() {
     let dir = repo_root().join("tests").join("guard-busy-loop");
     let (_app, sim, rec) = start_project(&dir);
-    rec.wait(Duration::from_secs(10), |name, v| {
-        name == "sim:status" && v["state"] == "running"
-    });
-    let started = Instant::now();
-    let mut peak = 0.0_f64;
-    let (_, guard) = rec.wait(Duration::from_secs(15), |name, v| {
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    // Pause après CPU_LIMIT_TIME de temps CPU consommé par le firmware (mesure
+    // du processus, indépendante de la charge de la machine).
+    let mut cpu_ms = 0_u64;
+    let mut starved = 0_u32;
+    let mut shares = Vec::new();
+    let (name, guard) = rec.wait(|name, v| {
         if name == "sim:usage" {
-            peak = peak.max(v["cpu"].as_f64().unwrap_or(0.0));
+            cpu_ms = v["cpu_time_ms"].as_u64().unwrap_or(0);
+            let share = v["cpu"].as_f64().unwrap_or(0.0);
+            shares.push(share.round());
+            starved = if share > f64::from(CPU_LIMIT_PCT) {
+                0
+            } else {
+                starved + 1
+            };
         }
-        name == "sim:guard"
+        name == "sim:guard" || starved >= 30
     });
-    let elapsed = started.elapsed();
-    println!("pause automatique après {elapsed:.1?}, pic à {peak:.0} % d'un cœur");
-    assert_eq!(guard["kind"], "cpu");
-    assert!(peak > 80.0, "pic CPU mesuré à {peak:.0} %");
-    assert!(
-        (Duration::from_secs(4)..Duration::from_secs(12)).contains(&elapsed),
-        "pause après {elapsed:?}"
+    // Machine saturée : le firmware, en priorité basse (section 11.2), n'obtient
+    // pas CPU_LIMIT_PCT % d'un cœur ; le garde-fou ne peut pas se déclencher.
+    assert_eq!(
+        name,
+        "sim:guard",
+        "machine saturée : la boucle du firmware n'a obtenu que {:?} % d'un cœur \
+         (garde-fou au-delà de {CPU_LIMIT_PCT:.0} %)",
+        &shares[shares.len().saturating_sub(10)..]
     );
-    rec.wait(Duration::from_secs(2), |name, v| {
-        name == "sim:status" && v["state"] == "paused"
-    });
+    let needed = u64::try_from(CPU_LIMIT_TIME.as_millis()).unwrap_or(u64::MAX);
+    println!("pause automatique après {cpu_ms} ms de temps CPU du firmware");
+    assert_eq!(guard["kind"], "cpu");
+    assert!(
+        cpu_ms >= needed,
+        "pause après {cpu_ms} ms de CPU (au moins {needed})"
+    );
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "paused");
 
-    // En pause : minuteur arrêté, aucune mesure.
-    let quiet_until = Instant::now() + Duration::from_millis(2500);
+    // En pause : minuteur arrêté (aucune mesure) et processus suspendu.
+    let quiet_until = Instant::now() + Duration::from_millis(1500);
     while let Some(left) = quiet_until.checked_duration_since(Instant::now()) {
         if let Ok((name, _)) = rec.rx.recv_timeout(left) {
             assert_ne!(name, "sim:usage", "mesure reçue pendant la pause");
         }
     }
-
     sim.tx.try_send(SimMsg::Resume).expect("reprise");
-    rec.wait(Duration::from_secs(2), |name, v| {
-        name == "sim:status" && v["state"] == "running"
-    });
-    let (_, again) = rec.wait(Duration::from_secs(15), |name, _| name == "sim:guard");
+    let resumed_at = Instant::now();
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let (_, usage) = rec.wait(|name, _| name == "sim:usage");
+    let since_resume = u64::try_from(resumed_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let gained = usage["cpu_time_ms"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_sub(cpu_ms);
+    // Suspendu, le firmware n'a consommé que depuis la reprise ; sinon, il
+    // aurait aussi tourné pendant les 1,5 s de pause.
+    assert!(
+        gained <= since_resume + 500,
+        "{gained} ms de CPU pour {since_resume} ms depuis la reprise : pause non suspendue"
+    );
+    let (_, again) = rec.wait(|name, _| name == "sim:guard");
     assert_eq!(again["kind"], "cpu");
 
     // Arrêt d'un firmware suspendu : aucun processus fantôme.
     sim.tx.try_send(SimMsg::Stop).expect("arrêt");
-    rec.wait(Duration::from_secs(5), |name, v| {
-        name == "sim:status" && v["state"] == "stopped"
-    });
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "stopped");
 }
 
 /// Garde-fou mémoire (section 11.2) : une fuite de 80 Mo/s est arrêtée
@@ -365,14 +541,12 @@ fn guard_busy_loop_pauses() {
 fn guard_memory_leak_stops() {
     let dir = repo_root().join("tests").join("guard-memory-leak");
     let (_app, _sim, rec) = start_project(&dir);
-    rec.wait(Duration::from_secs(10), |name, v| {
-        name == "sim:status" && v["state"] == "running"
-    });
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
     // Au-delà de 128 Mo, mesure à 4 Hz : arrêt à moins de 40 Mo au-delà de la
     // limite pour une fuite de 80 Mo/s (jusqu'à 80 Mo de dépassement à 1 Hz).
     let mut peak = 0_u64;
     let mut fast = 0_u32;
-    let (_, guard) = rec.wait(Duration::from_secs(20), |name, v| {
+    let (_, guard) = rec.wait(|name, v| {
         if name == "sim:usage" {
             let memory = v["memory"].as_u64().unwrap_or(0);
             if memory > MEMORY_LIMIT / 2 {
@@ -394,9 +568,7 @@ fn guard_memory_leak_stops() {
         fast >= 3,
         "{fast} mesures au-delà de 128 Mo : pas de mesure rapprochée"
     );
-    let (_, status) = rec.wait(Duration::from_secs(5), |name, v| {
-        name == "sim:status" && v["state"] == "stopped"
-    });
+    let (_, status) = rec.wait(|name, v| name == "sim:status" && v["state"] == "stopped");
     let message = status["message"].as_str().unwrap_or_default();
     println!("{message}");
     assert!(message.contains("256 Mo"), "message : {message}");
@@ -410,9 +582,8 @@ fn latency_tool() {
     let dir = repo_root().join("tests").join("latency");
     let (_app, _sim, rec) = start_project(&dir);
     let mut results = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while results.len() < 2 && Instant::now() < deadline {
-        let (_, v) = rec.wait(Duration::from_secs(30), |name, _| name == "sim:log");
+    while results.len() < 2 {
+        let (_, v) = rec.wait(|name, v| name == "sim:log" && v["source"] == "stdout");
         if let Some(text) = v["text"].as_str() {
             if text.contains("médiane") {
                 println!("{text}");
@@ -452,11 +623,9 @@ fn installed_layout_with_spaces() {
     let build_dir = crate::build::build_dir_for(&base.join("Cache Prebench"), &project);
 
     let (_app, sim, rec) = start_project_with(&sdk, &project, &build_dir);
-    rec.wait(Duration::from_secs(10), |name, v| {
-        name == "sim:status" && v["state"] == "running"
-    });
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
     let period = mean_toggle_ms(&rec, 3);
-    assert!((450.0..650.0).contains(&period), "période {period} ms");
+    assert!((450.0..1000.0).contains(&period), "période {period} ms");
     let _ = sim.tx.try_send(SimMsg::Stop);
     // Rien n'est écrit dans le sdk ni dans le projet.
     assert!(!sdk
@@ -465,7 +634,7 @@ fn installed_layout_with_spaces() {
         .join("build-sim")
         .exists());
     assert!(!project.join("build-sim").exists());
-    std::thread::sleep(Duration::from_millis(200));
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "stopped");
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -530,7 +699,7 @@ fn object_names(dir: &Path, out: &mut Vec<String>) {
 /// Critère de passage : le projet STM32CubeMX généré (chaîne CMake), non
 /// modifié, est reconnu par son CMakeLists.txt et compilé via libvmcu/sim ;
 /// system_stm32f4xx.c, syscalls.c et sysmem.c sont exclus, le startup .s et le
-/// .ld ignorés ; l'initialisation va jusqu'à USART2 (« non simulé »).
+/// .ld ignorés ; l'initialisation va jusqu'à USART2, simulée (115 200 bauds).
 #[test]
 fn cubemx_generated_project() {
     let dir = repo_root().join("tests").join("cubemx-nucleo-f401re");
@@ -578,14 +747,19 @@ fn cubemx_generated_project() {
         );
     }
 
-    rec.wait(Duration::from_secs(10), |name, v| {
-        name == "sim:status" && v["state"] == "running"
-    });
-    rec.wait(Duration::from_secs(5), |name, v| {
-        name == "sim:warn"
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    // USART2 simulée (étape 6) : débit annoncé, aucun « HAL_UART_Init non simulé ».
+    let mut warned = false;
+    rec.wait(|name, v| {
+        if name == "sim:warn"
             && v["text"]
                 .as_str()
-                .is_some_and(|t| t.contains("HAL_UART_Init non simulé"))
+                .is_some_and(|t| t.contains("HAL_UART_Init"))
+        {
+            warned = true;
+        }
+        name == "sim:uart-config" && v["id"] == 2 && v["baud"] == 115_200
     });
+    assert!(!warned, "HAL_UART_Init encore signalé non simulé");
     let _ = sim.tx.try_send(SimMsg::Stop);
 }

@@ -6,6 +6,34 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.1.3] - 2026-11-13
+
+**Aperçu technique** : la paillasse devient éditable (composants, fils, notes), Prebench vérifie le câblage et affiche les niveaux logiques, et l'UART du firmware arrive avec un moniteur série et un traceur.
+
+### Ajouté
+
+- Mode **Édition** (touche E) : ajouter, déplacer, renommer et supprimer des composants, tirer des fils entre les broches de la carte et des composants, poser des notes sur la paillasse. Annulation (⌘Z / Ctrl+Z). Tout est enregistré dans `prebench.toml` ; un fil modifié pendant la simulation s'applique aussitôt.
+- Vue de la paillasse : déplacement, zoom, **Ajuster la vue** (⌘0 / Ctrl+0), taille réelle (⌘1 / Ctrl+1).
+- Niveaux logiques des broches utilisées pendant la simulation (haut, bas, tiré, flottant, conflit), affichés sur les broches et dans l'inspecteur.
+- Onglet **Avertissements** : vérification du câblage sans lancer la simulation (rôles des broches, bus, tension, 5 V sur une broche, courts-circuits, y compris un composant posé directement entre deux alimentations), puis avertissements de la simulation (entrée lue flottante, conflit entre deux sorties). Chaque phrase dit quoi corriger.
+- UART du firmware simulée (HAL STM32 : émission et réception bloquantes, par interruption et DMA, `ReceiveToIdle`).
+- Onglet **Série** : choix du port (USART du firmware ou sortie standard `printf`) et du débit du moniteur, horodatage, vue hexadécimale, envoi avec fin de ligne (LF, CR+LF, CR, aucune), **Exporter la sortie…** (fenêtre « Enregistrer sous », dossier du projet proposé), **Effacer**. Alerte si le débit du moniteur diffère de celui du firmware.
+- Onglet **Traceur** : courbes des lignes `clé:valeur` (par exemple `temp:21.4,hum:55`), jusqu'à 8 courbes.
+
+### Modifié
+
+- Garde-fou CPU : la pause automatique compte le temps de calcul réellement consommé par le firmware (5 s à plus de 80 % d'un cœur), et non la durée écoulée : une machine chargée ne la déclenche plus trop tôt ni trop tard.
+
+### Corrigé
+
+- Deux simulations successives ne peuvent plus ouvrir le même canal de communication avec le firmware.
+- macOS : quitter Prebench pendant une pause ne laisse plus le processus du firmware suspendu en arrière-plan.
+
+### Limites connues
+
+- macOS : en cas de plantage de Prebench pendant une pause, le processus du firmware reste suspendu ; le terminer depuis le Moniteur d'activité (« firmware »). Windows n'est pas concerné (Job Object).
+- Le traceur lit le port affiché dans l'onglet Série.
+
 ## [0.1.2] - 2026-11-13
 
 **Aperçu technique** : Prebench suit maintenant le dossier du projet (recompilation et rechargement à chaque sauvegarde), se débogue dans VS Code, protège l'ordinateur contre un firmware qui s'emballe, et adopte sa nouvelle interface.

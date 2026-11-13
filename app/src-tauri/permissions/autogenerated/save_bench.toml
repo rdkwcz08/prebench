@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-bench"
+description = "Enables the save_bench command without any pre-configured scope."
+commands.allow = ["save_bench"]
+
+[[permission]]
+identifier = "deny-save-bench"
+description = "Denies the save_bench command without any pre-configured scope."
+commands.deny = ["save_bench"]

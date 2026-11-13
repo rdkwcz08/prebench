@@ -142,7 +142,7 @@ void vmcu__gpio_on_input(uint8_t port, uint8_t pin, uint8_t level)
 
     uint8_t detected = v ? (uint8_t)VMCU_GPIO_EDGE_RISING : (uint8_t)VMCU_GPIO_EDGE_FALLING;
     if (has_cb && (edge & detected) != 0) {
-        vmcu__irq_event_t ev = { port, pin, detected };
+        vmcu__irq_event_t ev = { .kind = VMCU__IRQ_GPIO, .port = port, .pin = pin, .edge = detected };
         if (!vmcu__enqueue_irq(&ev)) {
             vmcu__warn_once(VMCU_WARN_GENERIC, "irq-overflow",
                             "file d'interruptions pleine : fronts ignorés");

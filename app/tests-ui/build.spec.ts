@@ -27,10 +27,11 @@ test('build en échec : onglet Build affiché, emplacements cliquables', async (
 test('build réussi : durée dans la barre d\'état', async ({ bench }) => {
   await bench.emit('build:result', { ok: true, duration_ms: 1234, errors: 0, warnings: 0, diagnostics: [] });
   await expect(bench.page.locator('footer')).toContainText('Build sim 1,2 s');
-  await expect(bench.page.getByRole('tab', { name: 'Journal' })).toHaveAttribute('aria-selected', 'true');
+  await expect(bench.page.getByRole('tab', { name: 'Série' })).toHaveAttribute('aria-selected', 'true'); // onglet inchangé
 });
 
 test('fichier modifié dans l\'éditeur : projet relu, état des composants conservé', async ({ bench }) => {
+  await bench.emit('sim:status', { state: 'running', message: '' }); // simulation : états du cœur conservés
   await bench.emit('sim:states', { LD2: { brightness: 1 }, B1: { pressed: false }, echo: { pings: 7 } });
   await expect(bench.figure('echo')).toContainText('7 pings');
   const before = (await bench.calls('open_project')).length;

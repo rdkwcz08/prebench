@@ -45,7 +45,7 @@ extern "C" {
 
 /** Version de cette API C. Majeure : rupture ; mineure : ajouts compatibles. */
 #define VMCU_API_VERSION_MAJOR 1
-#define VMCU_API_VERSION_MINOR 0
+#define VMCU_API_VERSION_MINOR 1
 
 /** Version du protocole firmware <-> app implémentée (docs/protocol.md). */
 #define VMCU_PROTOCOL_VERSION_MAJOR 1
@@ -158,6 +158,13 @@ void vmcu_delay_us(uint32_t us);
  */
 void vmcu_irq_lock(void);
 void vmcu_irq_unlock(void);
+
+/**
+ * API 1.1. Exécute fn(arg) plus tard, depuis le fil IRQ, verrou d'interruption
+ * tenu, comme un callback d'interruption : fin d'émission UART, fin de DMA…
+ * VMCU_ERR_BUSY si la file IRQ (bornée) est pleine.
+ */
+vmcu_status_t vmcu_irq_post(void (*fn)(void *arg), void *arg);
 
 /* ------------------------------------------------------------------------- */
 /* GPIO                                                                      */

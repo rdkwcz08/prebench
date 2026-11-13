@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-export-serial"
+description = "Enables the export_serial command without any pre-configured scope."
+commands.allow = ["export_serial"]
+
+[[permission]]
+identifier = "deny-export-serial"
+description = "Denies the export_serial command without any pre-configured scope."
+commands.deny = ["export_serial"]

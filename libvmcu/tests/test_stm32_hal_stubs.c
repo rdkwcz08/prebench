@@ -320,12 +320,15 @@ int main(void)
     CHECK(HAL_SPI_TransmitReceive(&hspi1, tx, rx, 3, 100) == HAL_OK);
     CHECK(rx[0] == 0xFF && rx[2] == 0xFF);
 
-    /* UART : émission acceptée, réception qui expire, émetteur toujours prêt */
+    /* UART (simulée, test_uart.c) : émission envoyée, réception qui expire,
+       émetteur toujours prêt, réception DMA en cours jusqu'à son arrêt */
     const char msg[] = "Bonjour\r\n";
     CHECK(HAL_UART_Transmit(&huart2, (const uint8_t *)msg, (uint16_t)strlen(msg), HAL_MAX_DELAY) == HAL_OK);
     CHECK(HAL_UART_Receive(&huart2, buf, 1, 5) == HAL_TIMEOUT);
     CHECK(__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TXE) == SET);
     CHECK(HAL_UART_Receive_DMA(&huart2, buf, sizeof buf) == HAL_OK);
+    CHECK(HAL_UART_GetState(&huart2) == HAL_UART_STATE_BUSY_RX);
+    CHECK(HAL_UART_DMAStop(&huart2) == HAL_OK);
     CHECK(HAL_UART_GetState(&huart2) == HAL_UART_STATE_READY);
 
     /* Chaque fonction non simulée a averti */

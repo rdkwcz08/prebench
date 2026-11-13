@@ -50,40 +50,6 @@ uint16_t vmcu_adc_read(uint8_t unit, uint8_t channel)
     return 0;
 }
 
-/* --- UART (phase 2) --- */
-
-vmcu_status_t vmcu_uart_config(uint8_t id, uint32_t baud)
-{
-    (void)id; (void)baud;
-    return unsupported("vmcu_uart_config");
-}
-
-vmcu_status_t vmcu_uart_write(uint8_t id, const uint8_t *data, size_t len)
-{
-    (void)id; (void)data; (void)len;
-    return unsupported("vmcu_uart_write");
-}
-
-size_t vmcu_uart_read(uint8_t id, uint8_t *buf, size_t max, uint32_t timeout_ms)
-{
-    (void)id; (void)buf; (void)max; (void)timeout_ms;
-    (void)unsupported("vmcu_uart_read");
-    return 0;
-}
-
-size_t vmcu_uart_available(uint8_t id)
-{
-    (void)id;
-    (void)unsupported("vmcu_uart_available");
-    return 0;
-}
-
-vmcu_status_t vmcu_uart_on_rx(uint8_t id, vmcu_uart_rx_cb cb, void *user)
-{
-    (void)id; (void)cb; (void)user;
-    return unsupported("vmcu_uart_on_rx");
-}
-
 /* --- I2C (phase 3) --- */
 
 vmcu_status_t vmcu_i2c_config(uint8_t bus, uint32_t freq_hz)

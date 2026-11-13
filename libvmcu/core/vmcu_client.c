@@ -335,7 +335,19 @@ static void irq_main(void *arg)
 
         vmcu__checkpoint(); /* aucune interruption pendant une pause */
         vmcu_plat_mutex_lock(g.irq_lock);
-        vmcu__gpio_dispatch(&ev);
+        switch (ev.kind) {
+        case VMCU__IRQ_UART:
+            vmcu__uart_dispatch(ev.port);
+            break;
+        case VMCU__IRQ_POST:
+            if (ev.fn != NULL) {
+                ev.fn(ev.arg);
+            }
+            break;
+        default:
+            vmcu__gpio_dispatch(&ev);
+            break;
+        }
         vmcu_plat_mutex_unlock(g.irq_lock);
     }
 }
@@ -346,6 +358,19 @@ void vmcu_irq_lock(void)
     if (g.irq_lock != NULL) {
         vmcu_plat_mutex_lock(g.irq_lock);
     }
+}
+
+vmcu_status_t vmcu_irq_post(void (*fn)(void *arg), void *arg)
+{
+    if (fn == NULL) {
+        return VMCU_ERR_INVALID_ARG;
+    }
+    vmcu_status_t st = vmcu__ensure_init();
+    if (st != VMCU_OK) {
+        return st;
+    }
+    vmcu__irq_event_t ev = { .kind = VMCU__IRQ_POST, .fn = fn, .arg = arg };
+    return vmcu__enqueue_irq(&ev) ? VMCU_OK : VMCU_ERR_BUSY;
 }
 
 void vmcu_irq_unlock(void)
@@ -429,6 +454,15 @@ static void dispatch(const vmcu_frame_header_t *h, const uint8_t *payload)
         uint8_t level = vmcu_rbuf_u8(&r);
         if (!r.error) {
             vmcu__gpio_on_input(port, pin, level);
+        }
+        break;
+    }
+    case VMCU_MSG_UART_RX: {
+        uint8_t id = vmcu_rbuf_u8(&r);
+        (void)vmcu_rbuf_u8(&r);
+        uint16_t len = vmcu_rbuf_u16(&r);
+        if (!r.error && len <= h->length - 4u) {
+            vmcu__uart_on_rx(id, payload + 4, len);
         }
         break;
     }
@@ -613,6 +647,7 @@ vmcu_status_t vmcu_init(const char *board, const char *framework)
 
     vmcu__time_init();
     vmcu__gpio_init();
+    vmcu__uart_init();
     vmcu__diag_init();
     create_primitives();
     connect_to_app(address);

@@ -23,6 +23,9 @@ pub enum CoreError {
     #[error("ouverture de l'éditeur impossible : {0}")]
     Open(String),
 
+    #[error("réglages : {0}")]
+    Settings(String),
+
     #[error("débogage : {0}")]
     Debug(String),
 

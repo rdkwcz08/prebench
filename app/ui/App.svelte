@@ -4,17 +4,25 @@
 
   Barre d'outils 40 px ; bannières pleine largeur ; paillasse (tapis ESD) et
   inspecteur 280 px repliable ; panneau d'onglets 220 px repliable ; barre
-  d'état 24 px. Raccourcis (section 10.6) : Espace met en pause ou reprend,
-  R réinitialise le firmware.
+  d'état 24 px. Raccourcis (section 10.6) : Espace met en pause ou reprend
+  (mode Simulation ; en Édition, il déplace la vue), R réinitialise le firmware,
+  E bascule Édition / Simulation, Cmd/Ctrl+Z annule, Maj+Cmd/Ctrl+Z rétablit.
 -->
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import { bench } from './lib/bench.svelte';
-  import Board from './lib/Board.svelte';
+  import AddComponentMenu from './lib/AddComponentMenu.svelte';
+  import Workbench from './lib/Workbench.svelte';
   import BuildPanel from './lib/BuildPanel.svelte';
-  import ComponentHost from './lib/ComponentHost.svelte';
+  import SelectionInspector from './lib/SelectionInspector.svelte';
+  import WarningsPanel from './lib/WarningsPanel.svelte';
+  import PlotPanel from './lib/PlotPanel.svelte';
+  import SerialPanel from './lib/SerialPanel.svelte';
+  import SerialTools from './lib/SerialTools.svelte';
+  import { serial } from './lib/serial.svelte';
   import ProjectMenu from './lib/ProjectMenu.svelte';
+  import { settings } from './lib/settings.svelte';
   import { THEME_LABEL, theme } from './lib/theme.svelte';
   import type { SimState } from './lib/types';
   import Banner from './lib/ui/Banner.svelte';
@@ -23,6 +31,9 @@
   import IconButton from './lib/ui/IconButton.svelte';
   import PropList, { type Prop } from './lib/ui/PropList.svelte';
   import Tabs from './lib/ui/Tabs.svelte';
+
+  /** Touche de commande affichée dans les infobulles : ⌘ sur Mac, Ctrl ailleurs. */
+  const MOD = /Mac/.test(navigator.userAgent) ? '⌘' : 'Ctrl+';
 
   /** Modèle de « Créer mon premier projet ». */
   const FIRST_TEMPLATE = 'blinky-stm32-hal';
@@ -48,7 +59,9 @@
   let path = $state('');
   let menuOpen = $state(false);
   let menu: ProjectMenu | undefined = $state();
-  let tab = $state('log');
+  let tab = $state('serial');
+  /** Alertes de débit du moniteur série (section 9.2), dans l'onglet Avertissements. */
+  const serialWarnings = $derived(serial.ports.map((p) => serial.mismatch(p)).filter((w): w is string => w !== null));
   let inspectorOpen = $state(true);
   let dockOpen = $state(true);
   let update = $state<{ version: string } | null>(null);
@@ -60,8 +73,6 @@
   );
   const missingDebugTools = $derived(bench.debug?.tools.filter((t) => !t.present) ?? []);
   const live = $derived(bench.status.state === 'running' || bench.status.state === 'paused');
-  const onboard = $derived(bench.instances.filter((i) => i.onboard));
-  const placed = $derived(bench.instances.filter((i) => !i.onboard));
   const tools = $derived(bench.prerequisites?.tools ?? []);
   const missing = $derived(tools.filter((t) => t.path === null));
   // Une commande partagée par deux outils (gcc et make de MSYS2) n'est affichée qu'une fois.
@@ -111,7 +122,10 @@
   );
 
   onMount(async () => {
+    await settings.load();
+    theme.adoptSetting();
     await bench.init();
+    await serial.init();
     await bench.checkPrerequisites();
     const first = await bench.defaultProject();
     if (first !== null) {
@@ -151,11 +165,28 @@
     return `${mo.toLocaleString('fr-FR', { maximumFractionDigits: mo < 10 ? 1 : 0, minimumFractionDigits: mo < 10 ? 1 : 0 })} Mo`;
   }
 
+  let benchView: Workbench | undefined = $state();
+
   function onkeydown(e: KeyboardEvent): void {
-    if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
     const target = e.target as Element | null;
     if (target?.closest('input, select, textarea, [contenteditable]')) return;
-    if (e.key === ' ') {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === '0' || e.key === '1')) {
+      e.preventDefault();
+      if (e.key === '0') benchView?.fit();
+      else benchView?.actualSize();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'z' || e.key === 'Z' || e.key === 'y')) {
+      e.preventDefault();
+      if (e.key === 'y' || e.shiftKey) void bench.redo();
+      else void bench.undo();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+    if (e.key === 'e' || e.key === 'E') {
+      if (bench.project) bench.mode = bench.mode === 'edit' ? 'simulate' : 'edit';
+    } else if (e.key === ' ') {
+      if (bench.mode === 'edit') return; // Workbench.svelte : déplacement de la vue
       // Espace garde son rôle sur un bouton ou un onglet qui a le focus.
       if (target?.closest('button, [role="button"], [role="tab"], a')) return;
       e.preventDefault();
@@ -176,9 +207,9 @@
     {/if}
     <span class="sep"></span>
     {#if bench.status.state === 'running'}
-      <Button variant="primary" icon="pause" title="Mettre en pause (Espace)" onclick={togglePause}>Mettre en pause</Button>
+      <Button variant="primary" icon="pause" title="Mettre en pause (Espace, en mode Simulation)" onclick={togglePause}>Mettre en pause</Button>
     {:else if bench.status.state === 'paused'}
-      <Button variant="primary" icon="play" title="Reprendre (Espace)" onclick={togglePause}>Reprendre</Button>
+      <Button variant="primary" icon="play" title="Reprendre (Espace, en mode Simulation)" onclick={togglePause}>Reprendre</Button>
     {:else}
       <Button variant="primary" icon="play" disabled={running || !bench.project} onclick={() => bench.start()}>Démarrer</Button>
     {/if}
@@ -187,7 +218,15 @@
     {/if}
     <IconButton icon="reset" label="Réinitialiser" shortcut="R" disabled={!live} onclick={() => bench.reset()} />
     <IconButton icon="stop" label="Arrêter la simulation" disabled={!running} onclick={() => bench.stop()} />
+    <span class="sep"></span>
+    <div class="segmented" role="group" aria-label="Mode">
+      <button aria-pressed={bench.mode === 'edit'} title="Mode édition (E) : placer et câbler" disabled={!bench.project} onclick={() => (bench.mode = 'edit')}>Édition</button>
+      <button aria-pressed={bench.mode === 'simulate'} title="Mode simulation (E) : interagir" disabled={!bench.project} onclick={() => (bench.mode = 'simulate')}>Simulation</button>
+    </div>
     <span class="spacer"></span>
+    <AddComponentMenu place={() => benchView?.center() ?? [480, 96]} disabled={!bench.project} />
+    <IconButton icon="note" label="Ajouter une note" disabled={!bench.project} onclick={() => benchView?.addNoteAtCenter()} />
+    <IconButton icon="fit" label="Ajuster la vue" shortcut="{MOD}0" disabled={!bench.project} onclick={() => benchView?.fit()} />
     <IconButton
       icon="panel-right"
       label={inspectorOpen ? "Masquer l'inspecteur" : "Afficher l'inspecteur"}
@@ -202,6 +241,16 @@
   </header>
 
   <div class="banners">
+    {#if bench.pending.length > 0 && running}
+      <Banner
+        tone="info"
+        message="{bench.pending.join(', ')} {bench.pending.length > 1 ? 'seront actifs' : 'sera actif'} au prochain démarrage de la simulation."
+      >
+        {#snippet actions()}
+          <Button icon="reset" onclick={() => bench.restart()}>Redémarrer pour l'activer</Button>
+        {/snippet}
+      </Banner>
+    {/if}
     {#if bench.status.state === 'debug-wait' && bench.debug}
       <Banner
         tone="info"
@@ -269,26 +318,18 @@
     {/if}
   </div>
 
-  <main class="bench" aria-label="Paillasse">
-    {#if bench.project}
-      <Board name={bench.project.board_name} mcu={bench.project.mcu}>
-        {#each onboard as inst (inst.id)}
-          <ComponentHost {inst} mode="simulate" />
-        {/each}
-      </Board>
-      {#each placed as inst (inst.id)}
-        <ComponentHost {inst} mode="simulate" />
-      {/each}
-    {:else if !menuOpen}
-      <div class="empty">
-        <p>Aucun projet ouvert. Créez votre premier projet à partir du modèle blinky STM32 HAL : il sera copié dans un dossier que vous pourrez modifier.</p>
-        <Button variant="primary" icon="plus" onclick={() => menu?.show(FIRST_TEMPLATE)}>Créer mon premier projet</Button>
-      </div>
-    {/if}
-  </main>
+  <Workbench bind:this={benchView} />
+  {#if !bench.project && !menuOpen}
+    <div class="empty">
+      <p>Aucun projet ouvert. Créez votre premier projet à partir du modèle blinky STM32 HAL : il sera copié dans un dossier que vous pourrez modifier.</p>
+      <Button variant="primary" icon="plus" onclick={() => menu?.show(FIRST_TEMPLATE)}>Créer mon premier projet</Button>
+    </div>
+  {/if}
 
   <aside class="inspector" aria-label="Inspecteur" inert={!inspectorOpen}>
-    {#if bench.project}
+    {#if bench.selection}
+      <SelectionInspector />
+    {:else if bench.project}
       <div class="insp-head">
         <h2>{bench.project.board_name}</h2>
         <p>Microcontrôleur <span class="data">{bench.project.mcu}</span></p>
@@ -322,6 +363,8 @@
       label="Instruments"
       bind:active={tab}
       tabs={[
+        { id: 'serial', label: 'Série' },
+        { id: 'plot', label: 'Traceur' },
         { id: 'log', label: 'Journal' },
         {
           id: 'build',
@@ -329,10 +372,24 @@
           count: bench.build.result?.errors || bench.build.result?.warnings || 0,
           tone: bench.build.result?.errors ? 'conflict' : 'warn',
         },
-        { id: 'warn', label: 'Avertissements', icon: 'warn', count: bench.warnings.length },
+        {
+          id: 'warn',
+          label: 'Avertissements',
+          icon: 'warn',
+          count: bench.checks.length + bench.warnings.length + serialWarnings.length,
+          tone:
+            bench.checks.some((c) => c.severity === 'conflict') ||
+            bench.warnings.some((w) => w.startsWith('Conflit') || w.startsWith('Court-circuit'))
+              ? 'conflict'
+              : 'warn',
+        },
       ]}
     >
       {#snippet tools()}
+        {#if tab === 'serial' || tab === 'plot'}
+          <SerialTools full={tab === 'serial'} />
+          <span class="sep"></span>
+        {/if}
         <IconButton
           icon="panel-bottom"
           label={dockOpen ? 'Replier le panneau' : 'Déplier le panneau'}
@@ -342,7 +399,11 @@
       {/snippet}
     </Tabs>
     <div class="dock-body" role="tabpanel" inert={!dockOpen}>
-      {#if tab === 'build'}
+      {#if tab === 'serial'}
+        <SerialPanel />
+      {:else if tab === 'plot'}
+        <PlotPanel />
+      {:else if tab === 'build'}
         <BuildPanel />
       {:else if tab === 'log'}
         {#each bench.logs as line, i (i)}
@@ -351,11 +412,7 @@
           <p class="empty-line">Le journal est vide. Il affiche le build, le démarrage et les messages du firmware.</p>
         {/each}
       {:else}
-        {#each bench.warnings as text (text)}
-          <div class="line warn-line"><Icon name="warn" /><span>{text}</span></div>
-        {:else}
-          <p class="empty-line">Aucun avertissement.</p>
-        {/each}
+        <WarningsPanel />
       {/if}
     </div>
   </section>
@@ -452,22 +509,38 @@
     white-space: pre-wrap;
   }
 
-  /* Paillasse : tapis antistatique quadrillé (charte 2.2) */
-  .bench {
-    grid-area: bench;
-    position: relative;
-    overflow: auto;
-    background-color: var(--pb-mat);
-    background-image:
-      linear-gradient(var(--pb-mat-grid) 1px, transparent 1px),
-      linear-gradient(90deg, var(--pb-mat-grid) 1px, transparent 1px);
-    background-size: 24px 24px;
+  /* Mode Édition / Simulation : contrôle segmenté (maquette) */
+  .segmented {
+    display: inline-flex;
+    height: 28px;
+    overflow: hidden;
+    border: 1px solid var(--pb-line);
+    border-radius: 3px;
+  }
+  .segmented button {
+    padding: 0 10px;
+    border: 0;
+    background: transparent;
+    color: var(--pb-text-quiet);
+    cursor: pointer;
+  }
+  .segmented button + button {
+    border-left: 1px solid var(--pb-line);
+  }
+  .segmented button[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--pb-accent) 18%, transparent);
+    color: var(--pb-text);
+    font-weight: 600;
+  }
+  .segmented button:disabled {
+    cursor: default;
+    opacity: 0.45;
   }
   .empty {
-    position: absolute;
-    left: 50%;
-    top: 40%;
-    translate: -50% -50%;
+    grid-area: bench;
+    z-index: 1;
+    align-self: center;
+    justify-self: center;
     width: 440px;
     display: flex;
     flex-direction: column;
@@ -540,16 +613,6 @@
     display: inline-block;
     min-width: 80px;
     color: var(--pb-text-quiet);
-  }
-  .warn-line {
-    display: flex;
-    gap: 8px;
-    align-items: flex-start;
-    padding: 2px 0;
-  }
-  .warn-line :global(.icon) {
-    margin-top: 2px;
-    color: var(--pb-warn);
   }
   .empty-line {
     margin: 0;

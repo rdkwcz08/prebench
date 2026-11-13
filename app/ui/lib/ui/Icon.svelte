@@ -28,6 +28,8 @@
     close: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',
     chip: '<rect x="4" y="4" width="8" height="8" rx="1"/><path d="M6 2v2M10 2v2M6 12v2M10 12v2M2 6h2M2 10h2M12 6h2M12 10h2"/>',
     bug: '<path d="M5.5 6.5a2.5 2.5 0 0 1 5 0v4a2.5 2.5 0 0 1-5 0z"/><path d="M8 7v5.5M3 8.5h2.5M10.5 8.5H13M3.5 5.5l2 1.5M12.5 5.5l-2 1.5M3.5 12l2-1M12.5 12l-2-1M6.5 4.2 5.5 2.8M9.5 4.2l1-1.4"/>',
+    fit: '<path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/><rect x="5.5" y="5.5" width="5" height="5" rx="0.5"/>',
+    note: '<path d="M3.5 2.5h9v8l-3 3h-6z"/><path d="M12.5 10.5h-3v3M5.5 5.5h5M5.5 8h3"/>',
     folder: '<path d="M2.5 4.5v8h11v-6.5H8L6.5 4.5z"/>',
     download: '<path d="M8 2.5v7M5 6.5l3 3 3-3M3.5 13h9"/>',
     'panel-right': '<rect x="2.5" y="3" width="11" height="10" rx="1"/><path d="M10 3v10"/>',

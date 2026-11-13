@@ -193,6 +193,18 @@ void fake_app_send_gpio_input(fake_app_t *fa, uint8_t port, uint8_t pin, uint8_t
     send_frame(fa, VMCU_MSG_GPIO_INPUT, 0, 0, in, sizeof in);
 }
 
+void fake_app_send_uart_rx(fake_app_t *fa, uint8_t id, const uint8_t *data, size_t len)
+{
+    while (len > 0) {
+        size_t n = len > 60 ? 60 : len;
+        uint8_t in[64] = { id, 0, (uint8_t)(n & 0xFF), (uint8_t)(n >> 8) };
+        memcpy(in + 4, data, n);
+        send_frame(fa, VMCU_MSG_UART_RX, 0, 0, in, 4 + n);
+        data += n;
+        len -= n;
+    }
+}
+
 void fake_app_send_empty(fake_app_t *fa, uint16_t type)
 {
     send_frame(fa, type, 0, 0, NULL, 0);

@@ -10,6 +10,10 @@
 //   modèle -> drive/pull -> acteur -> réseau -> ...
 //   vue -> component_control -> acteur -> onControl (modèles)
 //   modèles -> invalidate -> une fois par image : getState -> « sim:states » (vues)
+//   réseau -> niveaux des broches utilisées, une fois par image -> « sim:nets » ;
+//   UART_CONFIG -> « sim:uart-config » ; UART_TX -> une fois par image -> « sim:uart » ;
+//   moniteur série -> uart_send -> UART_RX (trames de 4 Kio au plus)
+//   conflit ou entrée lue flottante -> avertissement (section 9.2)
 //   PING Worker : firmware -> acteur -> onPing du composant d'écho -> PONG (sans WebView)
 //
 // Garde-fous (section 11.2) : pendant une simulation, et seulement alors, un
@@ -27,7 +31,7 @@
 // figé par le débogueur (« Arrêté sur un point d'arrêt »). Ni pause CPU, ni
 // suspension, ni arrêt pour mémoire pendant une session de débogage.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -47,7 +51,7 @@ use super::net::{Drive, Level, Network, Node, Pull, Source};
 use super::protocol::{self, msg, Header, Reader, Writer, FLAG_REPLY, HEADER_SIZE};
 use crate::error::{CoreError, CoreResult};
 use crate::platform;
-use crate::project::{split_endpoint, Project};
+use crate::project::{split_endpoint, Project, Wire};
 
 /// Capacités des canaux : tous les tampons sont bornés (règle 16.2.11).
 const ACTOR_QUEUE: usize = 4096;
@@ -59,21 +63,32 @@ const SYNC_TIMEOUT_MS: u32 = 1000;
 const EXIT_RESET: i32 = 71;
 
 /// Plafond mémoire d'un firmware (section 11.1), surveillé à 1 Hz.
-pub const MEMORY_LIMIT: u64 = 256 * 1024 * 1024;
+pub const MEMORY_LIMIT: u64 = crate::settings::defaults::MEMORY_LIMIT_MB * 1024 * 1024;
 /// Plafond posé par le système (Linux : RLIMIT_AS, mémoire virtuelle ; Windows :
 /// Job Object, mémoire engagée), au double du plafond surveillé : la mesure
 /// arrête une fuite ordinaire avec un message clair, ce plafond-ci une
 /// allocation trop rapide pour elle. macOS n'en a pas (platform/macos.rs).
 const MEMORY_BACKSTOP: u64 = 2 * MEMORY_LIMIT;
 /// Pause automatique : plus de CPU_LIMIT_PCT % d'un cœur pendant CPU_LIMIT_TIME.
-const CPU_LIMIT_PCT: f32 = 80.0;
-const CPU_LIMIT_TIME: Duration = Duration::from_secs(5);
+const CPU_LIMIT_PCT: f32 = crate::settings::defaults::CPU_LIMIT_PERCENT;
+const CPU_LIMIT_TIME: Duration = Duration::from_secs(crate::settings::defaults::CPU_LIMIT_SECONDS);
+/// Numéro du prochain lancement de firmware, unique dans le processus.
+static LAUNCHES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+/// Attente de la fin du processus firmware à l'arrêt de la simulation.
+const KILL_WAIT: Duration = Duration::from_secs(2);
 const MONITOR_PERIOD: Duration = Duration::from_secs(1);
 /// Mesure rapprochée (4 Hz) au-delà de la moitié du plafond mémoire.
 const MONITOR_PERIOD_FAST: Duration = Duration::from_millis(250);
 /// Délai entre PAUSE et la suspension du processus : laisse le fil E/S de
 /// libvmcu geler l'horloge, pour que le temps reparte sans saut.
 const SUSPEND_DELAY: Duration = Duration::from_millis(20);
+/// Trame UART_RX : 4 Kio au plus (docs/protocol.md).
+const UART_CHUNK: usize = 4096;
+/// Octets UART en attente d'une image, par UART (règle 16.2.11).
+const UART_OUT_MAX: usize = 64 * 1024;
+/// Avertissements du réseau logique (section 9.2), hors des codes du firmware.
+const WARN_CONFLICT: u16 = 100;
+const WARN_FLOATING: u16 = 101;
 /// Débogage : sans HEARTBEAT (toutes les 200 ms) pendant ce délai, le firmware
 /// est arrêté sur un point d'arrêt.
 const BREAKPOINT_AFTER: Duration = Duration::from_millis(600);
@@ -104,11 +119,13 @@ pub enum SimMsg {
     Pause,
     /// Reprise demandée par l'utilisateur.
     Resume,
-    /// Mesure du firmware : CPU en % d'un cœur sur `span`, mémoire en octets.
+    /// Mesure du firmware : CPU en % d'un cœur depuis la mesure précédente,
+    /// temps CPU consommé depuis (`used`) et cumulé, mémoire en octets.
     Usage {
         cpu_pct: f32,
+        used: Duration,
+        cpu_time: Duration,
         memory: u64,
-        span: Duration,
     },
     /// Suspension du processus, `SUSPEND_DELAY` après PAUSE (numéro de pause).
     Suspend(u64),
@@ -120,12 +137,22 @@ pub enum SimMsg {
     DebugAttach(LocalStream),
     /// Débogage : échéance du HEARTBEAT numéro donné.
     BeatTimeout(u64),
+    /// Câblage modifié dans l'app (section 10.4) : appliqué sans relance.
+    SetWiring(Vec<crate::project::Wire>),
+    /// Moniteur série : octets vers l'UART `id` du firmware.
+    UartSend {
+        id: u8,
+        data: Vec<u8>,
+    },
 }
 
 pub struct SimHandle {
     pub tx: mpsc::Sender<SimMsg>,
     /// Session de débogage : reprise telle quelle si la simulation est relancée.
     pub debug: Option<DebugConfig>,
+    /// Composants dont le modèle tourne : un composant ajouté ensuite n'est
+    /// actif qu'au prochain démarrage.
+    pub components: HashSet<String>,
 }
 
 impl SimHandle {
@@ -187,11 +214,27 @@ struct WarnEvent {
     text: String,
 }
 
+/// Débit configuré par le firmware (alerte de débit du moniteur série).
+#[derive(Clone, Serialize)]
+struct UartConfigEvent {
+    id: u8,
+    baud: u32,
+}
+
+/// Octets émis par une UART du firmware depuis l'image précédente.
+#[derive(Clone, Serialize)]
+struct UartEvent {
+    id: u8,
+    data: Vec<u8>,
+}
+
 /// Mesure du firmware pour l'indicateur de la barre d'état.
 #[derive(Clone, Serialize)]
 struct UsageEvent {
     /// Pourcentage d'un cœur.
     cpu: f32,
+    /// Temps CPU consommé par le firmware depuis son lancement, en ms.
+    cpu_time_ms: u64,
     /// Octets.
     memory: u64,
     memory_limit: u64,
@@ -257,14 +300,20 @@ struct Actor<R: Runtime> {
     last_input: HashMap<String, (u8, u8)>,
     models: Option<Models>,
     states_dirty: bool,
+    /// Octets émis par chaque UART du firmware, envoyés à l'image suivante (« sim:uart »).
+    uart_out: BTreeMap<u8, Vec<u8>>,
+    /// Niveaux des broches de la carte à envoyer à l'image suivante (« sim:nets »).
+    nets_out: BTreeMap<String, Level>,
+    /// Broches de la carte câblées (fils du projet, composants intégrés).
+    wired: HashSet<String>,
+    /// Avertissements du réseau déjà émis (code, broche) : une fois par broche.
+    net_warned: HashSet<(u16, String)>,
     ui_flush_scheduled: bool,
     out_seq: u32,
     echo: Option<String>,
     unknown_warned: HashSet<u16>,
     unknown_pins: HashSet<(u8, u8)>,
     guards: Guards,
-    /// Nombre de lancements du firmware : nom de canal propre à chacun.
-    launches: u32,
     /// Débogage : attente de connexion du firmware lancé par le débogueur.
     debug_accept: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Débogage : numéro du dernier HEARTBEAT, firmware figé.
@@ -280,7 +329,8 @@ struct Guards {
     paused: bool,
     suspended: bool,
     pause_seq: u64,
-    /// Durée cumulée au-delà de CPU_LIMIT_PCT, remise à zéro sous le seuil.
+    /// Temps CPU consommé par le firmware tant qu'il reste au-delà de
+    /// CPU_LIMIT_PCT, remis à zéro sous le seuil.
     busy: Duration,
     last_memory: u64,
     /// Message de fin imposé par un garde-fou (arrêt pour mémoire).
@@ -294,6 +344,7 @@ struct Guards {
 pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
     let (tx, rx) = mpsc::channel(ACTOR_QUEUE);
     let debug = cfg.debug.clone();
+    let components = cfg.components.iter().map(|c| c.id.clone()).collect();
     let echo = cfg
         .components
         .iter()
@@ -310,19 +361,26 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         last_input: HashMap::new(),
         models: None,
         states_dirty: false,
+        nets_out: BTreeMap::new(),
+        uart_out: BTreeMap::new(),
+        wired: HashSet::new(),
+        net_warned: HashSet::new(),
         ui_flush_scheduled: false,
         out_seq: 0,
         echo,
         unknown_warned: HashSet::new(),
         unknown_pins: HashSet::new(),
         guards: Guards::default(),
-        launches: 0,
         debug_accept: None,
         beat_seq: 0,
         at_breakpoint: false,
     };
     tauri::async_runtime::spawn(async move { actor.run(rx).await });
-    SimHandle { tx, debug }
+    SimHandle {
+        tx,
+        debug,
+        components,
+    }
 }
 
 impl<R: Runtime> Actor<R> {
@@ -359,6 +417,14 @@ impl<R: Runtime> Actor<R> {
                     );
                 }
                 SimMsg::BeatTimeout(seq) => self.on_beat_timeout(seq),
+                SimMsg::SetWiring(wires) => self.rewire(wires).await,
+                SimMsg::UartSend { id, data } => {
+                    for chunk in data.chunks(UART_CHUNK) {
+                        let mut w = Writer::default();
+                        w.u8(id).u8(0).u16(chunk.len() as u16).bytes(chunk);
+                        self.send(msg::UART_RX, 0, 0, &w.buf).await;
+                    }
+                }
                 SimMsg::Exited(code) => {
                     self.stop_monitor();
                     let reload = self.guards.reload.take();
@@ -403,9 +469,10 @@ impl<R: Runtime> Actor<R> {
                 SimMsg::Resume => self.resume().await,
                 SimMsg::Usage {
                     cpu_pct,
+                    used,
+                    cpu_time,
                     memory,
-                    span,
-                } => self.on_usage(cpu_pct, memory, span).await,
+                } => self.on_usage(cpu_pct, used, cpu_time, memory).await,
                 SimMsg::Suspend(seq) => self.suspend(seq),
                 SimMsg::Reload(firmware) if self.cfg.debug.is_some() => {
                     self.debug_reload(firmware);
@@ -428,12 +495,17 @@ impl<R: Runtime> Actor<R> {
                         link.reader.abort(); // ferme le canal : fin de la session de débogage
                         if let Some(kill) = link.kill {
                             let _ = kill.send(());
+                            // Fin effective du processus, même suspendu (SIGKILL) :
+                            // l'app peut se fermer juste après.
+                            let _ = tokio::time::timeout(KILL_WAIT, async {
+                                while let Some(m) = rx.recv().await {
+                                    if matches!(m, SimMsg::Exited(_)) {
+                                        break;
+                                    }
+                                }
+                            })
+                            .await;
                         }
-                        self.status("stopped", "simulation arrêtée".into());
-                        return;
-                    }
-                    if let Some(kill) = self.link.as_mut().and_then(|l| l.kill.take()) {
-                        let _ = kill.send(());
                     }
                     self.status("stopped", "simulation arrêtée".into());
                     return;
@@ -445,6 +517,68 @@ impl<R: Runtime> Actor<R> {
     // --- Réseau ---------------------------------------------------------------------
 
     fn build_network(&mut self) {
+        self.connect_all();
+        // État initial de toutes les broches de composants vers les modèles.
+        for node in self.net.resolve_all() {
+            self.notify_model(&node);
+        }
+        self.watch_all();
+    }
+
+    /// Broches utilisées (câblées ou configurées par le firmware) : niveaux vers l'interface.
+    fn watch_all(&mut self) {
+        let names: Vec<String> = self
+            .wired
+            .iter()
+            .chain(self.fw_pins.keys())
+            .cloned()
+            .collect();
+        for name in names {
+            self.watch_net(&name);
+        }
+    }
+
+    /// Niveau d'une broche de la carte : envoyé à l'image suivante si elle est
+    /// utilisée ; conflit ou entrée lue flottante signalés une fois (section 9.2).
+    fn watch_net(&mut self, name: &str) {
+        let fw = self.fw_pins.get(name).copied();
+        if !self.wired.contains(name) && fw.is_none() {
+            return;
+        }
+        let level = self.net.level(&Node::Board(name.to_string()));
+        self.nets_out.insert(name.to_string(), level);
+        self.schedule_ui();
+        let label = match self
+            .cfg
+            .board
+            .pins
+            .get(name)
+            .and_then(|p| p.label.as_deref())
+        {
+            Some(l) if l != name => format!("{l} ({name})"),
+            _ => name.to_string(),
+        };
+        if level == Level::Conflict && self.net_warned.insert((WARN_CONFLICT, name.to_string())) {
+            self.warn(
+                WARN_CONFLICT,
+                format!("Conflit sur {label} : deux sorties imposent des niveaux opposés (court-circuit). Retirez un fil ou passez une sortie en entrée."),
+            );
+        }
+        let reads = fw.is_some_and(|f| f.mode == 0 && f.pull == 0);
+        if level == Level::Floating
+            && reads
+            && self.net_warned.insert((WARN_FLOATING, name.to_string()))
+        {
+            self.warn(
+                WARN_FLOATING,
+                format!("{label} est lue flottante : ni résistance de tirage ni composant ne fixe son niveau. Activez GPIO_PULLUP ou GPIO_PULLDOWN, ou câblez la broche."),
+            );
+        }
+    }
+
+    /// Liaisons et contributions de la carte : broches, alimentations,
+    /// composants intégrés, fils du projet.
+    fn connect_all(&mut self) {
         let board = self.cfg.board.clone();
         for (name, def) in &board.pins {
             let node = Node::Board(name.clone());
@@ -481,15 +615,39 @@ impl<R: Runtime> Actor<R> {
                 );
             }
         }
+        self.wired = board
+            .onboard
+            .values()
+            .flat_map(|o| o.wires.values().cloned())
+            .collect();
         for wire in &self.cfg.project.wires {
-            if let (Some(a), Some(b)) = (endpoint_node(&wire.from), endpoint_node(&wire.to)) {
+            let a = endpoint_node(&board, &wire.from);
+            let b = endpoint_node(&board, &wire.to);
+            for n in [&a, &b].into_iter().flatten() {
+                if let Node::Board(s) = n {
+                    self.wired.insert(s.clone());
+                }
+            }
+            if let (Some(a), Some(b)) = (a, b) {
                 self.net.connect(a, b);
             }
         }
-        // État initial de toutes les broches de composants vers les modèles.
-        for node in self.net.resolve_all() {
-            self.notify_model(&node);
-        }
+    }
+
+    /// Nouveau câblage pendant la simulation : réseau reconstruit, sorties du
+    /// firmware et des composants reprises, niveaux changés propagés.
+    async fn rewire(&mut self, wires: Vec<Wire>) {
+        self.cfg.project.wires = wires;
+        let old = std::mem::take(&mut self.net);
+        self.connect_all();
+        self.net.carry_over(&old);
+        let nodes = self.net.resolve_all();
+        let changed: Vec<Node> = nodes
+            .into_iter()
+            .filter(|n| old.level(n) != self.net.level(n))
+            .collect();
+        self.propagate(changed).await;
+        self.watch_all();
     }
 
     fn send_model(&mut self, cmd: ModelCmd) {
@@ -578,6 +736,7 @@ impl<R: Runtime> Actor<R> {
                     if self.link.is_some() && fw.reads_net() {
                         self.send_input(name.clone()).await;
                     }
+                    self.watch_net(name);
                 }
                 Node::Component { .. } => self.notify_model(&node),
             }
@@ -612,7 +771,9 @@ impl<R: Runtime> Actor<R> {
 
     /// Une image : getState des modèles modifiés au plus une fois par 16 ms.
     fn schedule_ui(&mut self) {
-        if !self.states_dirty || self.ui_flush_scheduled {
+        if (!self.states_dirty && self.nets_out.is_empty() && self.uart_out.is_empty())
+            || self.ui_flush_scheduled
+        {
             return;
         }
         self.ui_flush_scheduled = true;
@@ -627,6 +788,13 @@ impl<R: Runtime> Actor<R> {
         self.ui_flush_scheduled = false;
         if std::mem::take(&mut self.states_dirty) {
             self.send_model(ModelCmd::FlushStates);
+        }
+        if !self.nets_out.is_empty() {
+            let nets = std::mem::take(&mut self.nets_out);
+            let _ = self.app.emit("sim:nets", nets);
+        }
+        for (id, data) in std::mem::take(&mut self.uart_out) {
+            let _ = self.app.emit("sim:uart", UartEvent { id, data });
         }
     }
 
@@ -687,6 +855,13 @@ impl<R: Runtime> Actor<R> {
             msg::GPIO_WRITE => {
                 let (port, pin, level) = (r.u8(), r.u8(), r.u8());
                 if let Some(name) = self.pin_name(port, pin) {
+                    // Tests : écriture horodatée par le temps du firmware, qui ne
+                    // dépend ni de la charge de la machine ni du délai de livraison.
+                    #[cfg(test)]
+                    let _ = self.app.emit(
+                        "sim:test-gpio",
+                        serde_json::json!({ "pin": name, "level": level, "t_us": h.timestamp_us }),
+                    );
                     let fw = self.fw_pins.entry(name.clone()).or_default();
                     fw.out = level;
                     let fw = *fw;
@@ -702,6 +877,28 @@ impl<R: Runtime> Actor<R> {
                     text
                 };
                 self.warn(code, text);
+            }
+            msg::UART_CONFIG => {
+                let id = r.u8();
+                let _ = (r.u8(), r.u8(), r.u8());
+                let baud = r.u32();
+                let _ = self
+                    .app
+                    .emit("sim:uart-config", UartConfigEvent { id, baud });
+            }
+            msg::UART_TX => {
+                let id = r.u8();
+                let _ = r.u8();
+                let len = r.u16() as usize;
+                let data = r.bytes(len);
+                let out = self.uart_out.entry(id).or_default();
+                out.extend_from_slice(&data);
+                if out.len() > UART_OUT_MAX {
+                    // Interface en retard : les plus anciens octets cèdent la place (borné).
+                    let excess = out.len() - UART_OUT_MAX;
+                    out.drain(..excess);
+                }
+                self.schedule_ui();
             }
             msg::LOG => {
                 let level = r.u8();
@@ -759,6 +956,7 @@ impl<R: Runtime> Actor<R> {
         let mut changed = self.net.set_drive(&node, Source::Firmware, fw.drive());
         changed.extend(self.net.set_pull(&node, Source::Firmware, fw.pull()));
         self.propagate(changed).await;
+        self.watch_net(name); // configurée par le firmware : utilisée, même sans changement de niveau
     }
 
     async fn on_hello(&mut self, h: Header, r: &mut Reader<'_>) {
@@ -853,8 +1051,11 @@ impl<R: Runtime> Actor<R> {
             self.listen_debug();
             return Ok(());
         }
-        self.launches = self.launches.wrapping_add(1);
-        let address = platform::socket_address(self.cfg.board_id, self.launches);
+        // Compteur commun à toutes les simulations du processus : deux acteurs
+        // (une simulation et la suivante, ou des tests en parallèle) n'ouvrent
+        // jamais le même socket, que try_overwrite remplacerait.
+        let launch = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let address = platform::socket_address(self.cfg.board_id, launch);
         let name = address.as_str().to_fs_name::<GenericFilePath>()?;
         let listener = ListenerOptions::new()
             .name(name)
@@ -1087,18 +1288,18 @@ impl<R: Runtime> Actor<R> {
             while let Some(usage) = platform::process_usage(pid) {
                 let now = Instant::now();
                 if let Some((then, cpu)) = prev {
-                    let span = now.duration_since(then);
-                    let busy = usage.cpu_time.saturating_sub(cpu).as_secs_f64();
-                    let wall = span.as_secs_f64();
+                    let used = usage.cpu_time.saturating_sub(cpu);
+                    let wall = now.duration_since(then).as_secs_f64();
                     let cpu_pct = if wall > 0.0 {
-                        (busy / wall * 100.0) as f32
+                        (used.as_secs_f64() / wall * 100.0) as f32
                     } else {
                         0.0
                     };
                     let m = SimMsg::Usage {
                         cpu_pct,
+                        used,
+                        cpu_time: usage.cpu_time,
                         memory: usage.memory,
-                        span,
                     };
                     if tx.send(m).await.is_err() {
                         break;
@@ -1121,7 +1322,7 @@ impl<R: Runtime> Actor<R> {
         }
     }
 
-    async fn on_usage(&mut self, cpu_pct: f32, memory: u64, span: Duration) {
+    async fn on_usage(&mut self, cpu_pct: f32, used: Duration, cpu_time: Duration, memory: u64) {
         if self.guards.paused {
             return;
         }
@@ -1130,6 +1331,7 @@ impl<R: Runtime> Actor<R> {
             "sim:usage",
             UsageEvent {
                 cpu: cpu_pct,
+                cpu_time_ms: u64::try_from(cpu_time.as_millis()).unwrap_or(u64::MAX),
                 memory,
                 memory_limit: MEMORY_LIMIT,
             },
@@ -1151,12 +1353,14 @@ impl<R: Runtime> Actor<R> {
             }
             return;
         }
+        // Temps CPU consommé, pas durée écoulée : sur une machine chargée, une
+        // mesure espacée ou un firmware ralenti ne gonfle pas le compte.
         if cpu_pct > CPU_LIMIT_PCT {
-            self.guards.busy += span;
+            self.guards.busy += used;
             if self.guards.busy >= CPU_LIMIT_TIME {
                 let text = format!(
-                    "Simulation mise en pause : le firmware a occupé plus de {CPU_LIMIT_PCT:.0} % \
-                     d'un cœur pendant {} s. Une boucle sans délai tourne \
+                    "Simulation mise en pause : le firmware a calculé sans pause pendant {} s, \
+                     à plus de {CPU_LIMIT_PCT:.0} % d'un cœur. Une boucle sans délai tourne \
                      probablement à vide : ajoutez un HAL_Delay ou une attente d'interruption, \
                      puis reprenez.",
                     CPU_LIMIT_TIME.as_secs()
@@ -1270,10 +1474,12 @@ impl<R: Runtime> Actor<R> {
     }
 }
 
-fn endpoint_node(endpoint: &str) -> Option<Node> {
+fn endpoint_node(board: &Board, endpoint: &str) -> Option<Node> {
     let (id, pin) = split_endpoint(endpoint)?;
     Some(if id == "board" {
-        Node::Board(pin.to_string())
+        // Pastille « CN5:6 » ou signal « PA5 » : les pastilles d'un même signal
+        // forment un seul nœud (fusion des GND, broches présentes deux fois).
+        Node::Board(board.signal_of(pin)?)
     } else {
         Node::Component {
             id: id.to_string(),

@@ -44,9 +44,62 @@
       "type": "object",
       "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_]{0,15}$" },
       "additionalProperties": { "$ref": "#/$defs/onboard" }
+    },
+    "layout": {
+      "description": "Disposition physique sur la paillasse (facultative ; sans elle, dessin générique). Unités du canevas : 1 = 1 px au zoom 1. Toute pastille DOIT nommer une broche de pins, une alimentation de power ou un nom de unconnected.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "headers"],
+      "properties": {
+        "size": { "description": "Largeur et hauteur de la carte.", "$ref": "#/$defs/xy" },
+        "holes": { "description": "Centres des trous de fixation.", "type": "array", "items": { "$ref": "#/$defs/xy" } },
+        "chip": {
+          "description": "Boîtier du microcontrôleur, sérigraphié avec mcu.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pos", "size"],
+          "properties": { "pos": { "$ref": "#/$defs/xy" }, "size": { "$ref": "#/$defs/xy" } }
+        },
+        "onboard": {
+          "description": "Coin haut-gauche des composants intégrés, par identifiant de [onboard].",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/xy" }
+        },
+        "unconnected": {
+          "description": "Pastilles dessinées mais non câblables (NC, RESET, VIN, D0 sans pont de soudure…) ; le nom sert d'étiquette.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 16 }
+        },
+        "headers": {
+          "description": "Connecteurs. Une extrémité de fil « board.<id>:<n> » (prebench.toml) désigne la n-ième pastille, à partir de 1, dans la numérotation de la carte.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/header" }
+        }
+      }
     }
   },
   "$defs": {
+    "xy": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pos", "dir", "pins"],
+      "properties": {
+        "id": { "description": "Repère du connecteur (CN6), unique.", "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,15}$" },
+        "pos": { "description": "Centre de la pastille 1.", "$ref": "#/$defs/xy" },
+        "dir": { "description": "Sens de la pastille 1 vers les suivantes.", "type": "string", "enum": ["up", "down", "left", "right"] },
+        "pitch": { "description": "Pas entre pastilles.", "type": "number", "exclusiveMinimum": 0, "default": 16 },
+        "label_side": { "description": "Côté de la sérigraphie.", "type": "string", "enum": ["left", "right", "above", "below"], "default": "right" },
+        "pins": {
+          "description": "Pastilles dans l'ordre de la carte : broche (PA5), alimentation (3V3, GND) ou nom de unconnected.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1, "maxLength": 16 }
+        }
+      }
+    },
     "pinName": { "type": "string", "pattern": "^(P[A-K](1[0-5]|[0-9])|GPIO[0-9]{1,2})$" },
     "capability": {
       "description": "gpio, exti, adcN:CHx, pwm[:TIMx_CHy], i2cN:SDA|SCL, spiN:SCK|MISO|MOSI|NSS, uartN:TX|RX|CTS|RTS. Sans suffixe (pwm, i2c, spi, uart) : fonction routable par matrice (ESP32).",

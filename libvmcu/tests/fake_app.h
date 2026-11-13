@@ -35,6 +35,8 @@ void fake_app_set_echo(fake_app_t *fa, bool present);
 
 void fake_app_send_gpio_input(fake_app_t *fa, uint8_t port, uint8_t pin, uint8_t level);
 void fake_app_send_empty(fake_app_t *fa, uint16_t type); /* PAUSE, RESUME… */
+/** Octets vers une UART du firmware (UART_RX), en trames de 60 octets au plus. */
+void fake_app_send_uart_rx(fake_app_t *fa, uint8_t id, const uint8_t *data, size_t len);
 
 /**
  * Attend qu'au moins `count` trames du type donné soient arrivées (port et pin

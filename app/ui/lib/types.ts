@@ -5,14 +5,101 @@
 
 export type ParamMap = Record<string, unknown>;
 
+/** Rôle d'une broche, vu du composant (manifest.schema.json). */
+export type PinRole =
+  | 'input'
+  | 'output'
+  | 'io'
+  | 'open-drain'
+  | 'analog-in'
+  | 'analog-out'
+  | 'power'
+  | 'ground'
+  | 'passive';
+
 /** Manifeste d'un composant (components/manifest.schema.json, sous-ensemble utile). */
 export interface Manifest {
   api_version: 1;
   id: string;
   name: string;
+  description?: string;
+  category?: string;
   view: { width: number; height: number };
-  pins: { name: string; label?: string; role: string; x: number; y: number }[];
+  pins: { name: string; label?: string; role: PinRole; x: number; y: number }[];
+  params?: Record<string, { type: string; label?: string; values?: string[]; default?: unknown }>;
   controls?: { id: string; type: string; label: string }[];
+}
+
+/** Fil de prebench.toml ; extrémité « board.CN5:6 » ou « led1.A ». */
+export interface Wire {
+  from: string;
+  to: string;
+  color?: WireColor;
+}
+
+export type WireColor = 'red' | 'black' | 'yellow' | 'green' | 'blue' | 'orange' | 'purple';
+
+/** Composant placé, tel qu'enregistré dans prebench.toml. */
+export interface PlacedComponent {
+  id: string;
+  type: string;
+  /** Nom affiché (« LED rouge ») ; l'identifiant reste celui des fils. */
+  name?: string;
+  params: ParamMap;
+  pos: [number, number];
+}
+
+/** Note libre posée sur le tapis (prebench.toml, [[notes]]). */
+export interface Note {
+  text: string;
+  pos: [number, number];
+}
+
+/** Longueurs maximales (docs/prebench.schema.json). */
+export const MAX_NAME_LEN = 40;
+export const MAX_NOTE_LEN = 200;
+
+/** Connecteur de la carte (boards/board.schema.json, layout.headers). */
+export interface Header {
+  id: string;
+  pos: [number, number];
+  dir: 'up' | 'down' | 'left' | 'right';
+  pitch: number;
+  label_side: 'left' | 'right' | 'above' | 'below';
+  pins: string[];
+}
+
+export interface Layout {
+  size: [number, number];
+  holes: [number, number][];
+  chip: { pos: [number, number]; size: [number, number] } | null;
+  onboard: Record<string, [number, number]>;
+  unconnected: string[];
+  headers: Header[];
+}
+
+export interface PinDef {
+  label: string | null;
+  caps: string[];
+  external_pull: string | null;
+}
+
+/** État d'un net (section 9.1) ; mêmes noms que NetLevel de component-api.d.ts. */
+export type Level = 'high' | 'low' | 'pulled-high' | 'pulled-low' | 'floating' | 'conflict';
+
+/** Problème de câblage (section 9.2), calculé par le cœur sans simulation. */
+export interface Check {
+  severity: 'warn' | 'conflict';
+  text: string;
+  /** Extrémités concernées : sélection au clic. */
+  endpoints: string[];
+}
+
+/** Réponse de save_bench. */
+export interface SaveView {
+  /** Composants placés pendant la simulation : actifs au prochain démarrage. */
+  pending: string[];
+  checks: Check[];
 }
 
 /** Composant du catalogue (projet prioritaire sur les composants fournis). */
@@ -30,6 +117,8 @@ export interface InstanceInfo {
   params: ParamMap;
   /** Position sur la paillasse ; null pour un composant intégré à la carte. */
   pos: [number, number] | null;
+  /** Nom affiché ; absent : l'identifiant. */
+  name?: string | null;
 }
 
 /** Projet ouvert (commande open_project). */
@@ -39,8 +128,15 @@ export interface ProjectView {
   board_name: string;
   mcu: string;
   instances: InstanceInfo[];
+  /** Catalogue complet : menu « Ajouter un composant ». */
   components: Record<string, ComponentInfo>;
   warnings: string[];
+  wires: Wire[];
+  notes: Note[];
+  layout: Layout | null;
+  pins: Record<string, PinDef>;
+  power: Record<string, number>;
+  checks: Check[];
 }
 
 /* --- Événements du cœur --- */

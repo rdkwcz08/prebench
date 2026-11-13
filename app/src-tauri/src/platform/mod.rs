@@ -27,6 +27,33 @@ pub struct DebugRequirements {
     pub debugger_install: &'static str,
 }
 
+/// Fenêtre native « Enregistrer sous » (NSSavePanel sous macOS,
+/// IFileSaveDialog sous Windows, portail XDG ou GTK sous Linux), ouverte dans
+/// `dir` avec le nom `name` proposé. None : l'utilisateur a annulé.
+pub async fn ask_save_path<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    title: &str,
+    dir: &std::path::Path,
+    name: &str,
+) -> Option<std::path::PathBuf> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title(title)
+        .set_directory(dir)
+        .set_file_name(name)
+        .add_filter("Texte", &["txt"])
+        .set_can_create_directories(true)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    rx.await
+        .ok()
+        .flatten()
+        .and_then(|p| p.as_path().map(std::path::Path::to_path_buf))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -48,21 +75,33 @@ mod tests {
         }
     }
 
-    /// CPU du processus, en % d'un cœur, mesuré sur `over`.
-    fn cpu_pct(pid: u32, over: Duration) -> f64 {
-        let a = process_usage(pid).expect("mesure");
-        let t = Instant::now();
-        std::thread::sleep(over);
-        let b = process_usage(pid).expect("mesure");
-        b.cpu_time.saturating_sub(a.cpu_time).as_secs_f64() / t.elapsed().as_secs_f64() * 100.0
+    /// Temps CPU cumulé du processus.
+    fn cpu_time(pid: u32) -> Duration {
+        process_usage(pid).expect("mesure").cpu_time
+    }
+
+    /// Attend que le processus consomme `amount` de temps CPU. Indépendant de
+    /// la charge de la machine : un processus occupé finit toujours par
+    /// consommer ; plafond de sécurité de 60 s, qui n'est pas une mesure.
+    fn consumes(pid: u32, amount: Duration) -> bool {
+        let from = cpu_time(pid);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if cpu_time(pid).saturating_sub(from) >= amount {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
     }
 
     /// Mesure CPU / mémoire, suspension et reprise d'un processus occupé
-    /// (garde-fous de la section 11.2), sur chaque système.
+    /// (garde-fous de la section 11.2), sur chaque système. Tout est jugé en
+    /// temps CPU consommé, jamais en pourcentage de l'horloge murale.
     #[test]
     fn usage_suspend_resume() {
         let exe = std::env::current_exe().expect("binaire de test");
-        let mut child = std::process::Command::new(exe)
+        let child = std::process::Command::new(exe)
             .args(["--exact", "platform::tests::busy_child"])
             .env(BUSY_ENV, "1")
             .stdout(std::process::Stdio::null())
@@ -70,28 +109,39 @@ mod tests {
             .spawn()
             .expect("processus occupé");
         let pid = child.id();
-        std::thread::sleep(Duration::from_millis(300));
+        // Processus occupé tué à la fin du test, même en cas d'échec.
+        struct KillOnDrop(std::process::Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = KillOnDrop(child);
 
-        let busy = cpu_pct(pid, Duration::from_secs(1));
+        let busy = consumes(pid, Duration::from_millis(300));
         let memory = process_usage(pid).map(|u| u.memory).unwrap_or(0);
-        println!("occupé : {busy:.0} % d'un cœur, {} Ko", memory / 1024);
-        assert!(busy > 50.0, "processus occupé mesuré à {busy:.0} %");
-        assert!(memory > 0, "mémoire mesurée nulle");
 
         suspend_process(pid).expect("suspension");
-        std::thread::sleep(Duration::from_millis(200));
-        let idle = cpu_pct(pid, Duration::from_secs(1));
-        println!("suspendu : {idle:.1} % d'un cœur");
+        // La suspension prend effet avant le retour ; la dernière tranche de
+        // l'ordonnanceur peut encore être comptée : mesure à partir de 50 ms.
+        std::thread::sleep(Duration::from_millis(50));
+        let before = cpu_time(pid);
+        std::thread::sleep(Duration::from_secs(1));
+        let idle = cpu_time(pid).saturating_sub(before);
+        println!("suspendu : {idle:?} de CPU en 1 s");
 
         resume_process(pid).expect("reprise");
-        std::thread::sleep(Duration::from_millis(200));
-        let again = cpu_pct(pid, Duration::from_secs(1));
-        println!("repris : {again:.0} % d'un cœur");
+        let again = consumes(pid, Duration::from_millis(300));
 
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(idle < 5.0, "processus suspendu mesuré à {idle:.1} %");
-        assert!(again > 50.0, "processus repris mesuré à {again:.0} %");
+        drop(child);
+        assert!(busy, "le processus occupé ne consomme pas de CPU");
+        assert!(memory > 0, "mémoire mesurée nulle");
+        assert!(
+            idle < Duration::from_millis(10),
+            "processus suspendu : {idle:?} de CPU"
+        );
+        assert!(again, "le processus repris ne consomme plus de CPU");
         assert!(
             process_usage(u32::MAX - 7).is_none(),
             "pid inexistant mesuré"

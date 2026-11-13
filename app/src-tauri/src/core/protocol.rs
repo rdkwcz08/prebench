@@ -22,6 +22,9 @@ pub mod msg {
     pub const GPIO_WRITE: u16 = 0x0011;
     pub const WARN: u16 = 0x0080;
     pub const LOG: u16 = 0x0081;
+    pub const UART_CONFIG: u16 = 0x0040;
+    pub const UART_TX: u16 = 0x0041;
+    pub const UART_RX: u16 = 0x8041;
     /// Protocole 1.1 : firmware lancé par le débogueur (PREBENCH_DEBUG=1).
     pub const HEARTBEAT: u16 = 0x0090;
     pub const PING: u16 = 0x00F0;
@@ -156,6 +159,11 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// `n` octets bruts (vide si la charge utile est trop courte).
+    pub fn bytes(&mut self, n: usize) -> Vec<u8> {
+        self.take(n).map(<[u8]>::to_vec).unwrap_or_default()
+    }
+
     /// str : u16 longueur + UTF-8 (caractères invalides remplacés).
     pub fn str(&mut self) -> String {
         let n = self.u16() as usize;
@@ -184,6 +192,11 @@ impl Writer {
 
     pub fn u32(&mut self, v: u32) -> &mut Self {
         self.buf.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+
+    pub fn bytes(&mut self, b: &[u8]) -> &mut Self {
+        self.buf.extend_from_slice(b);
         self
     }
 

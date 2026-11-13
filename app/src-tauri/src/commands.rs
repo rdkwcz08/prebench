@@ -20,7 +20,7 @@ use crate::debug;
 use crate::error::{CoreError, CoreResult};
 use crate::platform::paths::simplified;
 use crate::platform::toolchain::{ToolKind, Toolchain};
-use crate::project::{templates, Project};
+use crate::project::{templates, ComponentInstance, Project, Wire, WIRE_COLORS};
 use crate::session::{self, Changes, Session};
 
 /// Une seule carte en phase 1 (multi-cartes : E2, V2).
@@ -33,6 +33,9 @@ pub struct AppState {
     session: Mutex<Option<Session>>,
     /// Un seul build à la fois : démarrage et sauvegardes partagent le dossier de build.
     build_lock: Mutex<()>,
+    /// Dernière écriture de prebench.toml par l'app (save_bench) : ignorée
+    /// par la surveillance, qui ne doit réagir qu'aux modifications de l'utilisateur.
+    own_write: std::sync::Mutex<Option<(PathBuf, std::time::SystemTime)>>,
     /// Fin du dernier build : voir build::invalidate_stale_objects.
     last_build_end: std::sync::Mutex<Option<std::time::SystemTime>>,
 }
@@ -85,6 +88,9 @@ pub struct InstanceView {
     params: serde_json::Map<String, serde_json::Value>,
     /// Position sur la paillasse ; absente pour un composant intégré à la carte.
     pos: Option<[f64; 2]>,
+    /// Nom affiché ; absent : l'identifiant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -102,8 +108,21 @@ pub struct ProjectView {
     board_name: String,
     mcu: String,
     instances: Vec<InstanceView>,
+    /// Catalogue complet (projet puis composants fournis) : menu « Ajouter un composant ».
     components: BTreeMap<String, ComponentView>,
     warnings: Vec<String>,
+    /// Fils de prebench.toml.
+    wires: Vec<Wire>,
+    /// Notes posées sur la paillasse.
+    notes: Vec<crate::project::Note>,
+    /// Disposition de la carte (connecteurs, pastilles) ; absente : dessin générique.
+    layout: Option<crate::core::board::Layout>,
+    /// Broches de la carte : étiquette et capacités (compatibilité du câblage).
+    pins: BTreeMap<String, crate::core::board::PinDef>,
+    /// Alimentations : nom -> tension.
+    power: BTreeMap<String, f64>,
+    /// Validations du câblage (section 9.2).
+    checks: Vec<crate::core::checks::Check>,
 }
 
 pub(crate) struct Resolved {
@@ -125,7 +144,7 @@ fn resolve(root: &Path, dir: &Path) -> CoreResult<Resolved> {
             .iter()
             .map(|(k, v)| (k.clone(), toml_to_json(v)))
             .collect();
-        (id.clone(), o.kind.clone(), params, None)
+        (id.clone(), o.kind.clone(), params, None, None)
     });
     let placed = project.components.iter().map(|c| {
         let params = c
@@ -133,9 +152,15 @@ fn resolve(root: &Path, dir: &Path) -> CoreResult<Resolved> {
             .iter()
             .map(|(k, v)| (k.clone(), toml_to_json(v)))
             .collect();
-        (c.id.clone(), c.kind.clone(), params, Some(c.pos))
+        (
+            c.id.clone(),
+            c.kind.clone(),
+            params,
+            Some(c.pos),
+            c.name.clone(),
+        )
     });
-    for (id, kind, given, pos) in onboard.chain(placed).collect::<Vec<_>>() {
+    for (id, kind, given, pos, name) in onboard.chain(placed).collect::<Vec<_>>() {
         let source = catalog.components.get(&kind).cloned();
         if source.is_none() {
             catalog
@@ -152,6 +177,7 @@ fn resolve(root: &Path, dir: &Path) -> CoreResult<Resolved> {
                 kind,
                 params,
                 pos,
+                name,
             },
             source,
         ));
@@ -236,12 +262,11 @@ fn project_view(root: &Path, dir: &Path, path: String) -> CoreResult<ProjectView
             .warnings
             .push("components/component-api.d.ts mis à jour dans le projet".into());
     }
-    let used: Vec<String> = r.instances.iter().map(|(i, _)| i.kind.clone()).collect();
+    let checks = wiring_checks(&r);
     let components = r
         .catalog
         .components
         .into_iter()
-        .filter(|(id, _)| used.contains(id))
         .map(|(id, source)| {
             let view_source = std::fs::read_to_string(source.view_path()).ok();
             (
@@ -261,7 +286,233 @@ fn project_view(root: &Path, dir: &Path, path: String) -> CoreResult<ProjectView
         instances: r.instances.into_iter().map(|(i, _)| i).collect(),
         components,
         warnings: r.catalog.warnings,
+        wires: r.project.wires,
+        notes: r.project.notes,
+        layout: r.board.layout,
+        pins: r.board.pins,
+        power: r.board.power,
+        checks,
     })
+}
+
+/// Validations du câblage d'un projet résolu (manifestes du catalogue).
+fn wiring_checks(r: &Resolved) -> Vec<crate::core::checks::Check> {
+    let manifests: BTreeMap<String, serde_json::Value> = r
+        .catalog
+        .components
+        .iter()
+        .map(|(id, s)| (id.clone(), s.manifest.clone()))
+        .collect();
+    crate::core::checks::check(&r.board, &r.project, &manifests)
+}
+
+/// État initial des composants du projet, hors simulation : chaque modèle est
+/// créé dans QuickJS, son getState() relevé, puis il est libéré. Les vues
+/// dessinent ainsi la paillasse en mode Édition, sans simulation.
+#[tauri::command]
+pub async fn preview_states(
+    app: AppHandle,
+    path: String,
+) -> CoreResult<BTreeMap<String, serde_json::Value>> {
+    let root = prebench_root(&app);
+    let r = resolve(&root, &simplified(Path::new(&path)))?;
+    let specs = instance_specs(&r);
+    tauri::async_runtime::spawn_blocking(move || initial_states(specs))
+        .await
+        .map_err(|e| CoreError::Project {
+            path,
+            message: e.to_string(),
+        })
+}
+
+fn initial_states(specs: Vec<InstanceSpec>) -> BTreeMap<String, serde_json::Value> {
+    use crate::core::components::engine::{self, ModelCmd, ModelEvent};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let Ok(models) = engine::spawn(
+        specs,
+        Box::new(move |e| {
+            let _ = tx.send(e);
+        }),
+    ) else {
+        return BTreeMap::new();
+    };
+    if !models.send(ModelCmd::FlushStates) {
+        return BTreeMap::new();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(ModelEvent::States(states)) => {
+                return states
+                    .into_iter()
+                    .map(|(id, json)| {
+                        (
+                            id,
+                            serde_json::from_str(&json).unwrap_or(serde_json::Value::Null),
+                        )
+                    })
+                    .collect();
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    BTreeMap::new() // modèles libérés à la sortie (fin du fil « modèles »)
+}
+
+/// Réglages déclarés (settings.rs) et valeurs effectives (section 10.7).
+#[derive(Serialize)]
+pub struct SettingsView {
+    declared: Vec<crate::settings::Setting>,
+    values: serde_json::Map<String, serde_json::Value>,
+}
+
+fn config_dir<R: Runtime>(app: &AppHandle<R>) -> CoreResult<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .map(|d| simplified(&d))
+        .map_err(|e| CoreError::Settings(format!("dossier de configuration introuvable : {e}")))
+}
+
+#[tauri::command]
+pub fn get_settings(app: AppHandle) -> CoreResult<SettingsView> {
+    Ok(SettingsView {
+        declared: crate::settings::declared(),
+        values: crate::settings::effective(&config_dir(&app)?),
+    })
+}
+
+#[tauri::command]
+pub fn set_setting(app: AppHandle, key: String, value: serde_json::Value) -> CoreResult<()> {
+    crate::settings::set(&config_dir(&app)?, &key, &value)
+}
+
+/// Paillasse enregistrée (save_bench).
+#[derive(Serialize)]
+pub struct SaveView {
+    /// Composants placés pendant la simulation : actifs au prochain démarrage.
+    pending: Vec<String>,
+    /// Validations du câblage enregistré.
+    checks: Vec<crate::core::checks::Check>,
+}
+
+/// Enregistre la paillasse éditée (composants, fils) dans prebench.toml ;
+/// pendant une simulation, le câblage s'applique aussitôt, sans relance ni
+/// relecture du projet (l'écriture est ignorée par la surveillance).
+#[tauri::command]
+pub async fn save_bench(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    components: Vec<ComponentInstance>,
+    wires: Vec<Wire>,
+    notes: Option<Vec<crate::project::Note>>,
+) -> CoreResult<SaveView> {
+    save_bench_in(
+        &app,
+        &state,
+        &path,
+        components,
+        wires,
+        notes.unwrap_or_default(),
+    )
+    .await
+}
+
+pub(crate) async fn save_bench_in<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    path: &str,
+    components: Vec<ComponentInstance>,
+    wires: Vec<Wire>,
+    notes: Vec<crate::project::Note>,
+) -> CoreResult<SaveView> {
+    let root = prebench_root(app);
+    let dir = simplified(Path::new(path));
+    let r = resolve(&root, &dir)?;
+    check_bench(&r.board, &components, &wires, &notes).map_err(|message| CoreError::Project {
+        path: dir.join("prebench.toml").display().to_string(),
+        message,
+    })?;
+    crate::project::save_bench(&dir, &components, &wires, &notes)?;
+    let written = std::fs::metadata(dir.join("prebench.toml"))
+        .and_then(|m| m.modified())
+        .ok();
+    if let (Ok(mut own), Some(t)) = (state.own_write.lock(), written) {
+        *own = Some((dir.join("prebench.toml"), t));
+    }
+    let checks = resolve(&root, &dir)
+        .map(|r| wiring_checks(&r))
+        .unwrap_or_default();
+    let slot = state.sim.lock().await;
+    let mut pending = Vec::new();
+    if let Some(sim) = slot.as_ref().filter(|s| s.is_alive()) {
+        pending = components
+            .iter()
+            .filter(|c| !sim.components.contains(&c.id))
+            .map(|c| c.id.clone())
+            .collect();
+        sim.send(SimMsg::SetWiring(wires)).await?;
+    }
+    Ok(SaveView { pending, checks })
+}
+
+/// Identifiants, couleurs et extrémités des fils (docs/prebench.schema.json).
+fn check_bench(
+    board: &Board,
+    components: &[ComponentInstance],
+    wires: &[Wire],
+    notes: &[crate::project::Note],
+) -> Result<(), String> {
+    for c in components {
+        if c.name
+            .as_ref()
+            .is_some_and(|n| n.chars().count() > crate::project::MAX_NAME_LEN)
+        {
+            return Err(format!(
+                "nom de « {} » trop long (40 caractères au plus)",
+                c.id
+            ));
+        }
+    }
+    for n in notes {
+        if n.text.trim().is_empty() || n.text.chars().count() > crate::project::MAX_NOTE_LEN {
+            return Err("note vide ou trop longue (200 caractères au plus)".into());
+        }
+    }
+    let mut ids = std::collections::HashSet::new();
+    for c in components {
+        let valid = c.id != "board"
+            && c.id.len() <= 32
+            && c.id.starts_with(|ch: char| ch.is_ascii_lowercase())
+            && c.id
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_');
+        if !valid || !ids.insert(c.id.as_str()) {
+            return Err(format!(
+                "identifiant de composant invalide ou en double : « {} »",
+                c.id
+            ));
+        }
+    }
+    for w in wires {
+        if let Some(color) = &w.color {
+            if !WIRE_COLORS.contains(&color.as_str()) {
+                return Err(format!("couleur de fil inconnue : « {color} »"));
+            }
+        }
+        for end in [&w.from, &w.to] {
+            let ok = match crate::project::split_endpoint(end) {
+                Some(("board", pad)) => board.signal_of(pad).is_some(),
+                Some((id, pin)) => ids.contains(id) && !pin.is_empty(),
+                None => false,
+            };
+            if !ok {
+                return Err(format!("extrémité de fil invalide : « {end} »"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Prérequis de build vérifié (outil trouvé ou commande pour l'installer).
@@ -542,6 +793,13 @@ async fn on_project_changed<R: Runtime>(app: AppHandle<R>, dir: PathBuf, changes
         .await
         .as_ref()
         .is_some_and(SimHandle::is_alive);
+    let mut changes = changes;
+    if changes.project && is_own_write(&state, &dir) {
+        changes.project = false; // écrit par save_bench : déjà appliqué
+        if changes == Changes::default() {
+            return;
+        }
+    }
     if !changes.views.is_empty() || changes.needs_reload() {
         let _ = app.emit("project:changed", changes.clone());
     }
@@ -591,6 +849,18 @@ async fn on_project_changed<R: Runtime>(app: AppHandle<R>, dir: PathBuf, changes
     } else if handle.send(SimMsg::Reload(firmware)).await.is_err() {
         log(&app, "rechargement impossible : simulation arrêtée".into());
     }
+}
+
+/// prebench.toml n'a pas changé depuis la dernière écriture de l'app.
+fn is_own_write(state: &AppState, dir: &Path) -> bool {
+    let path = dir.join("prebench.toml");
+    let now = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    state
+        .own_write
+        .lock()
+        .ok()
+        .and_then(|own| own.clone())
+        .is_some_and(|(p, t)| p == path && Some(t) == now)
 }
 
 fn log<R: Runtime>(app: &AppHandle<R>, text: String) {
@@ -770,7 +1040,15 @@ async fn send(state: &State<'_, AppState>, m: SimMsg) -> CoreResult<()> {
 
 #[tauri::command]
 pub async fn stop_simulation(state: State<'_, AppState>) -> CoreResult<()> {
-    send(&state, SimMsg::Stop).await
+    // Attend la fin de l'acteur : « Redémarrer » peut relancer aussitôt.
+    let slot = state.sim.lock().await;
+    match slot.as_ref() {
+        Some(handle) if handle.is_alive() => {
+            handle.stop_and_wait().await;
+            Ok(())
+        }
+        _ => Err(CoreError::NotRunning),
+    }
 }
 
 #[tauri::command]
@@ -788,6 +1066,67 @@ pub async fn pause_simulation(state: State<'_, AppState>) -> CoreResult<()> {
 #[tauri::command]
 pub async fn resume_simulation(state: State<'_, AppState>) -> CoreResult<()> {
     send(&state, SimMsg::Resume).await
+}
+
+/// Moniteur série : texte ou octets envoyés à l'UART `id` du firmware.
+#[tauri::command]
+pub async fn uart_send(state: State<'_, AppState>, id: u8, data: Vec<u8>) -> CoreResult<()> {
+    if data.len() > 64 * 1024 {
+        return Err(CoreError::Protocol(
+            "envoi série trop long (64 Kio au plus)".into(),
+        ));
+    }
+    send(&state, SimMsg::UartSend { id, data }).await
+}
+
+/// Sortie de l'app : arrête la simulation et attend la fin du firmware. Sans
+/// cela, sous macOS (pas de Job Object), un firmware mis en pause, donc
+/// suspendu, survivrait à l'app sans pouvoir voir la fermeture du socket.
+pub async fn shutdown(state: &AppState) {
+    if let Some(sim) = state.sim.lock().await.take() {
+        sim.stop_and_wait().await;
+    }
+}
+
+/// Export du moniteur série (section 10.4) : fenêtre « Enregistrer sous »
+/// ouverte dans le dossier du projet, avec `name` proposé ; l'utilisateur
+/// choisit l'emplacement, l'app n'écrit jamais d'elle-même dans le projet.
+/// Renvoie le chemin écrit, ou None si l'utilisateur annule.
+#[tauri::command]
+pub async fn export_serial(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    text: String,
+) -> CoreResult<Option<String>> {
+    let simple = name.ends_with(".txt")
+        && name.len() <= 80
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !name.starts_with('.');
+    if !simple {
+        return Err(CoreError::Open(format!("nom de fichier refusé : {name}")));
+    }
+    if text.len() > 2 * 1024 * 1024 {
+        return Err(CoreError::Open(
+            "export trop volumineux (2 Mo au plus)".into(),
+        ));
+    }
+    let dir = state
+        .session
+        .lock()
+        .await
+        .as_ref()
+        .map(|s| s.dir.clone())
+        .ok_or(CoreError::NotRunning)?;
+    let Some(path) =
+        crate::platform::ask_save_path(&app, "Exporter la sortie série", &dir, &name).await
+    else {
+        return Ok(None);
+    };
+    std::fs::write(&path, text)?;
+    Ok(Some(path.display().to_string()))
 }
 
 /// Action sur un contrôle déclaré dans le manifeste (bouton, curseur…).
@@ -817,6 +1156,22 @@ pub fn resolve_for_tests(
     let r = resolve(root, dir)?;
     let specs = instance_specs(&r);
     Ok((r.project, r.board, specs))
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    /// États initiaux hors simulation : LD2 éteinte, B1 relâché.
+    #[test]
+    fn initial_states_of_blinky() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let dir = root.join("templates").join("blinky-stm32-hal");
+        let r = resolve(&root, &dir).expect("projet");
+        let states = initial_states(instance_specs(&r));
+        assert_eq!(states["LD2"]["brightness"], 0);
+        assert_eq!(states["B1"]["pressed"], false);
+    }
 }
 
 #[cfg(test)]
@@ -877,16 +1232,53 @@ mod reload_tests {
         }
     }
 
+    /// Plafond de sécurité d'une attente (premier build complet sous Windows
+    /// compris). Ce n'est pas une mesure : les tests attendent des événements et
+    /// mesurent le temps du firmware.
+    const CEILING: Duration = Duration::from_secs(300);
+
+    /// Événements reçus : canal, derniers événements (diagnostic), départ,
+    /// dernier niveau de LD2 (PA5), bascules de LD2 en temps du firmware (µs).
     struct Events(
         mpsc::Receiver<(String, Value)>,
         std::cell::RefCell<Vec<String>>,
         Instant,
+        std::cell::Cell<Option<u64>>,
+        std::cell::RefCell<Vec<u64>>,
     );
 
+    /// Événements écoutés par les tests de ce module.
+    const EVENTS: [&str; 6] = [
+        "sim:states",
+        "sim:status",
+        "sim:log",
+        "sim:test-gpio",
+        "build:result",
+        "project:changed",
+    ];
+
+    fn listen_events(app: &tauri::App<tauri::test::MockRuntime>) -> Events {
+        let (tx, rx) = mpsc::channel();
+        for name in EVENTS {
+            let tx = tx.clone();
+            app.handle().listen_any(name, move |e| {
+                let v = serde_json::from_str(e.payload()).unwrap_or(Value::Null);
+                let _ = tx.send((name.to_string(), v));
+            });
+        }
+        Events(
+            rx,
+            Default::default(),
+            Instant::now(),
+            Default::default(),
+            Default::default(),
+        )
+    }
+
     impl Events {
-        /// Attend un événement ; à l'expiration, affiche les derniers reçus.
-        fn wait(&self, timeout: Duration, mut pred: impl FnMut(&str, &Value) -> bool) -> Value {
-            let deadline = Instant::now() + timeout;
+        /// Attend un événement ; au plafond de sécurité, affiche les derniers reçus.
+        fn wait(&self, mut pred: impl FnMut(&str, &Value) -> bool) -> Value {
+            let deadline = Instant::now() + CEILING;
             loop {
                 let left = deadline.saturating_duration_since(Instant::now());
                 let Ok((name, v)) = self.0.recv_timeout(left) else {
@@ -905,27 +1297,50 @@ mod reload_tests {
                     let excess = last.len().saturating_sub(24);
                     last.drain(..excess);
                 }
+                self.track_ld2(&name, &v);
                 if pred(&name, &v) {
                     return v;
                 }
             }
         }
 
-        /// Période moyenne de LD2 sur `n` bascules, en ms.
-        fn ld2_period(&self, n: usize) -> f64 {
-            let mut stamps = Vec::new();
-            let mut last = None;
-            while stamps.len() < n + 1 {
-                let v = self.wait(Duration::from_secs(5), |name, v| {
-                    name == "sim:states" && v["LD2"]["brightness"].is_number()
-                });
-                let level = v["LD2"]["brightness"].as_f64().map(|b| b > 0.5);
-                if level != last {
-                    last = level;
-                    stamps.push(Instant::now());
-                }
+        /// Bascules de LD2 horodatées par le firmware. Nouveau firmware
+        /// (lancement, rechargement) : son horloge repart de zéro.
+        fn track_ld2(&self, name: &str, v: &Value) {
+            if name == "sim:status"
+                && ["starting", "debug-wait", "stopped"]
+                    .contains(&v["state"].as_str().unwrap_or(""))
+            {
+                self.3.set(None);
             }
-            (stamps[n] - stamps[1]).as_secs_f64() * 1000.0 / (n as f64 - 1.0)
+            if name != "sim:test-gpio" || v["pin"] != "PA5" {
+                return;
+            }
+            let level = v["level"].as_u64();
+            let t = v["t_us"].as_u64().unwrap_or(0);
+            let mut toggles = self.4.borrow_mut();
+            if toggles.last().is_some_and(|last| t < *last) {
+                // Horloge revenue en arrière : firmware rechargé.
+                toggles.clear();
+                self.3.set(None);
+            }
+            if self.3.get().is_some() && level != self.3.get() {
+                toggles.push(t);
+            }
+            self.3.set(level);
+        }
+
+        /// Période moyenne de LD2 sur les `n` prochains intervalles, en ms de
+        /// temps du firmware (indépendante de la charge de la machine).
+        fn ld2_period(&self, n: usize) -> f64 {
+            // Une bascule de référence, puis `n` intervalles.
+            let start = self.4.borrow().len();
+            while self.4.borrow().len() < start + n + 1 {
+                self.wait(|name, v| name == "sim:test-gpio" && v["pin"] == "PA5");
+            }
+            let t = self.4.borrow();
+            let first = t.len() - n - 1;
+            (t[first + n] - t[first]) as f64 / 1000.0 / n as f64
         }
     }
 
@@ -950,21 +1365,7 @@ mod reload_tests {
             .manage(AppState::default())
             .build(mock_context(noop_assets()))
             .expect("app simulée");
-        let (tx, rx) = mpsc::channel();
-        for name in [
-            "sim:states",
-            "sim:status",
-            "sim:log",
-            "build:result",
-            "project:changed",
-        ] {
-            let tx = tx.clone();
-            app.handle().listen_any(name, move |e| {
-                let v = serde_json::from_str(e.payload()).unwrap_or(Value::Null);
-                let _ = tx.send((name.to_string(), v));
-            });
-        }
-        let events = Events(rx, std::cell::RefCell::new(Vec::new()), Instant::now());
+        let events = listen_events(&app);
         let handle = app.handle().clone();
         let state = app.state::<AppState>();
         tauri::async_runtime::block_on(async {
@@ -975,28 +1376,28 @@ mod reload_tests {
             *state.session.lock().await = Some(watch);
         });
         // Premier build complet : long sous Windows (MinGW) en CI.
-        events.wait(Duration::from_secs(180), |n, v| {
-            n == "sim:status" && v["state"] == "running"
-        });
+        events.wait(|n, v| n == "sim:status" && v["state"] == "running");
         let slow = events.ld2_period(3);
-        assert!((400.0..700.0).contains(&slow), "période initiale {slow} ms");
+        // Bornes en temps du firmware : basse stricte (un HAL_Delay ne finit
+        // jamais en avance), haute assez large pour une machine chargée, mais
+        // qui sépare encore les périodes des firmwares successifs.
+        assert!(
+            (450.0..1000.0).contains(&slow),
+            "période initiale {slow} ms"
+        );
         std::thread::sleep(Duration::from_millis(400)); // FSEvents : ignore la création du dossier
 
         eprintln!("étape : 1. Sauvegarde");
         // 1. Sauvegarde : nouvelle période, firmware rechargé sans relance de l'app.
         edit(&main_c, "blink_period_ms = 500;", "blink_period_ms = 100;");
-        let result = events.wait(Duration::from_secs(180), |n, _| n == "build:result");
+        let result = events.wait(|n, _| n == "build:result");
         assert_eq!(result["ok"], true, "{result}");
-        events.wait(Duration::from_secs(10), |n, v| {
-            n == "sim:log" && v["text"] == "firmware rechargé après le build"
-        });
-        events.wait(Duration::from_secs(10), |n, v| {
-            n == "sim:status" && v["state"] == "running"
-        });
+        events.wait(|n, v| n == "sim:log" && v["text"] == "firmware rechargé après le build");
+        events.wait(|n, v| n == "sim:status" && v["state"] == "running");
         let fast = events.ld2_period(5);
         println!("période {slow:.0} ms, puis {fast:.0} ms après rechargement");
         assert!(
-            (60.0..200.0).contains(&fast),
+            (90.0..400.0).contains(&fast),
             "période après rechargement {fast} ms"
         );
 
@@ -1014,9 +1415,7 @@ mod reload_tests {
             "HAL_Delay(blink_period_ms)",
         );
         // Un build réussi peut précéder : écritures de l'étape 1 signalées pendant son build.
-        let result = events.wait(Duration::from_secs(180), |n, v| {
-            n == "build:result" && v["ok"] == false
-        });
+        let result = events.wait(|n, v| n == "build:result" && v["ok"] == false);
         let first = &result["diagnostics"][0];
         println!(
             "{} : {}:{} {}",
@@ -1031,7 +1430,7 @@ mod reload_tests {
         );
         let still = events.ld2_period(3);
         assert!(
-            (60.0..200.0).contains(&still),
+            (90.0..400.0).contains(&still),
             "firmware arrêté par l'erreur ({still} ms)"
         );
 
@@ -1040,7 +1439,7 @@ mod reload_tests {
         let view = dir.join("components").join("probe");
         std::fs::create_dir_all(&view).expect("dossier");
         std::fs::write(view.join("view.svelte"), "<p>sonde</p>").expect("écriture");
-        let changed = events.wait(Duration::from_secs(10), |n, _| n == "project:changed");
+        let changed = events.wait(|n, _| n == "project:changed");
         let has = |k: &str| {
             changed[k]
                 .as_array()
@@ -1074,34 +1473,19 @@ mod reload_tests {
             .manage(AppState::default())
             .build(mock_context(noop_assets()))
             .expect("app simulée");
-        let (tx, rx) = mpsc::channel();
-        for name in [
-            "sim:states",
-            "sim:status",
-            "sim:log",
-            "build:result",
-            "project:changed",
-        ] {
-            let tx = tx.clone();
-            app.handle().listen_any(name, move |e| {
-                let v = serde_json::from_str(e.payload()).unwrap_or(Value::Null);
-                let _ = tx.send((name.to_string(), v));
-            });
-        }
-        (
-            app,
-            Events(rx, std::cell::RefCell::new(Vec::new()), Instant::now()),
-            dir,
-        )
+        let events = listen_events(&app);
+        (app, events, dir)
     }
 
     impl Events {
-        /// Événements `name` reçus pendant `during`.
+        /// Événements `name` reçus pendant `during` : sert uniquement à vérifier
+        /// qu'un événement n'arrive pas (aucun build sans sauvegarde…).
         fn count(&self, during: Duration, name: &str) -> Vec<Value> {
             let deadline = Instant::now() + during;
             let mut found = Vec::new();
             while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                 if let Ok((n, v)) = self.0.recv_timeout(left) {
+                    self.track_ld2(&n, &v);
                     if n == name {
                         found.push(v);
                     }
@@ -1135,10 +1519,7 @@ mod reload_tests {
                     .expect("surveillance"),
             );
         });
-        events.wait(Duration::from_secs(180), |n, v| {
-            n == "sim:status" && v["state"] == "running"
-        });
-        let _ = events.count(Duration::from_millis(400), "build:result"); // build du démarrage
+        events.wait(|n, v| n == "sim:status" && v["state"] == "running");
 
         // 10 s sans sauvegarde ; lecture, droits et date d'accès touchés.
         let toucher = std::thread::spawn({
@@ -1163,7 +1544,7 @@ mod reload_tests {
         // Une sauvegarde : exactement un build.
         edit(&main_c, "blink_period_ms = 500;", "blink_period_ms = 200;");
         let saved_at = modified(&main_c);
-        events.wait(Duration::from_secs(180), |n, _| n == "build:result");
+        events.wait(|n, _| n == "build:result");
         let extra = events.count(Duration::from_secs(5), "build:result");
         assert!(
             extra.is_empty(),
@@ -1172,17 +1553,17 @@ mod reload_tests {
         assert_eq!(modified(&main_c), saved_at, "main.c modifié par l'app");
         let period = events.ld2_period(3);
         assert!(
-            (150.0..300.0).contains(&period),
+            (180.0..450.0).contains(&period),
             "période {period} ms après la sauvegarde"
         );
 
         // Sauvegarde juste après la fin d'un build (même seconde possible).
         edit(&main_c, "blink_period_ms = 200;", "blink_period_ms = 100;");
-        events.wait(Duration::from_secs(180), |n, _| n == "build:result");
+        events.wait(|n, _| n == "build:result");
         let saved_at = modified(&main_c);
         edit(&main_c, "blink_period_ms = 100;", "blink_period_ms = 300;");
         let second_save = modified(&main_c);
-        let result = events.wait(Duration::from_secs(180), |n, _| n == "build:result");
+        let result = events.wait(|n, _| n == "build:result");
         assert_eq!(result["ok"], true, "{result}");
         let _ = events.count(Duration::from_secs(2), "build:result");
         assert_ne!(saved_at, std::time::SystemTime::UNIX_EPOCH);
@@ -1190,7 +1571,7 @@ mod reload_tests {
         let period = events.ld2_period(3);
         println!("période après deux sauvegardes rapprochées : {period:.0} ms");
         assert!(
-            (220.0..400.0).contains(&period),
+            (270.0..450.0).contains(&period),
             "dernière sauvegarde non compilée ({period} ms)"
         );
 
@@ -1235,9 +1616,7 @@ mod reload_tests {
                     .expect("surveillance"),
             );
         });
-        events.wait(Duration::from_secs(10), |n, v| {
-            n == "sim:status" && v["state"] == "debug-wait"
-        });
+        events.wait(|n, v| n == "sim:status" && v["state"] == "debug-wait");
         let mut child = std::process::Command::new(&program)
             .env("PREBENCH_SOCKET", &address)
             .env("PREBENCH_BOARD_ID", "1")
@@ -1247,10 +1626,7 @@ mod reload_tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("firmware lancé par le « débogueur »");
-        events.wait(Duration::from_secs(10), |n, v| {
-            n == "sim:status" && v["state"] == "running"
-        });
-        let _ = events.count(Duration::from_millis(400), "build:result");
+        events.wait(|n, v| n == "sim:status" && v["state"] == "running");
 
         let mut restarts = 0;
         let mut relaunch_messages = 0;
@@ -1260,15 +1636,8 @@ mod reload_tests {
                 &format!("blink_period_ms {from}"),
                 &format!("blink_period_ms {to}"),
             );
-            let deadline = Instant::now() + Duration::from_secs(180);
-            loop {
-                let left = deadline.saturating_duration_since(Instant::now());
-                let (n, v) = events.0.recv_timeout(left).expect("build attendu");
-                match n.as_str() {
-                    "build:result" => {
-                        assert_eq!(v["ok"], true, "{v}");
-                        break;
-                    }
+            let result = events.wait(|n, v| {
+                match n {
                     "sim:status" if v["state"] == "starting" => restarts += 1,
                     "sim:log"
                         if v["text"]
@@ -1279,7 +1648,9 @@ mod reload_tests {
                     }
                     _ => {}
                 }
-            }
+                n == "build:result"
+            });
+            assert_eq!(result["ok"], true, "{result}");
         }
         for v in events.count(Duration::from_secs(2), "sim:log") {
             if v["text"]
@@ -1297,15 +1668,13 @@ mod reload_tests {
         // Le firmware du débogueur tourne toujours, à sa période d'origine.
         let period = events.ld2_period(3);
         assert!(
-            (400.0..700.0).contains(&period),
+            (450.0..1000.0).contains(&period),
             "firmware remplacé ({period} ms)"
         );
 
         let _ = child.kill();
         let _ = child.wait();
-        events.wait(Duration::from_secs(5), |n, v| {
-            n == "sim:status" && v["state"] == "debug-wait"
-        });
+        events.wait(|n, v| n == "sim:status" && v["state"] == "debug-wait");
         tauri::async_runtime::block_on(async {
             *state.session.lock().await = None;
             if let Some(sim) = state.sim.lock().await.take() {
@@ -1413,6 +1782,173 @@ mod reload_tests {
             text.contains("Breakpoint 1 at ") && text.contains(&format!("line {line}"))
         };
         assert!(resolved, "point d'arrêt {target} non résolu :\n{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Paillasse éditée pendant la simulation (étape 4) : l'écriture de
+    /// prebench.toml par l'app ne relance ni la relecture du projet, ni un
+    /// build, ni la simulation ; le câblage s'applique aussitôt ; un composant
+    /// ajouté est « actif au prochain démarrage ».
+    #[test]
+    fn bench_edits_apply_live_without_reload() {
+        let (app, events, dir) = setup("bench");
+        let led = |id: &str| ComponentInstance {
+            id: id.into(),
+            kind: "led".into(),
+            name: None,
+            params: std::collections::BTreeMap::new(),
+            pos: [720.0, 192.0],
+        };
+        crate::project::save_bench(&dir, &[led("led1")], &[], &[]).expect("projet initial");
+        let handle = app.handle().clone();
+        let state = app.state::<AppState>();
+        tauri::async_runtime::block_on(async {
+            *state.sim.lock().await = Some(launch(&handle, &dir).await.expect("démarrage"));
+            *state.session.lock().await = Some(
+                session::start(handle.clone(), dir.clone(), on_project_changed)
+                    .expect("surveillance"),
+            );
+        });
+        events.wait(|n, v| n == "sim:status" && v["state"] == "running");
+
+        // D13 (CN5:6) -> anode, GND (CN5:7) -> cathode ; led2 placée en plus.
+        let wires = vec![
+            Wire {
+                from: "board.CN5:6".into(),
+                to: "led1.A".into(),
+                color: None,
+            },
+            Wire {
+                from: "board.CN5:7".into(),
+                to: "led1.K".into(),
+                color: Some("black".into()),
+            },
+        ];
+        let saved = tauri::async_runtime::block_on(save_bench_in(
+            &handle,
+            &state,
+            &dir.display().to_string(),
+            vec![led("led1"), led("led2")],
+            wires,
+            Vec::new(),
+        ))
+        .expect("enregistrement");
+        assert_eq!(saved.pending, ["led2"]);
+
+        // led1 suit LD2 (même broche) : allumée puis éteinte, sans aucune relance.
+        let mut lit = (false, false);
+        let mut unexpected = Vec::new();
+        events.wait(|n, v| {
+            match n {
+                "sim:states" => match v["led1"]["brightness"].as_f64() {
+                    Some(b) if b > 0.5 => lit.0 = true,
+                    Some(_) if lit.0 => lit.1 = true,
+                    _ => {}
+                },
+                "project:changed" | "build:result" => unexpected.push(format!("{n} {v}")),
+                "sim:status" if v["state"] != "running" => unexpected.push(format!("{n} {v}")),
+                _ => {}
+            }
+            lit == (true, true) || !unexpected.is_empty()
+        });
+        assert!(
+            unexpected.is_empty(),
+            "relecture, build ou relance : {unexpected:?}"
+        );
+
+        // Fils retirés : led1 s'éteint et le reste.
+        tauri::async_runtime::block_on(save_bench_in(
+            &handle,
+            &state,
+            &dir.display().to_string(),
+            vec![led("led1"), led("led2")],
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("enregistrement");
+        // Fils retirés appliqués dès que LD2 s'allume sans led1 ; ensuite, led1
+        // reste éteinte pendant deux bascules de LD2.
+        let lit = |v: &Value, id: &str| v[id]["brightness"].as_f64().is_some_and(|b| b > 0.5);
+        events.wait(|n, v| n == "sim:states" && lit(v, "LD2") && !lit(v, "led1"));
+        let start = events.4.borrow().len();
+        let mut states = Vec::new();
+        events.wait(|n, v| {
+            if n == "sim:states" {
+                states.push(v.clone());
+            }
+            events.4.borrow().len() >= start + 2
+        });
+        assert!(
+            states.iter().all(|v| !lit(v, "led1")),
+            "led1 allumée sans fil : {states:?}"
+        );
+        let text = std::fs::read_to_string(dir.join("prebench.toml")).expect("lecture");
+        assert!(
+            text.contains("led2") && !text.contains("[[wires]]"),
+            "{text}"
+        );
+
+        tauri::async_runtime::block_on(async {
+            *state.session.lock().await = None;
+            if let Some(sim) = state.sim.lock().await.take() {
+                sim.stop_and_wait().await;
+            }
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Chemin réel du câblage édité (bug du test manuel) : save_bench écrit
+    /// prebench.toml, recalcule les validations et les renvoie ; elles sont
+    /// aussi celles du projet rouvert. Le nom affiché figure dans le texte.
+    #[test]
+    fn saved_wiring_returns_checks() {
+        let (app, _events, dir) = setup("checks");
+        let handle = app.handle().clone();
+        let state = app.state::<AppState>();
+        let led = ComponentInstance {
+            id: "led1".into(),
+            kind: "led".into(),
+            name: Some("LED rouge".into()),
+            params: std::collections::BTreeMap::new(),
+            pos: [720.0, 192.0],
+        };
+        let wires = vec![
+            Wire {
+                from: "board.CN6:5".into(),
+                to: "led1.A".into(),
+                color: None,
+            },
+            Wire {
+                from: "board.CN6:4".into(),
+                to: "led1.K".into(),
+                color: None,
+            },
+        ];
+        let saved = tauri::async_runtime::block_on(save_bench_in(
+            &handle,
+            &state,
+            &dir.display().to_string(),
+            vec![led],
+            wires,
+            Vec::new(),
+        ))
+        .expect("enregistrement");
+        let text = std::fs::read_to_string(dir.join("prebench.toml")).expect("lecture");
+        assert!(
+            text.contains("board.CN6:5") && text.contains("LED rouge"),
+            "{text}"
+        );
+        let short = |checks: &[crate::core::checks::Check]| {
+            checks.iter().any(|c| {
+                c.severity == crate::core::checks::Severity::Conflict
+                    && c.text.contains("Court-circuit possible : LED rouge (led1)")
+                    && c.text.contains("ne calcule pas les courants")
+            })
+        };
+        assert!(short(&saved.checks), "{:#?}", saved.checks);
+        let view =
+            project_view(&repo_root(), &dir, dir.display().to_string()).expect("réouverture");
+        assert!(short(&view.checks), "{:#?}", view.checks);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

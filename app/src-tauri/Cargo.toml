@@ -1,6 +1,6 @@
 [package]
 name = "prebench"
-version = "0.1.2"
+version = "0.1.3"
 description = "Prebench — simulateur de cartes de développement"
 authors = ["Mathis Rudkiewicz"]
 license = "MIT"
@@ -25,6 +25,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# Écriture de prebench.toml sans perdre commentaires ni mise en forme (paillasse
+# éditée dans l'app) ; déjà présente dans l'arbre de dépendances de toml.
+toml_edit = "0.22"
 # Erreurs typées (section 16.3)
 thiserror = "2"
 rquickjs = { version = "0.14.0", features = ["loader"] }
@@ -37,6 +40,10 @@ dunce = "1.0.5"
 # ReadDirectoryChangesW (Windows), inotify (Linux). Purement événementielle
 # (règle 16.2.9) ; l'anti-rebond est fait au minuteur tokio (session.rs).
 notify = "8.2"
+# Fenêtre native « Enregistrer sous » (export série, section 10.4), ouverte
+# par le cœur seulement : NSSavePanel et IFileSaveDialog sans code Objective-C
+# ni COM à maintenir. Plugin officiel de Tauri.
+tauri-plugin-dialog = "2.8.4"
 
 # Garde-fous du firmware sous macOS et Linux (platform/macos.rs, section 11.2) :
 # setrlimit, proc_pid_rusage, SIGSTOP / SIGCONT ; déjà présente dans l'arbre de Tauri.

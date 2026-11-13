@@ -1,6 +1,7 @@
 /*
  * libvmcu/shims/stm32-hal/src/stm32_hal_periph.c — Instances des périphériques et
- * modules DMA, UART, ADC, I2C, SPI non simulés en phase 1 (règle 16.2.10).
+ * modules DMA, ADC, I2C, SPI pas encore simulés (règle 16.2.10). L'UART est
+ * simulée dans stm32_hal_uart.c.
  *
  * Comportement commun :
  * - *_Init : appelle le MspInit du module si le handle est neuf (comme le HAL de
@@ -73,84 +74,6 @@ HAL_StatusTypeDef HAL_DMA_RegisterCallback(DMA_HandleTypeDef *hdma, HAL_DMA_Call
 HAL_StatusTypeDef HAL_DMA_UnRegisterCallback(DMA_HandleTypeDef *hdma, HAL_DMA_CallbackIDTypeDef CallbackID) { return HAL_OK; }
 HAL_DMA_StateTypeDef HAL_DMA_GetState(DMA_HandleTypeDef *hdma) { return hdma->State; }
 uint32_t HAL_DMA_GetError(DMA_HandleTypeDef *hdma) { return hdma->ErrorCode; }
-
-/* --- UART (simulation en phase 2) ------------------------------------------------------- */
-
-static HAL_StatusTypeDef uart_init(UART_HandleTypeDef *huart, const char *name)
-{
-    if (huart == NULL) {
-        return HAL_ERROR;
-    }
-    vmcu_warn_unsimulated(name);
-    if (huart->gState == HAL_UART_STATE_RESET) {
-        huart->Lock = HAL_UNLOCKED;
-        HAL_UART_MspInit(huart);
-    }
-    huart->ErrorCode = HAL_UART_ERROR_NONE;
-    huart->gState = HAL_UART_STATE_READY;
-    huart->RxState = HAL_UART_STATE_READY;
-    return HAL_OK;
-}
-
-HAL_StatusTypeDef HAL_UART_Init(UART_HandleTypeDef *huart) { return uart_init(huart, "HAL_UART_Init"); }
-HAL_StatusTypeDef HAL_HalfDuplex_Init(UART_HandleTypeDef *huart) { return uart_init(huart, "HAL_HalfDuplex_Init"); }
-HAL_StatusTypeDef HAL_LIN_Init(UART_HandleTypeDef *huart, uint32_t BreakDetectLength) { return uart_init(huart, "HAL_LIN_Init"); }
-HAL_StatusTypeDef HAL_MultiProcessor_Init(UART_HandleTypeDef *huart, uint8_t Address, uint32_t WakeUpMethod) { return uart_init(huart, "HAL_MultiProcessor_Init"); }
-
-HAL_StatusTypeDef HAL_UART_DeInit(UART_HandleTypeDef *huart)
-{
-    if (huart == NULL) {
-        return HAL_ERROR;
-    }
-    HAL_UART_MspDeInit(huart);
-    huart->gState = HAL_UART_STATE_RESET;
-    huart->RxState = HAL_UART_STATE_RESET;
-    return HAL_OK;
-}
-
-FlagStatus prebench_uart_get_flag(const UART_HandleTypeDef *huart, uint32_t flag)
-{
-    return ((flag & (UART_FLAG_TXE | UART_FLAG_TC)) != 0U) ? SET : RESET;
-}
-
-HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart, const uint8_t *pData, uint16_t Size, uint32_t Timeout) { STUB_OK(); }
-HAL_StatusTypeDef HAL_UART_Receive(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size, uint32_t Timeout)
-{
-    PREBENCH_UNSIMULATED();
-    prebench_stub_wait(Timeout);
-    return HAL_TIMEOUT;
-}
-HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *huart, const uint8_t *pData, uint16_t Size) { STUB_OK(); }
-HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size) { STUB_OK(); }
-HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef *huart, const uint8_t *pData, uint16_t Size) { STUB_OK(); }
-HAL_StatusTypeDef HAL_UART_Receive_DMA(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size) { STUB_OK(); }
-HAL_StatusTypeDef HAL_UART_DMAPause(UART_HandleTypeDef *huart) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_DMAResume(UART_HandleTypeDef *huart) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_DMAStop(UART_HandleTypeDef *huart) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size, uint16_t *RxLen, uint32_t Timeout)
-{
-    PREBENCH_UNSIMULATED();
-    if (RxLen != NULL) {
-        *RxLen = 0;
-    }
-    prebench_stub_wait(Timeout);
-    return HAL_TIMEOUT;
-}
-HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size) { STUB_OK(); }
-HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle_DMA(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size) { STUB_OK(); }
-HAL_UART_RxEventTypeTypeDef HAL_UARTEx_GetRxEventType(UART_HandleTypeDef *huart) { return HAL_UART_RXEVENT_TC; }
-HAL_StatusTypeDef HAL_UART_Abort(UART_HandleTypeDef *huart) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef *huart) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *huart) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_Abort_IT(UART_HandleTypeDef *huart) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_AbortTransmit_IT(UART_HandleTypeDef *huart) { return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_AbortReceive_IT(UART_HandleTypeDef *huart) { return HAL_OK; }
-void HAL_UART_IRQHandler(UART_HandleTypeDef *huart) {}
-HAL_UART_StateTypeDef HAL_UART_GetState(const UART_HandleTypeDef *huart)
-{
-    return (HAL_UART_StateTypeDef)(huart->gState | huart->RxState);
-}
-uint32_t HAL_UART_GetError(const UART_HandleTypeDef *huart) { return huart->ErrorCode; }
 
 /* --- ADC (simulation en phase 2) ------------------------------------------------------- */
 

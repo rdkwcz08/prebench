@@ -19,6 +19,8 @@ reset         = "B2"
 "3V3" = 3.3
 "5V"  = 5.0
 GND   = 0.0
+IOREF = 3.3   # CN6 : référence des niveaux logiques (3,3 V)
+AVDD  = 3.3   # CN5 : alimentation analogique (VDDA)
 
 # --- Composants intégrés ------------------------------------------------------
 
@@ -106,6 +108,14 @@ caps  = ["gpio", "exti", "adc1:CH4"]
 label = "A3"
 caps  = ["gpio", "exti", "adc1:CH8"]
 
+[pins.PC1]
+label = "A4"
+caps  = ["gpio", "exti", "adc1:CH11"]
+
+[pins.PC0]
+label = "A5"
+caps  = ["gpio", "exti", "adc1:CH10"]
+
 # --- Sorties PWM -------------------------------------------------------------------
 
 [pins.PA8]
@@ -145,3 +155,44 @@ caps  = ["gpio", "exti"]
 [pins.PA9]
 label = "D8"
 caps  = ["gpio", "exti"]
+
+# --- Disposition sur la paillasse (maquette de l'écran principal) -------------
+# Connecteurs Arduino (UM1724, section 6.11) ; Morpho CN7/CN10 : plus tard.
+# Pastilles numérotées comme sur la carte : « board.CN5:6 » = D13 (PA5).
+# D0/D1 (CN9:1-2) ne sont pas reliés à PA3/PA2 avec les ponts de soudure
+# d'usine (SB62/SB63 ouverts) : PA2/PA3 vont au port série du ST-LINK.
+
+[layout]
+size        = [280, 418]
+holes       = [[16, 16], [264, 16], [16, 402], [250, 402]]
+chip        = { pos = [100, 186], size = [80, 80] }
+onboard     = { LD2 = [196, 84], B1 = [48, 92] }
+unconnected = ["NC", "RESET", "VIN", "D0", "D1"]
+
+[[layout.headers]]
+id         = "CN6"
+pos        = [10, 126]
+dir        = "down"
+label_side = "right"
+pins       = ["NC", "IOREF", "RESET", "3V3", "5V", "GND", "GND", "VIN"]
+
+[[layout.headers]]
+id         = "CN8"
+pos        = [10, 266]
+dir        = "down"
+label_side = "right"
+pins       = ["PA0", "PA1", "PA4", "PB0", "PC1", "PC0"]
+
+[[layout.headers]]
+id         = "CN5"
+pos        = [270, 240]
+dir        = "up"
+label_side = "left"
+pins       = ["PA9", "PC7", "PB6", "PA7", "PA6", "PA5", "GND", "AVDD", "PB9", "PB8"]
+
+[[layout.headers]]
+id         = "CN9"
+pos        = [270, 382]
+dir        = "up"
+label_side = "left"
+pins       = ["D0", "D1", "PA10", "PB3", "PB5", "PB4", "PB10", "PA8"]

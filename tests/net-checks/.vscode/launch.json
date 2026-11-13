@@ -1,0 +1,17 @@
+{
+  "configurations": [
+    {
+      "cwd": "/Users/mathisrudkiewicz/Documents/prebench-dev/tests/net-checks",
+      "env": {
+        "PREBENCH_BOARD_ID": "1",
+        "PREBENCH_DEBUG": "1",
+        "PREBENCH_SOCKET": "/tmp/prebench-debug-7881e1c1.sock"
+      },
+      "name": "Prebench : déboguer le firmware",
+      "program": "/Users/mathisrudkiewicz/Library/Caches/dev.prebench.app/builds/net-checks-6e3ea1757881e1c1/debug/firmware",
+      "request": "launch",
+      "type": "lldb"
+    }
+  ],
+  "version": "0.2.0"
+}

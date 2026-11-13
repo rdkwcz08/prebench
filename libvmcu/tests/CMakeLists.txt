@@ -20,7 +20,7 @@ foreach(_test test_wire test_client)
   add_test(NAME ${_test} COMMAND ${_test})
 endforeach()
 
-foreach(_test test_stm32_hal test_stm32_hal_stubs)
+foreach(_test test_stm32_hal test_stm32_hal_stubs test_uart)
   add_executable(${_test} ${_test}.c)
   target_link_libraries(${_test} PRIVATE vmcu_fake_app prebench_stm32_hal vmcu)
   target_compile_options(${_test} PRIVATE ${VMCU_WARNING_FLAGS})

@@ -11,6 +11,7 @@
 
 import { test as base, expect, type Page } from '@playwright/test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { parse as parseToml } from 'smol-toml';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -48,6 +49,32 @@ function component(id: string): { info: Json; defaults: Record<string, Json> } {
 
 export const PROJECT_PATH = '/Users/demo/Documents/Prebench/blinky-stm32-hal';
 
+/** Carte de référence lue dans boards/ : disposition, broches, alimentations. */
+function board(): { layout: Json; pins: Json; power: Json } {
+  const b = parseToml(readFileSync(`${repoRoot}boards/nucleo-f401re.toml`, 'utf8')) as Record<string, any>;
+  const l = b.layout;
+  const layout = {
+    size: l.size,
+    holes: l.holes ?? [],
+    chip: l.chip ?? null,
+    onboard: l.onboard ?? {},
+    unconnected: l.unconnected ?? [],
+    headers: (l.headers as Record<string, any>[]).map((h) => ({
+      id: h.id,
+      pos: h.pos,
+      dir: h.dir,
+      pitch: h.pitch ?? 16,
+      label_side: h.label_side ?? 'right',
+      pins: h.pins,
+    })),
+  };
+  const pins: Record<string, Json> = {};
+  for (const [name, p] of Object.entries(b.pins as Record<string, any>)) {
+    pins[name] = { label: p.label ?? null, caps: p.caps, external_pull: p.external_pull ?? null };
+  }
+  return { layout: layout as Json, pins, power: b.power as Json };
+}
+
 /**
  * Projet de démonstration : LD2 et B1 intégrés à la carte (comme
  * boards/nucleo-f401re.toml), puis une instance de chaque autre composant fourni.
@@ -76,6 +103,10 @@ export function demoProject(): Json {
     instances,
     components,
     warnings: [],
+    wires: [],
+    notes: [],
+    checks: [],
+    ...board(),
   };
 }
 
@@ -100,6 +131,10 @@ function responses(): Record<string, Json> {
     resume_simulation: null,
     component_control: null,
     open_in_editor: null,
+    uart_send: null,
+    export_serial: '/Users/demo/Documents/Prebench/blinky-stm32-hal/serie.txt',
+    preview_states: { LD2: { brightness: 0 }, B1: { pressed: false }, echo: { pings: 0 }, led1: { brightness: 0 } },
+    save_bench: { pending: [], checks: [] },
     start_debug: {
       config_name: 'Prebench : déboguer le firmware',
       launch_json: `${PROJECT_PATH}/.vscode/launch.json`,
@@ -145,11 +180,25 @@ function installTauriMock(json: string): void {
         return Promise.resolve(a.handler);
       }
       if (cmd === 'plugin:event|unlisten') return Promise.resolve(null);
+      // Réglages de l'app : conservés d'un chargement de page à l'autre, comme settings.toml.
+      if (cmd === 'get_settings' || cmd === 'set_setting') {
+        const stored = JSON.parse(sessionStorage.getItem('__pbSettings') ?? '{}') as Record<string, unknown>;
+        if (cmd === 'set_setting') {
+          const a = args as { key: string; value: unknown };
+          stored[a.key] = a.value;
+          sessionStorage.setItem('__pbSettings', JSON.stringify(stored));
+          return Promise.resolve(null);
+        }
+        return Promise.resolve({ declared: [], values: { theme: 'system', frame_rate_battery: 30, ...stored } });
+      }
       if (cmd in data) return Promise.resolve(structuredClone(data[cmd]));
       return Promise.reject(new Error(`commande non imitée : ${cmd}`));
     },
   };
   w.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(): void {} };
+  w.__pbSetResponse = (cmd: string, json: string): void => {
+    data[cmd] = JSON.parse(json);
+  };
   w.__pbEmit = (event: string, payload: unknown): void => {
     for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload });
   };
@@ -168,6 +217,8 @@ export interface Bench {
   emit(event: string, payload: unknown): Promise<void>;
   /** Commandes appelées par l'interface (hors événements). */
   calls(cmd: string): Promise<unknown[]>;
+  /** Change la réponse d'une commande du cœur imité. */
+  respond(cmd: string, value: unknown): Promise<void>;
   /** Figure d'un composant de la paillasse, par identifiant d'instance. */
   figure(id: string): ReturnType<Page['locator']>;
 }
@@ -214,6 +265,12 @@ export const test = base.extend<{ bench: Bench; errors: string[] }>({
               .filter((x) => x.cmd === c)
               .map((x) => x.args),
           cmd,
+        ),
+      respond: (cmd, value) =>
+        page.evaluate(
+          ([c, json]) =>
+            (window as unknown as { __pbSetResponse: (c: string, j: string) => void }).__pbSetResponse(c, json),
+          [cmd, JSON.stringify(value)] as [string, string],
         ),
       figure: (id) => page.locator('figure.component').filter({ has: page.getByText(id, { exact: true }) }),
     });

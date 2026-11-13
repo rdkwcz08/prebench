@@ -1,0 +1,10 @@
+#:schema ../../docs/prebench.schema.json
+# Validations du réseau logique (section 9.2) : entrée lue flottante (A0) et
+# conflit sur PC13 (sortie haute du firmware, B1 appuyé tire vers la masse).
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
