@@ -50,7 +50,7 @@ function component(id: string): { info: Json; defaults: Record<string, Json> } {
 export const PROJECT_PATH = '/Users/demo/Documents/Prebench/blinky-stm32-hal';
 
 /** Carte de référence lue dans boards/ : disposition, broches, alimentations. */
-function board(): { layout: Json; pins: Json; power: Json } {
+function board(): { layout: Json; pins: Json; power: Json; onboard_wires: Json } {
   const b = parseToml(readFileSync(`${repoRoot}boards/nucleo-f401re.toml`, 'utf8')) as Record<string, any>;
   const l = b.layout;
   const layout = {
@@ -72,7 +72,9 @@ function board(): { layout: Json; pins: Json; power: Json } {
   for (const [name, p] of Object.entries(b.pins as Record<string, any>)) {
     pins[name] = { label: p.label ?? null, caps: p.caps, external_pull: p.external_pull ?? null };
   }
-  return { layout: layout as Json, pins, power: b.power as Json };
+  const onboardWires: Record<string, Json> = {};
+  for (const [id, o] of Object.entries((b.onboard ?? {}) as Record<string, any>)) onboardWires[id] = o.wires;
+  return { layout: layout as Json, pins, power: b.power as Json, onboard_wires: onboardWires };
 }
 
 /**
@@ -127,6 +129,7 @@ function responses(): Record<string, Json> {
     start_simulation: null,
     stop_simulation: null,
     reset_simulation: null,
+    set_power: null,
     pause_simulation: null,
     resume_simulation: null,
     component_control: null,

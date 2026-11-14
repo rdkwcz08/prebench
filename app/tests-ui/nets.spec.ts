@@ -37,7 +37,7 @@ test('validations du câblage : onglet Avertissements, pastille rouge, « Affich
     ],
   });
   await page.getByRole('button', { name: 'Ajouter un composant' }).click();
-  await page.getByRole('menuitem', { name: /LED/ }).click();
+  await page.getByRole('menuitem', { name: /^LED\s+led$/ }).click();
 
   const tab = page.getByRole('tab', { name: /Avertissements/ });
   await expect(tab.locator('.badge.conflict')).toHaveText('2');

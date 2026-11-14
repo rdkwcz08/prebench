@@ -1,11 +1,11 @@
 /*
  * libvmcu/core/vmcu_unsupported.c — Familles de l'API v1 pas encore simulées.
  *
- * Phase 1 : GPIO, temps, interruptions et ping seulement. Les fonctions
+ * GPIO, temps, UART, PWM et ADC sont simulés (phases 1 et 2). Les fonctions
  * ci-dessous existent pour que tout firmware se lie (règle 16.2.10) ; elles
- * avertissent une fois et renvoient VMCU_ERR_UNSUPPORTED.
- * PWM et ADC arrivent en phase 2, UART en phase 2, I2C, SPI et flux en phase 3
- * (cahier des charges, section 14) : chaque fonction quittera ce fichier.
+ * avertissent une fois et renvoient VMCU_ERR_UNSUPPORTED. I2C, SPI et flux
+ * arrivent en phase 3 (cahier des charges, section 14) : chaque fonction
+ * quittera ce fichier.
  */
 #include "vmcu_internal.h"
 
@@ -13,41 +13,6 @@ static vmcu_status_t unsupported(const char *name)
 {
     vmcu_warn_unsimulated(name);
     return VMCU_ERR_UNSUPPORTED;
-}
-
-/* --- PWM (phase 2) --- */
-
-vmcu_status_t vmcu_pwm_config(uint8_t unit, uint8_t channel, uint32_t freq_hz)
-{
-    (void)unit; (void)channel; (void)freq_hz;
-    return unsupported("vmcu_pwm_config");
-}
-
-vmcu_status_t vmcu_pwm_set_duty(uint8_t unit, uint8_t channel, uint16_t duty)
-{
-    (void)unit; (void)channel; (void)duty;
-    return unsupported("vmcu_pwm_set_duty");
-}
-
-vmcu_status_t vmcu_pwm_attach(uint8_t unit, uint8_t channel, uint8_t port, uint8_t pin)
-{
-    (void)unit; (void)channel; (void)port; (void)pin;
-    return unsupported("vmcu_pwm_attach");
-}
-
-/* --- ADC (phase 2) --- */
-
-vmcu_status_t vmcu_adc_config(uint8_t unit, uint8_t channel)
-{
-    (void)unit; (void)channel;
-    return unsupported("vmcu_adc_config");
-}
-
-uint16_t vmcu_adc_read(uint8_t unit, uint8_t channel)
-{
-    (void)unit; (void)channel;
-    (void)unsupported("vmcu_adc_read");
-    return 0;
 }
 
 /* --- I2C (phase 3) --- */

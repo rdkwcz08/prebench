@@ -19,7 +19,7 @@ async function last(bench: Bench): Promise<Saved> {
 
 async function addLed(bench: Bench): Promise<void> {
   await bench.page.getByRole('button', { name: 'Ajouter un composant' }).click();
-  await bench.page.getByRole('menuitem', { name: /LED/ }).click();
+  await bench.page.getByRole('menuitem', { name: /^LED\s+led$/ }).click();
   await expect.poll(async () => (await bench.calls('save_bench')).length).toBeGreaterThan(0);
 }
 
@@ -56,6 +56,9 @@ test('notes : ajout, saisie, déplacement aimanté, annuler, suppression, clic d
   await expect.poll(async () => (await last(bench)).notes.map((n) => n.text)).toEqual(['Bloc alimentation']);
   const pos0 = (await last(bench)).notes[0]!.pos;
 
+  // Zoom à 100 % : un glissé de 50 px vaut 50 unités du tapis.
+  await page.locator('main').click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press('ControlOrMeta+1');
   const [x, y] = await centerOf(page, '[data-note="0"]');
   await page.mouse.move(x, y);
   await page.mouse.down();

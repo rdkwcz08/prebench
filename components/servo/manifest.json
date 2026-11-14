@@ -1,0 +1,19 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "servo",
+  "version": "1.0.0",
+  "name": "Servomoteur",
+  "description": "Servomoteur de modélisme (type SG90). L'angle suit la largeur d'impulsion du signal PWM : 1 ms pour 0°, 2 ms pour 180°, à 50 Hz. Avertit si la fréquence ou la largeur sort de la plage.",
+  "category": "actuator",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 80, "height": 88 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "GND", "label": "GND (fil marron)", "role": "ground", "x": 28, "y": 88 },
+    { "name": "VCC", "label": "VCC (fil rouge)", "role": "power", "x": 40, "y": 88 },
+    { "name": "SIG", "label": "Signal (fil orange)", "role": "input", "x": 52, "y": 88 }
+  ],
+  "controls": []
+}

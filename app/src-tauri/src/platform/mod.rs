@@ -17,6 +17,13 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+/// Horloge monotone en ns depuis le premier appel (repli de thread_cpu_ns).
+pub fn monotonic_ns() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// Outils pour déboguer le firmware dans VS Code (section 10.2).
 pub struct DebugRequirements {
     /// Identifiant de l'extension (`code --install-extension <id>`).
@@ -146,5 +153,29 @@ mod tests {
             process_usage(u32::MAX - 7).is_none(),
             "pid inexistant mesuré"
         );
+    }
+}
+
+#[cfg(test)]
+mod cpu_tests {
+    use super::*;
+
+    /// Temps CPU du fil : un sommeil ne compte presque pas, un calcul compte.
+    #[test]
+    fn thread_cpu_time_ignores_sleep() {
+        let t0 = thread_cpu_ns();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let slept = thread_cpu_ns().saturating_sub(t0);
+        assert!(slept < 5_000_000, "sommeil compté : {slept} ns");
+
+        let t1 = thread_cpu_ns();
+        let start = std::time::Instant::now();
+        let mut x = 0u64;
+        while start.elapsed() < std::time::Duration::from_millis(30) {
+            x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
+        }
+        let busy = thread_cpu_ns().saturating_sub(t1);
+        // Sur une machine chargée, le fil peut attendre : au moins un tiers compté.
+        assert!(busy >= 10_000_000, "calcul non compté : {busy} ns ({x})");
     }
 }

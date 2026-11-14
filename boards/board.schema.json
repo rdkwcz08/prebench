@@ -19,6 +19,11 @@
     },
     "logic_voltage": { "description": "Tension logique en volts.", "type": "number", "exclusiveMinimum": 0 },
     "adc_bits": { "type": "integer", "minimum": 8, "maximum": 16 },
+    "adc_vref": {
+      "description": "Tension de référence de l'ADC en volts (pleine échelle). Absente : logic_voltage. Ajout compatible du format v1 (étape 8).",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
     "ram_kb": { "description": "RAM de la vraie cible (jauge mémoire).", "type": "integer", "minimum": 1 },
     "flash_kb": { "description": "Flash de la vraie cible (jauge mémoire).", "type": "integer", "minimum": 1 },
     "image": { "description": "Image SVG de la carte, chemin relatif à boards/.", "type": "string", "pattern": "\\.svg$" },

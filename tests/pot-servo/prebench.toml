@@ -1,0 +1,72 @@
+#:schema ../../docs/prebench.schema.json
+# Un potentiomètre commande un servomoteur, configuré comme dans STM32CubeMX :
+# - pot1 en pont diviseur entre 3V3 et GND, curseur sur A0 (PA0, ADC1_IN0) ;
+# - servo1 alimenté en 5V, signal sur D5 (PB4, TIM3_CH1 en AF2, 50 Hz).
+# Tournez le bouton : l'angle suit (1 à 2 ms d'impulsion pour 0 à 180°).
+# USART2 envoie « pot:<valeur brute>,angle:<degrés> » au traceur.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id = "pot1"
+type = "potentiometer"
+pos = [-120, 216]
+params = { resistance_kohm = 10 }
+
+[[components]]
+id = "servo1"
+type = "servo"
+pos = [392, 288]
+
+[[components]]
+id = "led_rgb1"
+type = "led-rgb"
+pos = [408, 96]
+params = { common = "cathode" }
+
+[[components]]
+id = "buzzer1"
+type = "buzzer"
+pos = [480, 192]
+params = { kind = "passive", tone_hz = 2300 }
+
+[[wires]]
+from = "pot1.VCC"
+to = "board.CN6:4"
+
+[[wires]]
+from = "pot1.GND"
+to = "board.CN6:6"
+
+[[wires]]
+from = "pot1.W"
+to = "board.CN8:1"
+
+[[wires]]
+from = "servo1.VCC"
+to = "board.CN6:5"
+
+[[wires]]
+from = "servo1.GND"
+to = "board.CN5:7"
+
+[[wires]]
+from = "servo1.SIG"
+to = "board.CN9:6"
+
+[[wires]]
+from = "buzzer1.-"
+to = "board.CN5:7"
+
+[[wires]]
+from = "buzzer1.+"
+to = "board.CN5:7"
+
+[[wires]]
+from = "buzzer1.-"
+to = "board.CN5:2"

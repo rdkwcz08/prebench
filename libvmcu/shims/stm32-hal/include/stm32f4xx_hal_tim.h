@@ -1,11 +1,11 @@
 /*
  * libvmcu/shims/stm32-hal/include/stm32f4xx_hal_tim.h — Module TIM du shim.
  *
- * Phase 1 : non simulé. Les fonctions *_Init appellent leur MspInit comme le
- * vrai HAL ; aucun compteur ne tourne et aucun callback n'est appelé. La PWM
- * (rapport cyclique via __HAL_TIM_SET_COMPARE) est simulée en phase 2.
- * Les macros __HAL_TIM_* passent par des fonctions du shim pour que la phase 2
- * puisse les simuler sans changer les sources.
+ * PWM simulée (phase 2, src/stm32_hal_tim.c) : fréquence et rapport cyclique,
+ * jamais les fronts. Les fonctions *_Init appellent leur MspInit comme le vrai
+ * HAL ; aucun compteur ne tourne et aucun callback de timer n'est appelé. Les
+ * macros __HAL_TIM_* passent par des fonctions du shim, qui mettent à jour un
+ * canal PWM en marche.
  */
 #ifndef PREBENCH_STM32F4XX_HAL_TIM_H
 #define PREBENCH_STM32F4XX_HAL_TIM_H

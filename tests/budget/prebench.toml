@@ -1,0 +1,98 @@
+#:schema ../../docs/prebench.schema.json
+# Mesure des budgets (cahier des charges, section 11.1) : « 1 Nucleo + 5
+# composants simples », tous actifs. L'OLED du budget arrive en phase 3.
+# - LD2 : fondu PWM (TIM2_CH1, PA5) ;
+# - pot1 sur A0 commande servo1 sur D5 (TIM3_CH1, 50 Hz) ;
+# - rgb1 (cathode commune) : rouge sur D9 (TIM3_CH2), vert sur D7 (TIM1_CH1),
+#   bleu sur D4 (GPIO) ;
+# - buzzer1 sur D6 (TIM2_CH3) : 440 Hz une demi-seconde sur deux ;
+# - btn1 sur D2 (pull-up du firmware) : appui = bleu allumé ;
+# - USART2 : une ligne de traceur toutes les 100 ms.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id   = "pot1"
+type = "potentiometer"
+pos  = [-120, 216]
+
+[[components]]
+id   = "servo1"
+type = "servo"
+pos  = [432, 300]
+
+[[components]]
+id   = "rgb1"
+type = "led-rgb"
+pos  = [432, 72]
+
+[[components]]
+id   = "buzzer1"
+type = "buzzer"
+pos  = [528, 192]
+
+[[components]]
+id   = "btn1"
+type = "button"
+pos  = [432, 432]
+
+[[wires]]
+from = "pot1.VCC"
+to   = "board.CN6:4"
+
+[[wires]]
+from = "pot1.GND"
+to   = "board.CN6:6"
+
+[[wires]]
+from = "pot1.W"
+to   = "board.CN8:1"
+
+[[wires]]
+from = "servo1.VCC"
+to   = "board.CN6:5"
+
+[[wires]]
+from = "servo1.GND"
+to   = "board.CN6:7"
+
+[[wires]]
+from = "servo1.SIG"
+to   = "board.CN9:6"
+
+[[wires]]
+from = "rgb1.R"
+to   = "board.CN5:2"
+
+[[wires]]
+from = "rgb1.G"
+to   = "board.CN9:8"
+
+[[wires]]
+from = "rgb1.B"
+to   = "board.CN9:5"
+
+[[wires]]
+from = "rgb1.COM"
+to   = "board.CN5:7"
+
+[[wires]]
+from = "buzzer1.+"
+to   = "board.CN9:7"
+
+[[wires]]
+from = "buzzer1.-"
+to   = "board.CN5:7"
+
+[[wires]]
+from = "btn1.1"
+to   = "board.CN9:3"
+
+[[wires]]
+from = "btn1.2"
+to   = "board.CN5:7"

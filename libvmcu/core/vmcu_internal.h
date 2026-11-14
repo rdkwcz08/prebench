@@ -16,7 +16,7 @@
 #ifndef VMCU_DEFAULT_FRAMEWORK
 #define VMCU_DEFAULT_FRAMEWORK "stm32-hal"
 #endif
-#define VMCU_LIBVMCU_VERSION "0.1.3"
+#define VMCU_LIBVMCU_VERSION "0.2.0"
 
 /* Garde-fous (section 5.5). */
 #define VMCU_GUARD_CALLS       10000u   /* appels sans sommeil avant micro-pause */
@@ -42,6 +42,24 @@ vmcu_status_t vmcu__send(uint16_t type, const uint8_t *payload, size_t len);
 vmcu_status_t vmcu__request(uint16_t type, const uint8_t *payload, size_t len,
                             uint8_t *reply, size_t reply_cap, size_t *reply_len,
                             uint16_t *reply_type, uint32_t timeout_ms);
+
+/**
+ * Trame remplaçable (PWM_DUTY) : tant qu'elle attend dans le lot, un nouvel
+ * envoi de même clé réécrit sa charge utile au lieu d'ajouter une trame. Le
+ * canal porte ainsi au plus une valeur par clé et par lot (1 ms), quelle que
+ * soit la cadence des appels du firmware. Zéro-initialisée : aucune trame.
+ */
+typedef struct {
+    uint64_t batch;  /* lot de la trame + 1 ; 0 : aucune trame en attente */
+    size_t   offset; /* charge utile dans le tampon d'émission */
+    size_t   len;
+} vmcu__latest_t;
+
+vmcu_status_t vmcu__send_latest(uint16_t type, const uint8_t *payload, size_t len,
+                                vmcu__latest_t *latest);
+
+/** Oublie la trame remplaçable : la suivante sera ajoutée après les trames déjà en attente. */
+void vmcu__forget_latest(vmcu__latest_t *latest);
 
 /** Vide le lot courant (avant un sommeil). */
 void vmcu__flush(void);
@@ -86,6 +104,15 @@ void     vmcu__guard_reset(void);
 void vmcu__gpio_init(void);
 void vmcu__gpio_on_input(uint8_t port, uint8_t pin, uint8_t level);
 void vmcu__gpio_dispatch(const vmcu__irq_event_t *ev);
+
+/* --- PWM (vmcu_pwm.c) ----------------------------------------------------------- */
+
+void vmcu__pwm_init(void);
+
+/* --- ADC (vmcu_adc.c) ----------------------------------------------------------- */
+
+/** Fil E/S : nouvelle valeur brute d'un canal (ADC_VALUE). */
+void vmcu__adc_on_value(uint8_t unit, uint8_t channel, uint16_t raw);
 
 /* --- UART (vmcu_uart.c) ---------------------------------------------------------- */
 

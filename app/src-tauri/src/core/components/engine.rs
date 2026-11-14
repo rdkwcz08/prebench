@@ -7,8 +7,11 @@
 //
 // Limites par instance : mémoire 16 Mo, pile 256 Ko, 50 ms pour charger et
 // initialiser le module, 5 ms par appel (onPinChange, onControl, onTick,
-// onPing, getState…). Dépassement ou exception : le composant passe en
-// défaut, un avertissement ⚠ est émis, les autres continuent.
+// onPing, getState…). Ces durées sont du temps CPU consommé par le fil
+// « modèles » (platform::thread_cpu_ns), pas du temps écoulé : une machine
+// chargée qui fait attendre le fil n'arrête pas un composant à tort.
+// Dépassement ou exception : le composant passe en défaut, un avertissement ⚠
+// est émis, les autres continuent.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -24,7 +27,7 @@ use rquickjs::{Context, Ctx, Function, Module, Object, Persistent, Runtime};
 
 use super::transpile::strip_types;
 use super::ComponentSource;
-use crate::core::net::{Drive, Level, Pull};
+use crate::core::net::{Drive, Level, NetState, Pull};
 
 pub const MEMORY_LIMIT: usize = 16 * 1024 * 1024;
 pub const STACK_LIMIT: usize = 256 * 1024;
@@ -37,7 +40,12 @@ pub enum ModelCmd {
     Pin {
         id: String,
         pin: String,
-        level: Level,
+        state: NetState,
+    },
+    /// Paramètres modifiés dans l'inspecteur (objet JSON complet).
+    Params {
+        id: String,
+        params_json: String,
     },
     Control {
         id: String,
@@ -49,7 +57,6 @@ pub enum ModelCmd {
         seq: u32,
     },
     /// Interrupteur d'alimentation de la paillasse (phase 2, section 10.4).
-    #[allow(dead_code)]
     Power(bool),
     FlushStates,
     Stop,
@@ -67,6 +74,12 @@ pub enum ModelEvent {
         id: String,
         pin: String,
         pull: Pull,
+    },
+    /// Tension fixée par setVoltage ; None : retirée.
+    Volts {
+        id: String,
+        pin: String,
+        volts: Option<f64>,
     },
     Pong {
         seq: u32,
@@ -117,19 +130,25 @@ pub fn spawn(
     Ok(Models { tx })
 }
 
-// --- Horloge pour les délais d'exécution ---------------------------------------------
+// --- Horloges ----------------------------------------------------------------------
 
+/// Temps écoulé (ctx.now() des modèles).
 fn now_ns() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     let start = START.get_or_init(Instant::now);
     u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
+/// Temps CPU du fil « modèles » : budgets de chargement et d'appel.
+fn cpu_ns() -> u64 {
+    crate::platform::thread_cpu_ns()
+}
+
 // --- Instance ------------------------------------------------------------------------
 
 #[derive(Default)]
 struct HostState {
-    pins: HashMap<String, Level>,
+    pins: HashMap<String, NetState>,
     out: Vec<ModelEvent>,
     dirty: bool,
 }
@@ -196,7 +215,7 @@ impl Loader for ModelLoader {
     ) -> rquickjs::Result<Module<'js, rquickjs::module::Declared>> {
         let path = Path::new(name);
         let saved = self.deadline.swap(u64::MAX, Ordering::Relaxed);
-        let t0 = now_ns();
+        let t0 = cpu_ns();
         let js = std::fs::read_to_string(path)
             .map_err(|e| rquickjs::Error::new_loading_message(name, e.to_string()))
             .and_then(|source| {
@@ -204,7 +223,7 @@ impl Loader for ModelLoader {
                     .map_err(|e| rquickjs::Error::new_loading_message(name, e))
             });
         if saved != u64::MAX {
-            let spent = now_ns().saturating_sub(t0);
+            let spent = cpu_ns().saturating_sub(t0);
             self.deadline
                 .store(saved.saturating_add(spent), Ordering::Relaxed);
         }
@@ -220,16 +239,17 @@ fn glue_source(spec: &InstanceSpec) -> String {
     format!(
         r#"import create from {model};
 const h = globalThis.__host;
+let params = Object.freeze(JSON.parse(h.params()));
 const ctx = Object.freeze({{
   apiVersion: 1,
   id: {id},
-  params: Object.freeze(JSON.parse(h.params())),
   logicVoltage: {volts},
-  pin: (name) => ({{ level: h.pinLevel(String(name)) }}),
+  get params() {{ return params; }},
+  pin: (name) => JSON.parse(h.pinState(String(name))),
   drive: (pin, level) => h.drive(String(pin), String(level)),
   pull: (pin, kind) => h.pull(String(pin), String(kind)),
-  setVoltage: () => h.warn("sortie analogique non simulée (phase 2)"),
-  uartWrite: () => h.warn("UART non simulé (phase 2)"),
+  setVoltage: (pin, volts) => h.volts(String(pin), Number(volts)),
+  uartWrite: () => h.warn("émission UART d'un composant pas encore simulée"),
   invalidate: () => h.invalidate(),
   warn: (m) => h.warn(String(m)),
   log: (m) => h.log(String(m)),
@@ -238,7 +258,8 @@ const ctx = Object.freeze({{
 const model = create(ctx);
 export function dispatch(kind, a, b) {{
   switch (kind) {{
-    case "pin": model.onPinChange?.(a, {{ level: b }}); break;
+    case "pin": model.onPinChange?.(a, JSON.parse(b)); break;
+    case "params": params = Object.freeze(JSON.parse(a)); model.onParamsChange?.(params); break;
     case "control": model.onControl?.(a, JSON.parse(b)); break;
     case "tick": model.onTick?.(Number(a)); break;
     case "ping": model.onPing?.(); break;
@@ -280,15 +301,21 @@ fn install_host(
 
     let h = Rc::clone(host);
     obj.set(
-        "pinLevel",
+        "pinState",
         Function::new(ctx.clone(), move |name: String| {
-            level_name(
-                h.borrow()
-                    .pins
-                    .get(&name)
-                    .copied()
-                    .unwrap_or(Level::Floating),
-            )
+            pin_state_json(h.borrow().pins.get(&name).copied().unwrap_or_default())
+        })?,
+    )?;
+
+    let (h, owner) = (Rc::clone(host), id.to_string());
+    obj.set(
+        "volts",
+        Function::new(ctx.clone(), move |pin: String, volts: f64| {
+            h.borrow_mut().out.push(ModelEvent::Volts {
+                id: owner.clone(),
+                pin,
+                volts: volts.is_finite().then_some(volts),
+            });
         })?,
     )?;
 
@@ -363,6 +390,18 @@ fn install_host(
     ctx.globals().set("__host", obj)
 }
 
+/// PinState de component-api.d.ts, en JSON : niveau, PWM et tension connue.
+pub fn pin_state_json(state: NetState) -> String {
+    let mut v = serde_json::json!({ "level": level_name(state.level) });
+    if let Some(p) = state.pwm {
+        v["pwm"] = serde_json::json!({ "freqHz": p.freq_hz, "duty": p.ratio() });
+    }
+    if let Some(volts) = state.volts {
+        v["volts"] = serde_json::json!(volts);
+    }
+    v.to_string()
+}
+
 pub fn level_name(level: Level) -> &'static str {
     match level {
         Level::High => "high",
@@ -387,12 +426,12 @@ impl Instance {
             },
         );
         let d = Arc::clone(&deadline);
-        runtime.set_interrupt_handler(Some(Box::new(move || now_ns() > d.load(Ordering::Relaxed))));
+        runtime.set_interrupt_handler(Some(Box::new(move || cpu_ns() > d.load(Ordering::Relaxed))));
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         let host = Rc::new(RefCell::new(HostState::default()));
         let params_json = serde_json::Value::Object(spec.params.clone()).to_string();
 
-        deadline.store(now_ns() + INIT_BUDGET.as_nanos() as u64, Ordering::Relaxed);
+        deadline.store(cpu_ns() + INIT_BUDGET.as_nanos() as u64, Ordering::Relaxed);
         let loaded = context.with(|ctx| {
             install_host(&ctx, &host, &spec.id, params_json).map_err(|e| describe(&ctx, e))?;
             let name = format!("prebench:instance:{}", spec.id);
@@ -434,7 +473,7 @@ impl Instance {
             return Ok(());
         }
         self.deadline
-            .store(now_ns() + CALL_BUDGET.as_nanos() as u64, Ordering::Relaxed);
+            .store(cpu_ns() + CALL_BUDGET.as_nanos() as u64, Ordering::Relaxed);
         let result = self.context.with(|ctx| {
             let f = self
                 .dispatch
@@ -449,7 +488,7 @@ impl Instance {
 
     fn state(&mut self) -> Result<String, String> {
         self.deadline
-            .store(now_ns() + CALL_BUDGET.as_nanos() as u64, Ordering::Relaxed);
+            .store(cpu_ns() + CALL_BUDGET.as_nanos() as u64, Ordering::Relaxed);
         let result = self.context.with(|ctx| {
             let f = self
                 .state_fn
@@ -471,6 +510,7 @@ impl Instance {
 // --- Boucle du fil « modèles » ------------------------------------------------------------
 
 fn run(specs: Vec<InstanceSpec>, rx: &mpsc::Receiver<ModelCmd>, emit: &dyn Fn(ModelEvent)) {
+    let _ = cpu_ns(); // Windows : étalonnage du compteur de cycles, hors de tout budget
     let mut instances: Vec<Instance> = Vec::new();
     for spec in &specs {
         match Instance::load(spec) {
@@ -508,10 +548,15 @@ fn run(specs: Vec<InstanceSpec>, rx: &mpsc::Receiver<ModelCmd>, emit: &dyn Fn(Mo
         match cmd {
             None => run_ticks(&mut instances, emit),
             Some(ModelCmd::Stop) => return,
-            Some(ModelCmd::Pin { id, pin, level }) => {
+            Some(ModelCmd::Pin { id, pin, state }) => {
                 if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
-                    inst.host.borrow_mut().pins.insert(pin.clone(), level);
-                    report(inst.call("pin", &pin, level_name(level)), emit);
+                    inst.host.borrow_mut().pins.insert(pin.clone(), state);
+                    report(inst.call("pin", &pin, &pin_state_json(state)), emit);
+                }
+            }
+            Some(ModelCmd::Params { id, params_json }) => {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
+                    report(inst.call("params", &params_json, ""), emit);
                 }
             }
             Some(ModelCmd::Control {
@@ -645,12 +690,18 @@ mod tests {
         models.send(ModelCmd::Pin {
             id: "LD2".into(),
             pin: "K".into(),
-            level: Level::Low,
+            state: NetState {
+                level: Level::Low,
+                ..Default::default()
+            },
         });
         models.send(ModelCmd::Pin {
             id: "LD2".into(),
             pin: "A".into(),
-            level: Level::High,
+            state: NetState {
+                level: Level::High,
+                ..Default::default()
+            },
         });
         assert_eq!(
             states(&models, &rx),
@@ -665,7 +716,10 @@ mod tests {
         models.send(ModelCmd::Pin {
             id: "B1".into(),
             pin: "2".into(),
-            level: Level::Low,
+            state: NetState {
+                level: Level::Low,
+                ..Default::default()
+            },
         });
         models.send(ModelCmd::Control {
             id: "B1".into(),
@@ -680,6 +734,40 @@ mod tests {
             }
         };
         assert_eq!(drive, ("1".to_string(), Drive::Low));
+    }
+
+    /// Potentiomètre : la position du bouton fixe la tension du curseur.
+    #[test]
+    fn potentiometer_sets_wiper_voltage() {
+        let (models, rx) = start(vec![spec("pot1", provided("potentiometer"))]);
+        let _ = states(&models, &rx);
+        for (pin, level, volts) in [("VCC", Level::High, 3.3), ("GND", Level::Low, 0.0)] {
+            models.send(ModelCmd::Pin {
+                id: "pot1".into(),
+                pin: pin.into(),
+                state: NetState {
+                    level,
+                    pwm: None,
+                    volts: Some(volts),
+                },
+            });
+        }
+        let wiper = |expected: f64| loop {
+            match rx.recv_timeout(Duration::from_secs(5)).expect("tension") {
+                ModelEvent::Volts { pin, volts, .. } if pin == "W" && volts == Some(expected) => {
+                    break
+                }
+                ModelEvent::Warn(w) => panic!("avertissement inattendu : {w}"),
+                _ => {}
+            }
+        };
+        wiper(1.65);
+        models.send(ModelCmd::Control {
+            id: "pot1".into(),
+            control: "position".into(),
+            value_json: "0".into(),
+        });
+        wiper(0.0);
     }
 
     fn temp_component(name: &str, model: &str) -> ComponentSource {

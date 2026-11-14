@@ -27,6 +27,9 @@ fake_app_t *fake_app_create(uint16_t board_id);
 /** État initial d'une entrée, envoyé entre HELLO et WELCOME. */
 void fake_app_initial_input(fake_app_t *fa, uint8_t port, uint8_t pin, uint8_t level);
 
+/** Valeur ADC initiale, envoyée entre HELLO et WELCOME (comme le cœur). */
+void fake_app_initial_adc(fake_app_t *fa, uint8_t unit, uint8_t channel, uint16_t raw);
+
 /** Écoute, pose PREBENCH_SOCKET / PREBENCH_BOARD_ID, lance le fil serveur. */
 void fake_app_run(fake_app_t *fa);
 
@@ -35,6 +38,8 @@ void fake_app_set_echo(fake_app_t *fa, bool present);
 
 void fake_app_send_gpio_input(fake_app_t *fa, uint8_t port, uint8_t pin, uint8_t level);
 void fake_app_send_empty(fake_app_t *fa, uint16_t type); /* PAUSE, RESUME… */
+/** Valeur brute d'un canal ADC (ADC_VALUE). */
+void fake_app_send_adc(fake_app_t *fa, uint8_t unit, uint8_t channel, uint16_t raw);
 /** Octets vers une UART du firmware (UART_RX), en trames de 60 octets au plus. */
 void fake_app_send_uart_rx(fake_app_t *fa, uint8_t id, const uint8_t *data, size_t len);
 

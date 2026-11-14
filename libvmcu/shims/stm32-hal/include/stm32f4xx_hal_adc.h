@@ -1,9 +1,9 @@
 /*
  * libvmcu/shims/stm32-hal/include/stm32f4xx_hal_adc.h — Module ADC du shim.
  *
- * Phase 1 : non simulé. Init appelle HAL_ADC_MspInit ; les conversions se
- * terminent aussitôt et HAL_ADC_GetValue renvoie 0. Simulation en phase 2
- * (potentiomètre, source analogique).
+ * Simulé en phase 2 (src/stm32_hal_adc.c) : les conversions se terminent
+ * aussitôt et HAL_ADC_GetValue lit la tension de la broche sur la paillasse
+ * (potentiomètre, source analogique). DMA non simulé (compile et avertit).
  */
 #ifndef PREBENCH_STM32F4XX_HAL_ADC_H
 #define PREBENCH_STM32F4XX_HAL_ADC_H
@@ -157,7 +157,8 @@ typedef struct __ADC_HandleTypeDef {
 #define __HAL_ADC_DISABLE(__HANDLE__) ((void)(__HANDLE__))
 #define __HAL_ADC_ENABLE_IT(__HANDLE__, __INTERRUPT__)  ((void)(__HANDLE__), (void)(__INTERRUPT__))
 #define __HAL_ADC_DISABLE_IT(__HANDLE__, __INTERRUPT__) ((void)(__HANDLE__), (void)(__INTERRUPT__))
-#define __HAL_ADC_GET_FLAG(__HANDLE__, __FLAG__)   ((void)(__HANDLE__), (void)(__FLAG__), RESET)
+/* Conversion terminée aussitôt : EOC toujours levé. */
+#define __HAL_ADC_GET_FLAG(__HANDLE__, __FLAG__)   ((void)(__HANDLE__), ((__FLAG__) == ADC_FLAG_EOC) ? SET : RESET)
 #define __HAL_ADC_CLEAR_FLAG(__HANDLE__, __FLAG__) ((void)(__HANDLE__), (void)(__FLAG__))
 
 HAL_StatusTypeDef HAL_ADC_Init(ADC_HandleTypeDef *hadc);

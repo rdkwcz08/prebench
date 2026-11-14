@@ -33,6 +33,8 @@ export const LINE_ENDINGS: Record<LineEnding, { label: string; bytes: string }> 
 export interface Chunk {
   t: number;
   data: Uint8Array;
+  /** Repère de Prebench (« Alimentation coupée »), pas un octet du firmware. */
+  sys?: boolean;
 }
 
 export interface Port {
@@ -119,6 +121,14 @@ class Serial {
     if (p.key === this.current) this.plot(p.key, decoder.decode(data, { stream: false }));
   }
 
+  /** Repère sur sa propre ligne dans chaque port (coupure d'alimentation…). */
+  marker(text: string): void {
+    const t = performance.now() - this.started;
+    for (const p of this.ports) p.chunks.push({ t, data: encoder.encode(text), sys: true });
+    this.partial = {};
+    this.ports = [...this.ports];
+  }
+
   /** Analyse les lignes complètes pour le traceur. */
   private plot(key: string, text: string): void {
     const all = (this.partial[key] ?? '') + text;
@@ -184,7 +194,12 @@ class Serial {
 
   /** Texte du port affiché, pour l'export. */
   exportText(p: Port): string {
-    return p.chunks.map((c) => (this.timestamps ? `[${stamp(c.t)}] ` : '') + decoder.decode(c.data)).join('');
+    return p.chunks
+      .map((c) => {
+        const at = this.timestamps ? `[${stamp(c.t)}] ` : '';
+        return c.sys ? `\n${at}[${decoder.decode(c.data)}]\n` : at + decoder.decode(c.data);
+      })
+      .join('');
   }
 }
 

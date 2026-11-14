@@ -10,6 +10,7 @@ family        = "stm32"
 framework     = ["stm32-hal", "arduino"]
 logic_voltage = 3.3
 adc_bits      = 12
+adc_vref      = 3.3   # VREF+ relié à VDDA (3,3 V) sur la Nucleo-64
 ram_kb        = 96
 flash_kb      = 512
 image         = "nucleo-64.svg"

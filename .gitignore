@@ -8,6 +8,10 @@ Desktop.ini
 *.swp
 .vscode/*
 !.vscode/extensions.json
+# Réglages écrits par Prebench dans les projets ouverts (launch.json,
+# settings.json) : chemins propres à chaque machine.
+tests/**/.vscode/
+templates/**/.vscode/
 
 # --- Rust / Tauri ---
 target/

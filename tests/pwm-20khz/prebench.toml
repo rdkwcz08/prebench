@@ -1,0 +1,12 @@
+#:schema ../../docs/prebench.schema.json
+# Test de charge PWM : TIM2_CH1 sur PA5 (LD2) à 20 kHz. Le rapport cyclique
+# change toutes les 100 µs pendant 3 s (30 000 consignes), puis reste fixe.
+# Seuls fréquence et rapport cyclique transitent : ni le canal ni le CPU ne
+# doivent saturer (test pwm_20khz_no_overload).
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"

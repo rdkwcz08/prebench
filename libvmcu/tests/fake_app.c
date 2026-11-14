@@ -26,6 +26,8 @@ struct fake_app {
     unsigned              frame_count;
     uint8_t               initial[MAX_INITIAL][3];
     unsigned              initial_count;
+    uint8_t               initial_adc[MAX_INITIAL][4]; /* unité, canal, valeur LE */
+    unsigned              initial_adc_count;
     bool                  echo;
     uint32_t              seq;
     char                  hello_board[64];
@@ -93,6 +95,9 @@ static void handle_hello(fake_app_t *fa, const vmcu_frame_header_t *h, const uin
         uint8_t in[4] = { fa->initial[i][0], fa->initial[i][1], fa->initial[i][2], 0 };
         send_frame(fa, VMCU_MSG_GPIO_INPUT, 0, 0, in, sizeof in);
     }
+    for (unsigned i = 0; i < fa->initial_adc_count; ++i) {
+        send_frame(fa, VMCU_MSG_ADC_VALUE, 0, 0, fa->initial_adc[i], 4);
+    }
     uint8_t welcome[8] = { 1, 0, 12, 0 };
     vmcu_wire_put_u32(welcome + 4, 1000u);
     send_frame(fa, VMCU_MSG_WELCOME, VMCU_FLAG_REPLY, h->seq, welcome, sizeof welcome);
@@ -156,6 +161,17 @@ fake_app_t *fake_app_create(uint16_t board_id)
     return fa;
 }
 
+void fake_app_initial_adc(fake_app_t *fa, uint8_t unit, uint8_t channel, uint16_t raw)
+{
+    if (fa->initial_adc_count < MAX_INITIAL) {
+        uint8_t *v = fa->initial_adc[fa->initial_adc_count++];
+        v[0] = unit;
+        v[1] = channel;
+        v[2] = (uint8_t)(raw & 0xFF);
+        v[3] = (uint8_t)(raw >> 8);
+    }
+}
+
 void fake_app_initial_input(fake_app_t *fa, uint8_t port, uint8_t pin, uint8_t level)
 {
     if (fa->initial_count < MAX_INITIAL) {
@@ -203,6 +219,12 @@ void fake_app_send_uart_rx(fake_app_t *fa, uint8_t id, const uint8_t *data, size
         data += n;
         len -= n;
     }
+}
+
+void fake_app_send_adc(fake_app_t *fa, uint8_t unit, uint8_t channel, uint16_t raw)
+{
+    uint8_t in[4] = { unit, channel, (uint8_t)(raw & 0xFF), (uint8_t)(raw >> 8) };
+    send_frame(fa, VMCU_MSG_ADC_VALUE, 0, 0, in, sizeof in);
 }
 
 void fake_app_send_empty(fake_app_t *fa, uint16_t type)

@@ -20,6 +20,7 @@
 <script lang="ts">
   import { bench } from './bench.svelte';
   import Board from './Board.svelte';
+  import { frequency, percent, volts } from './format';
   import ComponentHost from './ComponentHost.svelte';
   import { untrack } from 'svelte';
   import {
@@ -446,7 +447,22 @@
         <!-- États des nets pendant la simulation (charte 2.3) : couleur + forme, mot au survol -->
         {#each pads as p (p.endpoint)}
           {@const level = bench.nets[p.signal]}
-          {#if level && p.wireable}
+          {@const pwm = bench.pins[p.signal]?.pwm}
+          {@const adc = bench.pins[p.signal]?.adc}
+          {#if adc && p.wireable}
+            <!-- Entrée ADC : jauge verticale de la tension, du bas vers le haut -->
+            {@const h = adc.max > 0 ? (9 * adc.raw) / adc.max : 0}
+            <g class="net analog" aria-hidden="true">
+              <rect x={p.pos[0] - 4.5} y={p.pos[1] - 4.5} width="9" height="9" rx="1" />
+              <rect x={p.pos[0] - 4.5} y={p.pos[1] + 4.5 - h} width="9" height={h} class="duty" />
+            </g>
+          {:else if pwm && p.wireable && (level === 'high' || level === 'low')}
+            <!-- PWM : jauge du rapport cyclique, part haute à gauche (forme + mot au survol) -->
+            <g class="net pwm" aria-hidden="true">
+              <rect x={p.pos[0] - 4.5} y={p.pos[1] - 4.5} width="9" height="9" rx="1" />
+              <rect x={p.pos[0] - 4.5} y={p.pos[1] - 4.5} width={9 * Math.min(1, Math.max(0, pwm.duty))} height="9" class="duty" />
+            </g>
+          {:else if level && p.wireable}
             <g class="net {level}" aria-hidden="true">
               <rect x={p.pos[0] - 4.5} y={p.pos[1] - 4.5} width="9" height="9" rx="1" />
               {#if level === 'conflict'}
@@ -470,9 +486,13 @@
             data-endpoint={p.endpoint}
           >
             <title
-              >{p.label}{p.label !== p.signal ? ` (${p.signal})` : ''}, {p.header}:{p.index}{bench.nets[p.signal]
-                ? ` : ${LEVEL_WORD[bench.nets[p.signal]!].toLowerCase()}`
-                : ''}</title
+              >{p.label}{p.label !== p.signal ? ` (${p.signal})` : ''}, {p.header}:{p.index}{bench.pins[p.signal]?.pwm
+                ? ` : PWM ${frequency(bench.pins[p.signal]!.pwm!.freq_hz)}, ${percent(bench.pins[p.signal]!.pwm!.duty)}`
+                : bench.pins[p.signal]?.adc
+                  ? ` : ADC ${volts(bench.pins[p.signal]!.adc!.volts)}`
+                  : bench.nets[p.signal]
+                    ? ` : ${LEVEL_WORD[bench.nets[p.signal]!].toLowerCase()}`
+                    : ''}</title
             >
           </rect>
         {/each}
@@ -698,6 +718,16 @@
   .hatch-line {
     stroke: var(--pb-silk);
     stroke-width: 1.2;
+  }
+  .net.pwm rect,
+  .net.analog rect {
+    fill: var(--pb-low);
+    stroke: var(--pb-high);
+  }
+  .net.pwm .duty,
+  .net.analog .duty {
+    fill: var(--pb-high);
+    stroke: none;
   }
   .net.conflict rect {
     fill: var(--pb-conflict);

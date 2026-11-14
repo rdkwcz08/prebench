@@ -155,7 +155,13 @@ static void delay_ns(uint64_t ns)
 {
     (void)vmcu__ensure_init();
     vmcu__checkpoint();
-    vmcu__flush(); /* section 5.1 du protocole : le lot part avant le sommeil */
+    /* Section 5.1 du protocole : le lot part avant un sommeil d'au moins 1 ms.
+     * Un sommeil plus court le laisse au fil de vidage, qui l'envoie au plus
+     * 1 ms après sa première trame : la latence reste bornée, et les consignes
+     * répétées d'une boucle rapide (PWM_DUTY) se regroupent. */
+    if (ns >= 1000000ull) {
+        vmcu__flush();
+    }
     vmcu__guard_reset();
     uint64_t target = vmcu__sim_ns() + ns;
     for (;;) {

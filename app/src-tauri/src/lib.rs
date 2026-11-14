@@ -49,6 +49,7 @@ pub fn run() {
             commands::start_simulation,
             commands::stop_simulation,
             commands::reset_simulation,
+            commands::set_power,
             commands::pause_simulation,
             commands::resume_simulation,
             commands::component_control,

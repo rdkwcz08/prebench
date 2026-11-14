@@ -4,10 +4,10 @@
  * Expose les mêmes noms que le HAL de ST pour qu'un projet CubeMX compile sans
  * modification. Chaque fonction traduit l'appel vers l'API vmcu_* (règle 16.2.2).
  *
- * Simulés en phase 1 : HAL de base (Init, tick, délais), RCC, PWR, Cortex/NVIC,
- * GPIO et EXTI. Modules DMA, UART, TIM, ADC, I2C et SPI : types et fonctions
- * complets, qui compilent et avertissent « non simulé » (règle 16.2.10) ; leur
- * simulation arrive en phase 2 (UART, PWM, ADC) et 3 (I2C, SPI).
+ * Simulés : HAL de base (Init, tick, délais), RCC, PWR, Cortex/NVIC, GPIO et
+ * EXTI (phase 1) ; UART, PWM des timers et ADC (phase 2). Modules DMA, I2C et
+ * SPI : types et fonctions complets, qui compilent et avertissent « non
+ * simulé » (règle 16.2.10) ; I2C et SPI arrivent en phase 3.
  *
  * Interruptions : un front sur une broche configurée en GPIO_MODE_IT_* appelle,
  * si l'IRQ EXTI est activée dans le NVIC, le gestionnaire EXTIx_IRQHandler du

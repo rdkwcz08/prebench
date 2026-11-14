@@ -20,6 +20,10 @@ pub mod msg {
     pub const HELLO: u16 = 0x0001;
     pub const GPIO_CONFIG: u16 = 0x0010;
     pub const GPIO_WRITE: u16 = 0x0011;
+    pub const PWM_CONFIG: u16 = 0x0020;
+    pub const PWM_DUTY: u16 = 0x0021;
+    pub const PWM_ATTACH: u16 = 0x0022;
+    pub const ADC_CONFIG: u16 = 0x0030;
     pub const WARN: u16 = 0x0080;
     pub const LOG: u16 = 0x0081;
     pub const UART_CONFIG: u16 = 0x0040;
@@ -32,6 +36,7 @@ pub mod msg {
     pub const WELCOME: u16 = 0x8001;
     pub const REJECT: u16 = 0x8002;
     pub const GPIO_INPUT: u16 = 0x8010;
+    pub const ADC_VALUE: u16 = 0x8030;
     pub const RESET: u16 = 0x80E0;
     pub const PAUSE: u16 = 0x80E1;
     pub const RESUME: u16 = 0x80E2;

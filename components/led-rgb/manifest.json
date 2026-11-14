@@ -1,0 +1,28 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "led-rgb",
+  "version": "1.0.0",
+  "name": "LED RGB",
+  "description": "LED RGB 5 mm diffusante à quatre pattes : rouge, commun, vert, bleu. Commun en cathode (relié à GND, canal allumé au niveau haut) ou en anode (relié à 3V3, canal allumé au niveau bas). La luminosité de chaque canal suit le rapport cyclique PWM.",
+  "category": "output",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 48, "height": 80 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "R", "label": "Rouge", "role": "input", "x": 12, "y": 80 },
+    { "name": "COM", "label": "Commun", "role": "passive", "x": 20, "y": 80 },
+    { "name": "G", "label": "Vert", "role": "input", "x": 28, "y": 80 },
+    { "name": "B", "label": "Bleu", "role": "input", "x": 36, "y": 80 }
+  ],
+  "params": {
+    "common": {
+      "type": "enum",
+      "label": "Commun",
+      "values": ["cathode", "anode"],
+      "default": "cathode"
+    }
+  },
+  "controls": []
+}

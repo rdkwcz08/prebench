@@ -1,7 +1,7 @@
 /*
  * libvmcu/shims/stm32-hal/src/stm32_hal_periph.c — Instances des périphériques et
- * modules DMA, ADC, I2C, SPI pas encore simulés (règle 16.2.10). L'UART est
- * simulée dans stm32_hal_uart.c.
+ * modules DMA, I2C, SPI pas encore simulés (règle 16.2.10). UART, TIM (PWM) et
+ * ADC sont simulés dans stm32_hal_uart.c, stm32_hal_tim.c et stm32_hal_adc.c.
  *
  * Comportement commun :
  * - *_Init : appelle le MspInit du module si le handle est neuf (comme le HAL de
@@ -74,57 +74,6 @@ HAL_StatusTypeDef HAL_DMA_RegisterCallback(DMA_HandleTypeDef *hdma, HAL_DMA_Call
 HAL_StatusTypeDef HAL_DMA_UnRegisterCallback(DMA_HandleTypeDef *hdma, HAL_DMA_CallbackIDTypeDef CallbackID) { return HAL_OK; }
 HAL_DMA_StateTypeDef HAL_DMA_GetState(DMA_HandleTypeDef *hdma) { return hdma->State; }
 uint32_t HAL_DMA_GetError(DMA_HandleTypeDef *hdma) { return hdma->ErrorCode; }
-
-/* --- ADC (simulation en phase 2) ------------------------------------------------------- */
-
-HAL_StatusTypeDef HAL_ADC_Init(ADC_HandleTypeDef *hadc)
-{
-    if (hadc == NULL) {
-        return HAL_ERROR;
-    }
-    PREBENCH_UNSIMULATED();
-    if (hadc->State == HAL_ADC_STATE_RESET) {
-        hadc->Lock = HAL_UNLOCKED;
-        HAL_ADC_MspInit(hadc);
-    }
-    hadc->ErrorCode = HAL_ADC_ERROR_NONE;
-    hadc->State = HAL_ADC_STATE_READY;
-    return HAL_OK;
-}
-
-HAL_StatusTypeDef HAL_ADC_DeInit(ADC_HandleTypeDef *hadc)
-{
-    if (hadc == NULL) {
-        return HAL_ERROR;
-    }
-    HAL_ADC_MspDeInit(hadc);
-    hadc->State = HAL_ADC_STATE_RESET;
-    return HAL_OK;
-}
-
-HAL_StatusTypeDef HAL_ADC_Start(ADC_HandleTypeDef *hadc) { STUB_OK(); }
-HAL_StatusTypeDef HAL_ADC_Stop(ADC_HandleTypeDef *hadc) { return HAL_OK; }
-HAL_StatusTypeDef HAL_ADC_PollForConversion(ADC_HandleTypeDef *hadc, uint32_t Timeout) { STUB_OK(); }
-HAL_StatusTypeDef HAL_ADC_PollForEvent(ADC_HandleTypeDef *hadc, uint32_t EventType, uint32_t Timeout)
-{
-    PREBENCH_UNSIMULATED();
-    prebench_stub_wait(Timeout);
-    return HAL_TIMEOUT;
-}
-HAL_StatusTypeDef HAL_ADC_Start_IT(ADC_HandleTypeDef *hadc) { STUB_OK(); }
-HAL_StatusTypeDef HAL_ADC_Stop_IT(ADC_HandleTypeDef *hadc) { return HAL_OK; }
-void HAL_ADC_IRQHandler(ADC_HandleTypeDef *hadc) {}
-HAL_StatusTypeDef HAL_ADC_Start_DMA(ADC_HandleTypeDef *hadc, uint32_t *pData, uint32_t Length) { STUB_OK(); }
-HAL_StatusTypeDef HAL_ADC_Stop_DMA(ADC_HandleTypeDef *hadc) { return HAL_OK; }
-uint32_t HAL_ADC_GetValue(const ADC_HandleTypeDef *hadc)
-{
-    PREBENCH_UNSIMULATED();
-    return 0U;
-}
-HAL_StatusTypeDef HAL_ADC_ConfigChannel(ADC_HandleTypeDef *hadc, const ADC_ChannelConfTypeDef *sConfig) { STUB_OK(); }
-HAL_StatusTypeDef HAL_ADC_AnalogWDGConfig(ADC_HandleTypeDef *hadc, const ADC_AnalogWDGConfTypeDef *AnalogWDGConfig) { STUB_OK(); }
-uint32_t HAL_ADC_GetState(const ADC_HandleTypeDef *hadc) { return hadc->State; }
-uint32_t HAL_ADC_GetError(const ADC_HandleTypeDef *hadc) { return hadc->ErrorCode; }
 
 /* --- I2C (simulation en phase 3) : bus sans composant ------------------------------------ */
 

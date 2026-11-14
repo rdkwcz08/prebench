@@ -15,6 +15,8 @@
     tone?: StateTone;
     /** Texte complet au survol, pour une valeur tronquée. */
     full?: string;
+    /** Échantillon de couleur avant la valeur (couleur d'un fil, charte 2.4). */
+    swatch?: string;
   }
 </script>
 
@@ -25,10 +27,13 @@
 </script>
 
 <dl class="props">
-  {#each props as p (p.label)}
+  {#each props as p, i (i)}
     <dt>{p.label}</dt>
     <dd class:data={p.data === true} title={p.full}>
-      {#if p.tone}<StatePill tone={p.tone} text={p.value} />{:else}{p.value}{/if}
+      {#if p.swatch}<span class="swatch" style:background={p.swatch}></span>{/if}{#if p.tone}<StatePill
+          tone={p.tone}
+          text={p.value}
+        />{:else}{p.value}{/if}
     </dd>
   {/each}
 </dl>
@@ -55,5 +60,14 @@
   }
   dd.data {
     font-size: 12px;
+  }
+  /* Maquette : échantillon 10 × 10 avant la couleur d'un fil. */
+  .swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-right: 8px;
+    border-radius: 2px;
+    vertical-align: -1px;
   }
 </style>

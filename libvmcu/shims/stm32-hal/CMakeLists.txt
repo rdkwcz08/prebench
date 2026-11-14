@@ -11,6 +11,7 @@ add_library(prebench_stm32_hal STATIC
   src/stm32_hal_periph.c
   src/stm32_hal_uart.c
   src/stm32_hal_tim.c
+  src/stm32_hal_adc.c
   src/default_exti_callback.c
   src/default_i2c_addr_callback.c
   src/default_msp_init.c

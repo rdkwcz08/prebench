@@ -14,6 +14,22 @@ const STATES: Record<string, [unknown, unknown]> = {
   led: [{ brightness: 0 }, { brightness: 1 }],
   button: [{ pressed: false }, { pressed: true }],
   echo: [{ pings: 0 }, { pings: 42 }],
+  'led-rgb': [
+    { r: 0, g: 0, b: 0 },
+    { r: 1, g: 0.5, b: 0 },
+  ],
+  servo: [
+    { angle: 0, pulse_ms: 1, freq_hz: 50, status: 'ok' },
+    { angle: 180, pulse_ms: 2, freq_hz: 50, status: 'ok' },
+  ],
+  buzzer: [
+    { sounding: false, freq_hz: null },
+    { sounding: true, freq_hz: 2300 },
+  ],
+  potentiometer: [
+    { position: 0.5, volts: 1.65 },
+    { position: 1, volts: 3.3 },
+  ],
 };
 
 /** Instance de chaque composant dans le projet de démonstration (fixture.ts). */

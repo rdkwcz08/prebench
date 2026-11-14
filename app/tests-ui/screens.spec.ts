@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { FAILED_BUILD } from './data';
-import { expect, test } from './fixture';
+import { demoProject, expect, test } from './fixture';
 
 const outDir = fileURLToPath(new URL('../test-screens/', import.meta.url));
 
@@ -92,7 +92,7 @@ for (const theme of THEMES) {
     const { page } = bench;
     await page.emulateMedia({ colorScheme: theme.scheme, reducedMotion: 'reduce' });
     await page.getByRole('button', { name: 'Ajouter un composant' }).click();
-    await page.getByRole('menuitem', { name: /LED/ }).click();
+    await page.getByRole('menuitem', { name: /^LED\s+led$/ }).click();
     const drag = async (from: string, to: string): Promise<void> => {
       const a = await page.locator(from).boundingBox();
       const b = await page.locator(to).boundingBox();
@@ -169,5 +169,80 @@ for (const theme of THEMES) {
     await page.getByRole('tab', { name: 'Traceur' }).click();
     await page.mouse.move(5, 790);
     await page.screenshot({ path: `${outDir}traceur-${theme.name}-${info.project.name}.png`, animations: 'disabled' });
+  });
+
+  test(`inspecteur de broche, thème ${theme.name}`, async ({ bench }, info) => {
+    const { page } = bench;
+    await page.emulateMedia({ colorScheme: theme.scheme, reducedMotion: 'reduce' });
+    await bench.emit('sim:status', { state: 'running', message: 'Nucleo-F401RE — stm32-hal, libvmcu 0.2.0' });
+    await bench.emit('sim:states', { LD2: { brightness: 1 }, B1: { pressed: false }, echo: { pings: 0 } });
+    await bench.emit('sim:pins', { PA5: { mode: 1, pull: 0, function: null, period_us: 1_000_000 } });
+    await bench.emit('sim:nets', { PA5: 'high', PC13: 'pulled-high' });
+    await bench.emit('sim:usage', { cpu: 2.4, memory: 2.6 * 1024 * 1024, memory_limit: 256 * 1024 * 1024 });
+    await page.locator('[data-endpoint="board.CN5:6"]').click();
+    await expect(page.getByRole('complementary', { name: 'Inspecteur' })).toContainText('Sortie push-pull');
+    await page.mouse.move(5, 790);
+    mkdirSync(outDir, { recursive: true });
+    await page.screenshot({ path: `${outDir}inspecteur-${theme.name}-${info.project.name}.png`, animations: 'disabled' });
+  });
+
+  test(`PWM et ADC, thème ${theme.name}`, async ({ bench }, info) => {
+    const { page } = bench;
+    await page.emulateMedia({ colorScheme: theme.scheme, reducedMotion: 'reduce' });
+    // Exemple tests/pot-servo : potentiomètre sur A0, servo sur D5 (50 Hz).
+    const project = demoProject() as { instances: { id: string; pos: unknown }[] } & Record<string, unknown>;
+    await bench.respond('open_project', {
+      ...project,
+      instances: [
+        ...project.instances.filter((i) => i.pos === null),
+        { id: 'pot1', type: 'potentiometer', params: { resistance_kohm: 10 }, pos: [-120, 216] },
+        { id: 'servo1', type: 'servo', params: {}, pos: [392, 288] },
+      ],
+      wires: [
+        { from: 'pot1.VCC', to: 'board.CN6:4' },
+        { from: 'pot1.GND', to: 'board.CN6:6' },
+        { from: 'pot1.W', to: 'board.CN8:1' },
+        { from: 'servo1.VCC', to: 'board.CN6:5' },
+        { from: 'servo1.GND', to: 'board.CN5:7' },
+        { from: 'servo1.SIG', to: 'board.CN9:6' },
+      ],
+    });
+    await bench.emit('project:changed', { project: true, views: [], models: [] });
+    await page.getByRole('button', { name: 'Ajuster la vue' }).click();
+    await bench.emit('sim:status', { state: 'running', message: 'Nucleo-F401RE — stm32-hal, libvmcu 0.2.0' });
+    await bench.emit('sim:states', {
+      LD2: { brightness: 0 },
+      B1: { pressed: false },
+      pot1: { position: 0.67, volts: 2.2 },
+      servo1: { angle: 120, pulse_ms: 1.667, freq_hz: 50, status: 'ok' },
+    });
+    await bench.emit('sim:pins', {
+      PA0: { mode: 5, pull: 0, function: null, period_us: null, pwm: null, adc: { volts: 2.2, raw: 2730, max: 4095 } },
+      PB4: { mode: 3, pull: 0, function: 'pwm:TIM3_CH1', period_us: null, pwm: { freq_hz: 50, duty: 0.0833 }, adc: null },
+    });
+    await bench.emit('sim:nets', { PA0: 'floating', PB4: 'high', '3V3': 'high', '5V': 'high', GND: 'low' });
+    await bench.emit('sim:usage', { cpu: 1.8, memory: 2.6 * 1024 * 1024, memory_limit: 256 * 1024 * 1024 });
+    await page.locator('[data-endpoint="board.CN9:6"]').click();
+    await expect(page.getByRole('complementary', { name: 'Inspecteur' })).toContainText('Rapport cyclique');
+    await page.mouse.move(5, 790);
+    mkdirSync(outDir, { recursive: true });
+    await page.screenshot({ path: `${outDir}pwm-adc-${theme.name}-${info.project.name}.png`, animations: 'disabled' });
+  });
+
+  test(`alimentation coupée, thème ${theme.name}`, async ({ bench }, info) => {
+    const { page } = bench;
+    await page.emulateMedia({ colorScheme: theme.scheme, reducedMotion: 'reduce' });
+    await bench.emit('sim:status', { state: 'running', message: 'En cours' });
+    await bench.emit('sim:uart-config', { id: 2, baud: 115200 });
+    await bench.emit('sim:uart', { id: 2, data: Array.from(new TextEncoder().encode('temp:21.4,hum:55\r\ntemp:21.5,hum:55\r\n')) });
+    await bench.emit('sim:log', { source: 'prebench', level: 2, text: 'Alimentation coupée' });
+    await bench.emit('sim:status', { state: 'off', message: "rétablissez l'alimentation pour relancer le firmware depuis zéro" });
+    await bench.emit('sim:states', { LD2: { brightness: 0 }, B1: { pressed: false }, echo: { pings: 0 } });
+    await bench.emit('sim:pins', {});
+    await bench.emit('sim:nets', { PA5: 'low', PC13: 'floating' });
+    await expect(page.getByRole('button', { name: "Rétablir l'alimentation" })).toBeVisible();
+    await page.mouse.move(5, 790);
+    mkdirSync(outDir, { recursive: true });
+    await page.screenshot({ path: `${outDir}alimentation-coupee-${theme.name}-${info.project.name}.png`, animations: 'disabled' });
   });
 }

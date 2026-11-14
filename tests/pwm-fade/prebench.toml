@@ -1,0 +1,11 @@
+#:schema ../../docs/prebench.schema.json
+# Fondu de LD2 en PWM : TIM2_CH1 sur PA5 (fonction alternative AF1), configuré
+# comme dans STM32CubeMX (prescaler 83 : 1 MHz ; période 999 : 1 kHz). LD2 est
+# intégrée à la carte : aucun composant ni fil à ajouter.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"

@@ -1,0 +1,34 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "buzzer",
+  "version": "1.0.0",
+  "name": "Buzzer",
+  "description": "Buzzer piézo. Passif : sonne à la fréquence du signal PWM (tone). Actif : sonne à sa propre fréquence quand + est au niveau haut. Indication visuelle et fréquence affichée ; le son réel attendra l'audio (V2).",
+  "category": "output",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 96, "height": 64 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "+", "label": "Plus (+)", "role": "input", "x": 14, "y": 64 },
+    { "name": "-", "label": "Moins (−)", "role": "passive", "x": 26, "y": 64 }
+  ],
+  "params": {
+    "kind": {
+      "type": "enum",
+      "label": "Type",
+      "values": ["passive", "active"],
+      "default": "passive"
+    },
+    "tone_hz": {
+      "type": "integer",
+      "label": "Fréquence propre (actif)",
+      "default": 2300,
+      "min": 100,
+      "max": 10000,
+      "unit": "Hz"
+    }
+  },
+  "controls": []
+}

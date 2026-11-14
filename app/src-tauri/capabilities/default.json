@@ -13,6 +13,7 @@
     "allow-start-simulation",
     "allow-stop-simulation",
     "allow-reset-simulation",
+    "allow-set-power",
     "allow-pause-simulation",
     "allow-resume-simulation",
     "allow-component-control",

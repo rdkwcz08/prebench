@@ -1,0 +1,31 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "potentiometer",
+  "version": "1.0.0",
+  "name": "Potentiomètre",
+  "description": "Potentiomètre rotatif en pont diviseur : le curseur (W) délivre une tension entre GND et VCC selon la position du bouton, lue par une entrée ADC.",
+  "category": "input",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 56, "height": 72 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "GND", "label": "GND (extrémité)", "role": "ground", "x": 12, "y": 72 },
+    { "name": "W", "label": "Curseur", "role": "analog-out", "x": 28, "y": 72 },
+    { "name": "VCC", "label": "VCC (extrémité)", "role": "power", "x": 44, "y": 72 }
+  ],
+  "params": {
+    "resistance_kohm": {
+      "type": "number",
+      "label": "Résistance",
+      "default": 10,
+      "min": 0.1,
+      "max": 1000,
+      "unit": "kΩ"
+    }
+  },
+  "controls": [
+    { "id": "position", "type": "knob", "label": "Position", "min": 0, "max": 1, "step": 0.01, "default": 0.5 }
+  ]
+}

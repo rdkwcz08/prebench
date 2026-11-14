@@ -20,7 +20,7 @@ foreach(_test test_wire test_client)
   add_test(NAME ${_test} COMMAND ${_test})
 endforeach()
 
-foreach(_test test_stm32_hal test_stm32_hal_stubs test_uart)
+foreach(_test test_stm32_hal test_stm32_hal_stubs test_uart test_pwm_adc)
   add_executable(${_test} ${_test}.c)
   target_link_libraries(${_test} PRIVATE vmcu_fake_app prebench_stm32_hal vmcu)
   target_compile_options(${_test} PRIVATE ${VMCU_WARNING_FLAGS})
@@ -61,5 +61,5 @@ target_link_libraries(test_blinky PRIVATE template_blinky vmcu_fake_app prebench
 target_compile_options(test_blinky PRIVATE ${VMCU_WARNING_FLAGS})
 add_test(NAME test_blinky COMMAND test_blinky)
 
-set_tests_properties(test_wire test_client test_stm32_hal test_stm32_hal_stubs test_cubemx test_blinky
+set_tests_properties(test_wire test_client test_stm32_hal test_stm32_hal_stubs test_uart test_pwm_adc test_cubemx test_blinky
                      PROPERTIES TIMEOUT 30)

@@ -1,6 +1,6 @@
 [package]
 name = "prebench"
-version = "0.1.3"
+version = "0.2.0"
 description = "Prebench — simulateur de cartes de développement"
 authors = ["Mathis Rudkiewicz"]
 license = "MIT"
@@ -61,6 +61,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    # QueryThreadCycleTime : budget des modèles en temps CPU (platform/windows.rs).
+    "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

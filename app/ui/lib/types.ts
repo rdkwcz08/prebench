@@ -26,8 +26,20 @@ export interface Manifest {
   category?: string;
   view: { width: number; height: number };
   pins: { name: string; label?: string; role: PinRole; x: number; y: number }[];
-  params?: Record<string, { type: string; label?: string; values?: string[]; default?: unknown }>;
-  controls?: { id: string; type: string; label: string }[];
+  params?: Record<string, ParamDef>;
+  controls?: { id: string; type: string; label: string; min?: number; max?: number; step?: number; default?: unknown }[];
+}
+
+/** Paramètre déclaré dans un manifeste (manifest.schema.json, $defs.param). */
+export interface ParamDef {
+  type: 'integer' | 'number' | 'string' | 'boolean' | 'enum';
+  label?: string;
+  values?: (string | number)[];
+  default?: unknown;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
 }
 
 /** Fil de prebench.toml ; extrémité « board.CN5:6 » ou « led1.A ». */
@@ -136,7 +148,25 @@ export interface ProjectView {
   layout: Layout | null;
   pins: Record<string, PinDef>;
   power: Record<string, number>;
+  /** Liaisons des composants intégrés : id -> broche -> signal (LD2.A -> PA5). */
+  onboard_wires: Record<string, Record<string, string>>;
   checks: Check[];
+}
+
+/** Configuration d'une broche par le firmware (« sim:pins », instantané). */
+export interface PinConfig {
+  /** 0 entrée, 1 sortie push-pull, 2 sortie drain ouvert, 3 et 4 alternative, 5 analogique, 6 désactivée. */
+  mode: number;
+  /** 0 aucune, 1 pull-up, 2 pull-down. */
+  pull: number;
+  /** Fonction alternative (« uart2:TX », « AF7 ») ; null : GPIO. */
+  function: string | null;
+  /** Période entre deux fronts montants écrits par le firmware, en µs. */
+  period_us: number | null;
+  /** Sortie PWM active (étape 8) : fréquence et rapport cyclique de 0 à 1. */
+  pwm?: { freq_hz: number; duty: number } | null;
+  /** Entrée analogique lue par l'ADC (étape 8) : tension, valeur brute et maximum. */
+  adc?: { volts: number; raw: number; max: number } | null;
 }
 
 /* --- Événements du cœur --- */
@@ -155,7 +185,9 @@ export type SimState =
   /** Débogage : en attente du firmware lancé par VS Code. */
   | 'debug-wait'
   /** Débogage : firmware figé par le débogueur. */
-  | 'breakpoint';
+  | 'breakpoint'
+  /** Alimentation de la paillasse coupée : firmware arrêté, composants gardés. */
+  | 'off';
 
 export interface StatusEvent {
   state: SimState;

@@ -4,7 +4,7 @@
 
 Prebench est une application de bureau, locale et hors ligne. Elle simule une carte de développement et les composants câblés dessus (LED, boutons, potentiomètres, écrans I2C/SPI…) sur une paillasse virtuelle. Tu gardes ton éditeur habituel : Prebench surveille le dossier du projet, recompile le firmware pour ton ordinateur à chaque sauvegarde et le relance aussitôt.
 
-> **État : développement initial (0.x).** Les contrats de la version 1 sont écrits ; l'application n'est pas encore utilisable.
+> **État : aperçu technique (0.x).** La version 0.2.0 simule un projet STM32 HAL sur Nucleo-F401RE : GPIO et interruptions, UART, PWM des timers et ADC. I2C, SPI, écrans et ESP32 arrivent ensuite (feuille de route : `docs/cahier-des-charges.md`, section 14).
 
 ## Principe
 
@@ -85,6 +85,17 @@ Au démarrage, Prebench vérifie ces prérequis : s'il en manque un, un bandeau 
 
 Le firmware est compilé dans le cache de Prebench, jamais dans le dossier du projet : `~/Library/Caches/dev.prebench.app/builds` (macOS), `%LOCALAPPDATA%\dev.prebench.app\builds` (Windows). Une erreur de compilation garde ce build, pour que la correction recompile seulement le fichier modifié. Ce dossier peut être supprimé à tout moment.
 
+## Ce que simule la version 0.2.0
+
+| Domaine | Simulé |
+| --- | --- |
+| HAL STM32 | GPIO et EXTI, `HAL_Delay` / `HAL_GetTick`, UART (bloquante, interruption, DMA), PWM des timers (rapport cyclique et fréquence, déduite de la configuration d'horloge), ADC (résolution, alignement, mode scan, interruption) ; le reste compile et avertit « non simulé » |
+| Composants | LED, LED RGB (anode ou cathode commune), bouton, potentiomètre, servomoteur, buzzer (indication visuelle et fréquence ; le son viendra avec l'audio) |
+| Paillasse | Câblage, réseau logique (haut, bas, tiré, flottant, conflit), vérification du câblage, inspecteur (mode, fonction, niveau, période, rapport cyclique, tension et valeur ADC), reset et coupure d'alimentation |
+| Outils | Moniteur série et traceur, débogage dans VS Code, garde-fous CPU et mémoire |
+
+Exemples prêts à ouvrir dans `tests/` : `pwm-fade` (fondu de LD2 en PWM, comme dans CubeMX), `pot-servo` (un potentiomètre commande un servomoteur), `uart-echo` (moniteur série et traceur), `cubemx-nucleo-f401re` (projet CubeMX non modifié).
+
 ## Déboguer le firmware
 
 Le firmware se débogue dans VS Code, avec des points d'arrêt dans ton code C ; Prebench affiche la paillasse.
@@ -156,6 +167,7 @@ ctest --test-dir build-libvmcu --output-on-failure
 - [Interface des composants](components/component-api.d.ts) et [schéma des manifestes](components/manifest.schema.json)
 - [Format des cartes](boards/board.schema.json) et [format de `prebench.toml`](docs/prebench.schema.json)
 - [Cahier des charges](docs/cahier-des-charges.md)
+- Mesurer la consommation de Prebench (CPU, RAM) : projet `tests/budget`, scripts `mesure.sh` (macOS) et `mesure.ps1` (Windows)
 
 ## Contribuer
 

@@ -18,6 +18,9 @@ void prebench_exti_call_handler(IRQn_Type irqn);
 /** Lignes EXTI en attente servies par une IRQ (masque de bits). */
 uint32_t prebench_exti_lines_of(IRQn_Type irqn);
 
+/** Horloge des timers d'un bus (APB2 : TIM1, TIM9-11 ; APB1 : les autres), en Hz. */
+uint32_t prebench_tim_clock_hz(bool apb2);
+
 /** Avertit une fois « <fonction> non simulé ». */
 #define PREBENCH_UNSIMULATED() vmcu_warn_unsimulated(__func__)
 

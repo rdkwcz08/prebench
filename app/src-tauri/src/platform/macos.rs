@@ -345,3 +345,22 @@ pub fn bundle_debug_symbols(program: &std::path::Path) -> std::io::Result<()> {
     let _ = program;
     Ok(())
 }
+
+/// Temps CPU consommé par le fil appelant, en ns (CLOCK_THREAD_CPUTIME_ID) :
+/// budget des modèles de composants (section 8.1), indépendant de la charge
+/// de la machine. Repli sur l'horloge monotone si l'appel échoue.
+pub fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY : `ts` est une structure valide, écrite par clock_gettime.
+    let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0;
+    if !ok {
+        return super::monotonic_ns();
+    }
+    u64::try_from(ts.tv_sec)
+        .unwrap_or(0)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::try_from(ts.tv_nsec).unwrap_or(0))
+}

@@ -1,11 +1,12 @@
 /*
- * libvmcu/tests/test_stm32_hal_stubs.c — Modules non simulés en phase 1 (règle 16.2.10).
+ * libvmcu/tests/test_stm32_hal_stubs.c — Code CubeMX de tous les modules (règle 16.2.10).
  *
  * Les fonctions MX_*_Init et HAL_*_MspInit ci-dessous reprennent le code que
  * STM32CubeMX génère pour TIM1 (PWM complémentaire), TIM2 (PWM), ADC1, I2C1,
  * SPI1 et USART2 avec réception DMA. Le test vérifie qu'elles compilent, que
  * les MspInit du projet sont appelés, qu'aucun Init n'échoue, et que les
- * transferts se comportent comme décrit dans stm32_hal_periph.c.
+ * modules non simulés (DMA, I2C, SPI) se comportent comme décrit dans
+ * stm32_hal_periph.c. PWM et ADC en détail : test_pwm_adc.c.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,30 @@ void Error_Handler(void)
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
 /* --- Code de style CubeMX ------------------------------------------------------------- */
+
+/* SystemClock_Config de CubeMX pour la Nucleo-F401RE : HSI 16 MHz, PLL à 84 MHz,
+ * APB1 divisé par 2 (timers à 84 MHz), APB2 non divisé. */
+static void clock_84mhz(void)
+{
+    RCC_OscInitTypeDef osc = {0};
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    osc.HSIState = RCC_HSI_ON;
+    osc.PLL.PLLState = RCC_PLL_ON;
+    osc.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    osc.PLL.PLLM = 16;
+    osc.PLL.PLLN = 336;
+    osc.PLL.PLLP = RCC_PLLP_DIV4;
+    osc.PLL.PLLQ = 7;
+    CHECK(HAL_RCC_OscConfig(&osc) == HAL_OK);
+    RCC_ClkInitTypeDef clk = {0};
+    clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clk.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    clk.APB1CLKDivider = RCC_HCLK_DIV2;
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;
+    CHECK(HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2) == HAL_OK);
+}
+
 
 static void MX_DMA_Init(void)
 {
@@ -277,6 +302,7 @@ int main(void)
     fake_app_run(fa);
 
     CHECK(HAL_Init() == HAL_OK);
+    clock_84mhz(); /* SystemClock_Config */
     MX_DMA_Init();
     MX_TIM1_Init();
     MX_TIM2_Init();
@@ -297,17 +323,21 @@ int main(void)
     CHECK(fake_app_wait(fa, VMCU_MSG_GPIO_CONFIG, 0, 5, 1, 1000, &f)); /* PA5, TIM2_CH1 */
     CHECK(f.data[2] == VMCU_GPIO_MODE_ALTERNATE_PP && f.data[5] == 1);
 
-    /* PWM : la valeur de comparaison est mémorisée */
+    /* PWM (simulée) : 84 MHz / (84 × 1000) = 1 kHz, rapport 250 / 1000 */
     CHECK(HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1) == HAL_OK);
     CHECK(__HAL_TIM_GET_COMPARE(&htim2, TIM_CHANNEL_1) == 250U);
+    CHECK(fake_app_wait(fa, VMCU_MSG_PWM_CONFIG, 2, 1, 1, 1000, &f));
+    CHECK(vmcu_wire_get_u32(f.data + 4) == 1000U);
     __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 500);
     CHECK(__HAL_TIM_GET_COMPARE(&htim2, TIM_CHANNEL_1) == 500U);
     CHECK(__HAL_TIM_GET_AUTORELOAD(&htim2) == 999U);
+    CHECK(fake_app_wait(fa, VMCU_MSG_PWM_DUTY, 2, 1, 1, 1000, &f));
 
-    /* ADC : conversion immédiate, valeur 0 */
+    /* ADC (simulé) : conversion immédiate, aucune tension reçue : 0 */
     CHECK(HAL_ADC_Start(&hadc1) == HAL_OK);
     CHECK(HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK);
     CHECK(HAL_ADC_GetValue(&hadc1) == 0U);
+    CHECK(fake_app_wait(fa, VMCU_MSG_ADC_CONFIG, 1, 0, 1, 1000, &f));
 
     /* I2C : bus sans composant */
     uint8_t buf[4] = { 1, 2, 3, 4 };
@@ -331,8 +361,8 @@ int main(void)
     CHECK(HAL_UART_DMAStop(&huart2) == HAL_OK);
     CHECK(HAL_UART_GetState(&huart2) == HAL_UART_STATE_READY);
 
-    /* Chaque fonction non simulée a averti */
-    CHECK(fake_app_wait(fa, VMCU_MSG_WARN, -1, -1, 10, 1000, &f));
+    /* Chaque fonction non simulée a averti (DMA, I2C, SPI) */
+    CHECK(fake_app_wait(fa, VMCU_MSG_WARN, -1, -1, 5, 1000, &f));
 
     vmcu_shutdown();
     fake_app_stop(fa);

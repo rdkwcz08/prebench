@@ -121,6 +121,8 @@ pub struct ProjectView {
     pins: BTreeMap<String, crate::core::board::PinDef>,
     /// Alimentations : nom -> tension.
     power: BTreeMap<String, f64>,
+    /// Liaisons des composants intégrés : id -> broche -> signal (LD2.A -> PA5).
+    onboard_wires: BTreeMap<String, BTreeMap<String, String>>,
     /// Validations du câblage (section 9.2).
     checks: Vec<crate::core::checks::Check>,
 }
@@ -289,6 +291,12 @@ fn project_view(root: &Path, dir: &Path, path: String) -> CoreResult<ProjectView
         wires: r.project.wires,
         notes: r.project.notes,
         layout: r.board.layout,
+        onboard_wires: r
+            .board
+            .onboard
+            .iter()
+            .map(|(id, o)| (id.clone(), o.wires.clone()))
+            .collect(),
         pins: r.board.pins,
         power: r.board.power,
         checks,
@@ -441,8 +449,16 @@ pub(crate) async fn save_bench_in<R: Runtime>(
     if let (Ok(mut own), Some(t)) = (state.own_write.lock(), written) {
         *own = Some((dir.join("prebench.toml"), t));
     }
-    let checks = resolve(&root, &dir)
-        .map(|r| wiring_checks(&r))
+    let resolved = resolve(&root, &dir).ok();
+    let checks = resolved.as_ref().map(wiring_checks).unwrap_or_default();
+    // Paramètres complétés par les défauts : comparés à ceux des modèles en cours.
+    let params = resolved
+        .map(|r| {
+            instance_specs(&r)
+                .into_iter()
+                .map(|s| (s.id, s.params))
+                .collect()
+        })
         .unwrap_or_default();
     let slot = state.sim.lock().await;
     let mut pending = Vec::new();
@@ -453,6 +469,7 @@ pub(crate) async fn save_bench_in<R: Runtime>(
             .map(|c| c.id.clone())
             .collect();
         sim.send(SimMsg::SetWiring(wires)).await?;
+        sim.send(SimMsg::SetParams(params)).await?;
     }
     Ok(SaveView { pending, checks })
 }
@@ -1051,9 +1068,42 @@ pub async fn stop_simulation(state: State<'_, AppState>) -> CoreResult<()> {
     }
 }
 
+/// Reset (bouton de la barre d'outils, touche R) : le firmware redémarre, la
+/// paillasse garde son état. Refusé en débogage, comme la coupure.
 #[tauri::command]
 pub async fn reset_simulation(state: State<'_, AppState>) -> CoreResult<()> {
+    if state
+        .sim
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|s| s.debug.is_some())
+    {
+        return Err(CoreError::Open(
+            "reset indisponible pendant le débogage : relancez la session dans VS Code".into(),
+        ));
+    }
     send(&state, SimMsg::Reset).await
+}
+
+/// Interrupteur d'alimentation de la paillasse (section 10.4) : `false`
+/// coupe (firmware arrêté, alimentations retombées), `true` rétablit (firmware
+/// relancé depuis zéro). Refusé en débogage : le firmware appartient au
+/// débogueur, qui seul peut le relancer.
+#[tauri::command]
+pub async fn set_power(state: State<'_, AppState>, on: bool) -> CoreResult<()> {
+    if state
+        .sim
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|s| s.debug.is_some())
+    {
+        return Err(CoreError::Open(
+            "coupure indisponible pendant le débogage : relancez la session dans VS Code".into(),
+        ));
+    }
+    send(&state, SimMsg::Power(on)).await
 }
 
 /// Pause de la simulation (barre d'outils, touche Espace) : horloge du firmware gelée.

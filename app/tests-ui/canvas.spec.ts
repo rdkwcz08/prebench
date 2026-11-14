@@ -25,7 +25,7 @@ async function center(page: Page, selector: string): Promise<[number, number]> {
 
 async function addLed(bench: Bench): Promise<void> {
   await bench.page.getByRole('button', { name: 'Ajouter un composant' }).click();
-  await bench.page.getByRole('menuitem', { name: /LED/ }).click();
+  await bench.page.getByRole('menuitem', { name: /^LED\s+led$/ }).click();
   await expect.poll(async () => (await bench.calls('save_bench')).length).toBeGreaterThan(0);
 }
 

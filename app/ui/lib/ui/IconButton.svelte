@@ -3,7 +3,13 @@
   Infobulle obligatoire : libellé, puis raccourci clavier s'il existe. Elle
   apparaît au survol ou au focus clavier, sans animation (section 6) ; le
   libellé est aussi le nom accessible du bouton.
+  Indisponible avec une raison (`reason`) : le bouton reste survolable et
+  focalisable (aria-disabled) pour que l'infobulle dise pourquoi.
 -->
+<script lang="ts" module>
+  let next = 0;
+</script>
+
 <script lang="ts">
   import Icon, { type IconName } from './Icon.svelte';
 
@@ -13,6 +19,7 @@
     shortcut,
     pressed,
     disabled = false,
+    reason,
     align = 'center',
     onclick,
   }: {
@@ -23,18 +30,36 @@
     /** Bouton bascule : état enfoncé (aria-pressed). */
     pressed?: boolean;
     disabled?: boolean;
+    /** Indisponible : phrase affichée dans l'infobulle (« Indisponible pendant le débogage… »). */
+    reason?: string;
     /** Alignement de l'infobulle : « end » près du bord droit de la fenêtre. */
     align?: 'start' | 'center' | 'end';
     onclick?: (e: MouseEvent) => void;
   } = $props();
+
+  const tipId = `tip-${++next}`;
+  const blocked = $derived(reason !== undefined);
 </script>
 
 <span class="wrap">
-  <button class="icon-btn" class:on={pressed === true} aria-label={label} aria-pressed={pressed} {disabled} {onclick}>
+  <button
+    class="icon-btn"
+    class:on={pressed === true}
+    class:blocked
+    aria-label={label}
+    aria-pressed={pressed}
+    aria-disabled={blocked || undefined}
+    aria-describedby={blocked ? tipId : undefined}
+    disabled={disabled && !blocked}
+    onclick={(e) => {
+      if (!blocked) onclick?.(e);
+    }}
+  >
     <Icon name={icon} />
   </button>
-  <span class="tip {align}" role="tooltip">
-    {label}{#if shortcut}<kbd>{shortcut}</kbd>{/if}
+  <span class="tip {align}" role="tooltip" id={tipId}>
+    <span class="row">{label}{#if shortcut}<kbd>{shortcut}</kbd>{/if}</span>
+    {#if reason}<span class="why">{reason}</span>{/if}
   </span>
 </span>
 
@@ -56,13 +81,14 @@
     background: transparent;
     cursor: pointer;
   }
-  .icon-btn:hover:not(:disabled) {
+  .icon-btn:hover:not(:disabled, .blocked) {
     border-color: var(--pb-line);
   }
   .icon-btn.on {
     background: color-mix(in srgb, var(--pb-accent) 18%, transparent);
   }
-  .icon-btn:disabled {
+  .icon-btn:disabled,
+  .icon-btn.blocked {
     opacity: 0.45;
     cursor: default;
   }
@@ -71,8 +97,8 @@
     top: calc(100% + 4px);
     z-index: 30;
     display: flex;
-    gap: 8px;
-    align-items: center;
+    flex-direction: column;
+    gap: 2px;
     padding: 4px 8px;
     border: 1px solid var(--pb-line);
     border-radius: 6px;
@@ -102,6 +128,16 @@
   }
   .icon-btn:focus-visible + .tip {
     transition-delay: 0s;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .why {
+    width: 240px;
+    color: var(--pb-text-quiet);
+    white-space: normal;
   }
   kbd {
     padding: 0 4px;

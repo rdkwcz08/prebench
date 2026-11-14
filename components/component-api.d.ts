@@ -8,7 +8,7 @@
  *
  * Le modèle s'exécute dans QuickJS, au cœur de Prebench (un runtime par
  * instance) : aucun accès au disque, au réseau ni au système (règle 16.2.8).
- * Limites : 16 Mo, pile 256 Ko, 5 ms par appel, 50 ms au chargement. Il ne voit que les événements qui concernent
+ * Limites : 16 Mo, pile 256 Ko, 5 ms de temps CPU par appel, 50 ms au chargement. Il ne voit que les événements qui concernent
  * ses broches et ses bus. Toutes les méthodes sont synchrones.
  *
  * Évolution : les ajouts compatibles (nouvelle méthode optionnelle, nouveau
@@ -57,6 +57,12 @@ export interface PinState {
   readonly level: NetLevel;
   /** Présent uniquement si le net est piloté par une sortie PWM active. */
   readonly pwm?: PwmInfo;
+  /**
+   * Tension du net en volts, quand elle est connue : tension fixée par un
+   * composant (setVoltage), sinon alimentation de la carte (3V3, 5V, GND).
+   * Absente pour un net purement logique. Ajout compatible de la v1 (étape 8).
+   */
+  readonly volts?: number;
 }
 
 /** Niveau imposé par le composant sur l'une de ses broches. 'z' = haute impédance. */
@@ -123,7 +129,7 @@ export interface ComponentContext<P extends object> {
   readonly apiVersion: ComponentApiVersion;
   /** Identifiant d'instance dans prebench.toml (ex. "led1") ou de la carte (ex. "LD2"). */
   readonly id: string;
-  /** Paramètres courants, validés contre le manifeste. */
+  /** Paramètres courants, validés contre le manifeste ; suivent onParamsChange. */
   readonly params: Readonly<P>;
   /** Tension logique de la carte, en volts (3,3 pour la Nucleo). */
   readonly logicVoltage: number;
@@ -134,7 +140,10 @@ export interface ComponentContext<P extends object> {
   drive(pin: string, level: DriveLevel): void;
   /** Ajoute ou retire une résistance de tirage sur une broche. */
   pull(pin: string, kind: PullKind): void;
-  /** Fixe la tension d'une broche analogique (lue par l'ADC), en volts. */
+  /**
+   * Fixe la tension d'une broche analogique (lue par l'ADC), en volts. Une
+   * valeur non finie (NaN) retire la tension : le net redevient logique.
+   */
   setVoltage(pin: string, volts: number): void;
   /** Émet des octets sur l'interface UART `iface` du manifeste (défaut : la première). */
   uartWrite(bytes: Uint8Array, iface?: string): void;

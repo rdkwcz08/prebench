@@ -6,6 +6,26 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.2.0] - 2026-11-14
+
+**Aperçu technique** : fin du socle de la version 1 pour la Nucleo-F401RE. Après l'UART de la 0.1.3, le firmware pilote des PWM et lit des tensions sur l'ADC ; l'inspecteur montre la configuration et l'état de chaque broche, fil et composant.
+
+### Ajouté
+
+- **Inspecteur** en trois sections (Configuration, État, Net) pour une broche, un fil et un composant ; **Réinitialiser** garde la paillasse, **Couper l'alimentation** arrête le firmware et le relance depuis zéro à la remise sous tension.
+- **PWM** des timers STM32 (HAL TIM) : fréquence et rapport cyclique, jamais les fronts ; une PWM à 20 kHz ne charge ni le canal ni le CPU. La LED suit le rapport cyclique (fondu de LD2).
+- **ADC** (HAL ADC) : tension de la broche convertie selon la résolution et la tension de référence de la carte ; résolution, alignement, mode scan, conversion par interruption. Le DMA compile et avertit « non simulé ».
+- Composants **Potentiomètre**, **Servomoteur** (angle selon la largeur d'impulsion, avertissement hors de 1 à 2 ms ou de 50 Hz), **Buzzer** (passif ou actif, fréquence affichée ; le son viendra avec l'audio) et **LED RGB** (anode ou cathode commune).
+- Inspecteur : fréquence, rapport cyclique, tension et valeur ADC ; paramètres des composants modifiables en mode Édition.
+- Exemples `tests/pwm-fade` (fondu de LD2 par TIM2_CH1, comme dans CubeMX) et `tests/pot-servo` (un potentiomètre commande un servo).
+- Projet `tests/budget` et scripts `mesure.sh` (macOS) et `mesure.ps1` (Windows) pour mesurer la consommation de Prebench (CPU, RAM).
+
+### Modifié
+
+- Les fréquences d'horloge (`HAL_RCC_GetSysClockFreq`, `SystemCoreClock`, horloge des timers) sont déduites de la configuration passée à `HAL_RCC_OscConfig` et `HAL_RCC_ClockConfig`, comme sur la puce ; sans `SystemClock_Config`, le firmware tourne à 16 MHz (HSI), comme la puce au démarrage. Le temps (`HAL_Delay`, `HAL_GetTick`) n'en dépend pas.
+- Composants : le budget de 5 ms par appel (et de 50 ms au chargement) se compte en temps de calcul, et non en durée écoulée : sur une machine chargée, un composant n'est plus arrêté à tort.
+- Fichier de carte : tension de référence de l'ADC (`adc_vref`) ; composants : tension du net (`PinState.volts`). Ajouts compatibles des formats v1.
+
 ## [0.1.3] - 2026-11-13
 
 **Aperçu technique** : la paillasse devient éditable (composants, fils, notes), Prebench vérifie le câblage et affiche les niveaux logiques, et l'UART du firmware arrive avec un moniteur série et un traceur.

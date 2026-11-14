@@ -35,6 +35,9 @@
   /** Touche de commande affichée dans les infobulles : ⌘ sur Mac, Ctrl ailleurs. */
   const MOD = /Mac/.test(navigator.userAgent) ? '⌘' : 'Ctrl+';
 
+  /** Reset et coupure pendant le débogage : le processus appartient au débogueur. */
+  const DEBUG_REASON = `Indisponible pendant le débogage : le firmware est lancé par VS Code. Relancez la session de débogage (${MOD === '⌘' ? '⇧⌘F5' : 'Ctrl+Maj+F5'}) pour repartir de zéro.`;
+
   /** Modèle de « Créer mon premier projet ». */
   const FIRST_TEMPLATE = 'blinky-stm32-hal';
 
@@ -46,6 +49,7 @@
     paused: 'En pause',
     'debug-wait': 'En attente du débogueur',
     breakpoint: "Arrêté sur un point d'arrêt",
+    off: 'Alimentation coupée',
     stopped: 'Arrêtée',
     error: 'Erreur',
   };
@@ -69,8 +73,9 @@
 
   /** Simulation active : en compilation, au démarrage, en cours ou en pause. */
   const running = $derived(
-    ['building', 'starting', 'running', 'paused', 'debug-wait', 'breakpoint'].includes(bench.status.state),
+    ['building', 'starting', 'running', 'paused', 'debug-wait', 'breakpoint', 'off'].includes(bench.status.state),
   );
+  const off = $derived(bench.status.state === 'off');
   const missingDebugTools = $derived(bench.debug?.tools.filter((t) => !t.present) ?? []);
   const live = $derived(bench.status.state === 'running' || bench.status.state === 'paused');
   const tools = $derived(bench.prerequisites?.tools ?? []);
@@ -192,7 +197,7 @@
       e.preventDefault();
       togglePause();
     } else if (e.key === 'r' || e.key === 'R') {
-      if (live) void bench.reset();
+      if (live && !bench.debugging) void bench.reset();
     }
   }
 </script>
@@ -216,7 +221,22 @@
     {#if !running}
       <Button icon="bug" disabled={!bench.project} title="Déboguer dans VS Code" onclick={() => bench.startDebug()}>Déboguer</Button>
     {/if}
-    <IconButton icon="reset" label="Réinitialiser" shortcut="R" disabled={!live} onclick={() => bench.reset()} />
+    <IconButton
+      icon="reset"
+      label="Réinitialiser"
+      shortcut="R"
+      disabled={!live}
+      reason={bench.debugging ? DEBUG_REASON : undefined}
+      onclick={() => bench.reset()}
+    />
+    <IconButton
+      icon="power"
+      label={off ? "Rétablir l'alimentation" : "Couper l'alimentation"}
+      pressed={off}
+      disabled={!live && !off}
+      reason={bench.debugging ? DEBUG_REASON : undefined}
+      onclick={() => bench.setPower(off)}
+    />
     <IconButton icon="stop" label="Arrêter la simulation" disabled={!running} onclick={() => bench.stop()} />
     <span class="sep"></span>
     <div class="segmented" role="group" aria-label="Mode">

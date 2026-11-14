@@ -2,7 +2,10 @@
 //
 // Chaque câble relie deux nœuds ; les nœuds reliés forment un net. L'état d'un
 // net se calcule à partir des sorties qui le pilotent et des résistances de
-// tirage, sans aucune simulation analogique.
+// tirage, sans aucune simulation analogique. Deux informations s'y ajoutent
+// (étape 8) : la PWM d'une sortie (fréquence et rapport cyclique, jamais les
+// fronts) et une tension quand elle est connue (alimentation de la carte, ou
+// composant comme un potentiomètre), lue par l'ADC.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -27,11 +30,45 @@ impl Level {
     }
 }
 
+/// Signal PWM : fréquence (Hz) et rapport cyclique (0..65535 = 0..100 %).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pwm {
+    pub freq_hz: u32,
+    pub duty: u16,
+}
+
+impl Pwm {
+    /// Rapport cyclique de 0 à 1.
+    pub fn ratio(self) -> f64 {
+        f64::from(self.duty) / 65535.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drive {
     High,
     Low,
     Z,
+    /// Sortie PWM active : niveau bas si le rapport cyclique est nul, haut sinon.
+    Pwm(Pwm),
+}
+
+/// État complet d'un net : niveau logique, PWM et tension connue.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetState {
+    pub level: Level,
+    pub pwm: Option<Pwm>,
+    pub volts: Option<f64>,
+}
+
+impl Default for NetState {
+    fn default() -> Self {
+        NetState {
+            level: Level::Floating,
+            pwm: None,
+            volts: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +99,11 @@ pub struct Network {
     parent: HashMap<Node, Node>,
     drives: HashMap<(Node, Source), Drive>,
     pulls: HashMap<(Node, Source), Pull>,
-    levels: HashMap<Node, Level>, // par racine de net
+    /// Tensions imposées : composant (potentiomètre) ou alimentation de la carte.
+    volts: HashMap<(Node, Source), f64>,
+    states: HashMap<Node, NetState>, // par racine de net
+    /// Tension logique de la carte : seuils de lecture d'une tension (70 % et 30 %).
+    logic_volts: Option<f64>,
 }
 
 impl Network {
@@ -75,6 +116,13 @@ impl Network {
             cur = p.clone();
         }
         cur
+    }
+
+    /// Seuils numériques d'un net dont seule une tension est connue
+    /// (curseur de potentiomètre) : haut au-dessus de 70 % de la tension
+    /// logique, bas sous 30 %, flottant (indéterminé) entre les deux.
+    pub fn set_logic_voltage(&mut self, volts: f64) {
+        self.logic_volts = Some(volts);
     }
 
     pub fn add_node(&mut self, node: Node) {
@@ -103,10 +151,30 @@ impl Network {
     }
 
     pub fn level(&self, node: &Node) -> Level {
-        self.levels
+        self.state(node).level
+    }
+
+    /// Niveau, PWM et tension du net d'un nœud.
+    pub fn state(&self, node: &Node) -> NetState {
+        self.states
             .get(&self.find(node))
             .copied()
-            .unwrap_or(Level::Floating)
+            .unwrap_or_default()
+    }
+
+    /// Fixe (Some) ou retire (None) une tension sur un nœud.
+    pub fn set_volts(&mut self, node: &Node, source: Source, volts: Option<f64>) -> Vec<Node> {
+        self.add_node(node.clone());
+        let key = (node.clone(), source);
+        match volts {
+            Some(v) if v.is_finite() => {
+                self.volts.insert(key, v);
+            }
+            _ => {
+                self.volts.remove(&key);
+            }
+        }
+        self.update(node)
     }
 
     pub fn set_drive(&mut self, node: &Node, source: Source, drive: Drive) -> Vec<Node> {
@@ -137,29 +205,44 @@ impl Network {
                 self.pulls.insert((node.clone(), *source), *pull);
             }
         }
+        for ((node, source), v) in &old.volts {
+            if *source != Source::Board {
+                self.add_node(node.clone());
+                self.volts.insert((node.clone(), *source), *v);
+            }
+        }
     }
 
     /// Recalcule tous les nets (après construction). Renvoie tous les nœuds.
     pub fn resolve_all(&mut self) -> Vec<Node> {
         let roots: BTreeSet<Node> = self.parent.keys().map(|n| self.find(n)).collect();
         for root in roots {
-            let level = self.compute(&root);
-            self.levels.insert(root, level);
+            let state = self.compute(&root);
+            self.states.insert(root, state);
         }
         self.parent.keys().cloned().collect()
+    }
+
+    /// Tension fixée par un composant sur un des nœuds (le premier dans l'ordre).
+    fn component_volts(&self, members: &[Node]) -> Option<f64> {
+        self.volts
+            .iter()
+            .filter(|((n, s), _)| *s == Source::Component && members.contains(n))
+            .min_by(|a, b| a.0 .0.cmp(&b.0 .0))
+            .map(|(_, v)| *v)
     }
 
     /// Recalcule le net du nœud ; renvoie ses membres si son état a changé.
     fn update(&mut self, node: &Node) -> Vec<Node> {
         let root = self.find(node);
-        let level = self.compute(&root);
-        if self.levels.insert(root, level) == Some(level) {
+        let state = self.compute(&root);
+        if self.states.insert(root, state) == Some(state) {
             return Vec::new();
         }
         self.members(node)
     }
 
-    fn compute(&self, root: &Node) -> Level {
+    fn compute(&self, root: &Node) -> NetState {
         let members: Vec<Node> = self
             .parent
             .keys()
@@ -167,10 +250,22 @@ impl Network {
             .cloned()
             .collect();
         let (mut high, mut low, mut up, mut down) = (false, false, false, false);
+        let mut pwm = None;
         for ((node, _), drive) in &self.drives {
             if members.contains(node) {
-                high |= *drive == Drive::High;
-                low |= *drive == Drive::Low;
+                match drive {
+                    Drive::High => high = true,
+                    Drive::Low => low = true,
+                    Drive::Pwm(p) => {
+                        pwm = Some(*p);
+                        if p.duty == 0 {
+                            low = true;
+                        } else {
+                            high = true;
+                        }
+                    }
+                    Drive::Z => {}
+                }
             }
         }
         for ((node, _), pull) in &self.pulls {
@@ -179,13 +274,40 @@ impl Network {
                 down |= *pull == Pull::Down;
             }
         }
-        match (high, low, up, down) {
+        let level = match (high, low, up, down) {
+            // Tension imposée par un composant, sans sortie numérique : seuils logiques.
+            (false, false, _, _) if self.component_volts(&members).is_some() => {
+                let v = self.component_volts(&members).unwrap_or(0.0);
+                match self.logic_volts {
+                    Some(l) if v >= 0.7 * l => Level::High,
+                    Some(l) if v <= 0.3 * l => Level::Low,
+                    _ => Level::Floating,
+                }
+            }
             (true, true, _, _) => Level::Conflict,
             (true, false, _, _) => Level::High,
             (false, true, _, _) => Level::Low,
             (false, false, true, false) => Level::PulledHigh,
             (false, false, false, true) => Level::PulledLow,
             _ => Level::Floating,
+        };
+        // Tension : celle d'un composant d'abord (dans un ordre stable), sinon
+        // celle d'une alimentation de la carte.
+        let mut sources: Vec<(&Node, Source, f64)> = self
+            .volts
+            .iter()
+            .filter(|((n, _), _)| members.contains(n))
+            .map(|((n, s), v)| (n, *s, *v))
+            .collect();
+        sources.sort_by(|a, b| {
+            (a.1 == Source::Board)
+                .cmp(&(b.1 == Source::Board))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        NetState {
+            level,
+            pwm: if level == Level::Conflict { None } else { pwm },
+            volts: sources.first().map(|s| s.2),
         }
     }
 }
@@ -249,6 +371,53 @@ mod tests {
         new.carry_over(&old);
         new.resolve_all();
         assert_eq!(new.level(&comp("led1", "A")), Level::High);
+    }
+
+    /// PWM : niveau haut sauf à 0 %, changement de rapport signalé même sans
+    /// changement de niveau ; tension d'un composant prioritaire sur l'alimentation.
+    #[test]
+    fn pwm_and_voltage() {
+        let mut net = Network::default();
+        net.connect(board("PA5"), comp("led", "A"));
+        net.connect(board("3V3"), comp("pot", "3"));
+        net.connect(board("PA0"), comp("pot", "W"));
+        net.resolve_all();
+        let half = Pwm {
+            freq_hz: 20_000,
+            duty: 32768,
+        };
+        net.set_drive(&board("PA5"), Source::Firmware, Drive::Pwm(half));
+        assert_eq!(net.level(&comp("led", "A")), Level::High);
+        assert_eq!(net.state(&comp("led", "A")).pwm, Some(half));
+        let quarter = Pwm {
+            duty: 16384,
+            ..half
+        };
+        let changed = net.set_drive(&board("PA5"), Source::Firmware, Drive::Pwm(quarter));
+        assert!(
+            changed.contains(&comp("led", "A")),
+            "rapport changé : signalé"
+        );
+        net.set_drive(
+            &board("PA5"),
+            Source::Firmware,
+            Drive::Pwm(Pwm { duty: 0, ..half }),
+        );
+        assert_eq!(net.level(&board("PA5")), Level::Low);
+
+        net.set_volts(&board("3V3"), Source::Board, Some(3.3));
+        assert_eq!(net.state(&comp("pot", "3")).volts, Some(3.3));
+        assert!(!net
+            .set_volts(&comp("pot", "W"), Source::Component, Some(1.65))
+            .is_empty());
+        assert_eq!(net.state(&board("PA0")).volts, Some(1.65));
+        net.set_logic_voltage(3.3);
+        net.set_volts(&comp("pot", "W"), Source::Component, Some(3.0));
+        assert_eq!(net.level(&board("PA0")), Level::High, "au-dessus de 70 %");
+        net.set_volts(&comp("pot", "W"), Source::Component, Some(0.5));
+        assert_eq!(net.level(&board("PA0")), Level::Low, "sous 30 %");
+        net.set_volts(&comp("pot", "W"), Source::Component, None);
+        assert_eq!(net.state(&board("PA0")).volts, None);
     }
 
     #[test]

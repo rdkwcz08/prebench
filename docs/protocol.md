@@ -182,10 +182,14 @@ libvmcu accumule les trames dans un tampon d'émission borné de 64 Kio. Elle vi
 
 1. avant toute trame `SYNC`, qui part dans le même lot ;
 2. quand le tampon est plein ;
-3. à l'entrée de `vmcu_delay_ms` / `vmcu_delay_us` ;
+3. à l'entrée d'un délai d'au moins 1 ms (`vmcu_delay_ms`, `vmcu_delay_us`) ; un délai plus court laisse le lot au point 4, pour que les consignes d'une boucle rapide se regroupent ;
 4. au plus **1 ms** après la première trame non envoyée. Le fil E/S n'arme ce minuteur que si le tampon n'est pas vide : aucune activité au repos.
 
 Une transaction de bus = un message : une écriture SPI entière, pas un octet (section 6.1 du cahier des charges).
+
+PWM : seuls la fréquence (`PWM_CONFIG`) et le rapport cyclique (`PWM_DUTY`) transitent, jamais les fronts ; une PWM qui tourne n'émet rien. Tant qu'un `PWM_DUTY` attend dans le lot, une nouvelle consigne du même canal remplace sa charge utile au lieu d'ajouter une trame : le canal porte au plus une consigne par canal PWM et par lot, quelle que soit la cadence du firmware. Une consigne identique à la précédente n'est pas renvoyée.
+
+ADC : le cœur envoie `ADC_VALUE` pour chaque canal de la carte pendant la poignée de main (avant `WELCOME`), puis à chaque changement de la valeur brute. Valeur brute = tension ÷ `adc_vref` × (2^`adc_bits` − 1), bornée (fichier de carte).
 
 Côté app, le cœur regroupe de la même façon ses trames vers le firmware à chaque tour de sa boucle d'événements.
 

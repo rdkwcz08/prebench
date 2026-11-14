@@ -61,6 +61,7 @@ static struct {
     uint8_t            send_buf[SEND_BUF_SIZE];
     size_t             send_len;
     uint64_t           first_pending_ns;
+    uint64_t           batch;     /* numéro du lot en cours, augmenté à chaque envoi */
     uint32_t           seq;
     bool               flusher_stop;
 
@@ -112,14 +113,16 @@ static void flush_locked(void)
     }
     size_t len = g.send_len;
     g.send_len = 0;
+    g.batch++; /* les trames remplaçables du lot sont parties */
     if (vmcu_plat_write_all(g.conn, g.send_buf, len) != 0 && !atomic_load(&g.closing)) {
         die(VMCU_EXIT_DISCONNECTED, "connexion à l'app perdue, arrêt du firmware");
     }
 }
 
-/* Ajoute une trame au lot ; si slot != NULL, la trame est SYNC et le slot est armé. */
+/* Ajoute une trame au lot ; si slot != NULL, la trame est SYNC et le slot est armé.
+ * latest != NULL : trame remplaçable (vmcu__send_latest). */
 static vmcu_status_t send_frame(uint16_t type, uint16_t flags, const uint8_t *payload,
-                                size_t len, sync_slot_t *slot)
+                                size_t len, sync_slot_t *slot, vmcu__latest_t *latest)
 {
     if (len > VMCU_WIRE_MAX_PAYLOAD) {
         return VMCU_ERR_INVALID_ARG;
@@ -128,6 +131,13 @@ static vmcu_status_t send_frame(uint16_t type, uint16_t flags, const uint8_t *pa
         return VMCU_ERR_DISCONNECTED;
     }
     vmcu_plat_mutex_lock(g.send_mx);
+    if (latest != NULL && latest->batch == g.batch + 1u && latest->len == len) {
+        /* La trame précédente de même clé n'est pas encore partie : sa charge
+         * utile est remplacée par la nouvelle valeur (dernière valeur gagnante). */
+        memcpy(g.send_buf + latest->offset, payload, len);
+        vmcu_plat_mutex_unlock(g.send_mx);
+        return VMCU_OK;
+    }
     if (g.send_len + VMCU_WIRE_HEADER_SIZE + len > SEND_BUF_SIZE) {
         flush_locked();
     }
@@ -142,6 +152,11 @@ static vmcu_status_t send_frame(uint16_t type, uint16_t flags, const uint8_t *pa
     };
     vmcu_wire_encode_header(g.send_buf + g.send_len, &h);
     g.send_len += VMCU_WIRE_HEADER_SIZE;
+    if (latest != NULL) {
+        latest->batch = g.batch + 1u; /* 0 (jamais envoyée) ne correspond à aucun lot */
+        latest->offset = g.send_len;
+        latest->len = len;
+    }
     if (len > 0) {
         memcpy(g.send_buf + g.send_len, payload, len);
         g.send_len += len;
@@ -162,7 +177,23 @@ static vmcu_status_t send_frame(uint16_t type, uint16_t flags, const uint8_t *pa
 
 vmcu_status_t vmcu__send(uint16_t type, const uint8_t *payload, size_t len)
 {
-    return send_frame(type, 0, payload, len, NULL);
+    return send_frame(type, 0, payload, len, NULL, NULL);
+}
+
+vmcu_status_t vmcu__send_latest(uint16_t type, const uint8_t *payload, size_t len,
+                                vmcu__latest_t *latest)
+{
+    return send_frame(type, 0, payload, len, NULL, latest);
+}
+
+void vmcu__forget_latest(vmcu__latest_t *latest)
+{
+    if (g.send_mx == NULL) {
+        return;
+    }
+    vmcu_plat_mutex_lock(g.send_mx);
+    latest->batch = 0;
+    vmcu_plat_mutex_unlock(g.send_mx);
 }
 
 void vmcu__flush(void)
@@ -223,7 +254,7 @@ vmcu_status_t vmcu__request(uint16_t type, const uint8_t *payload, size_t len,
     slot->cap = reply_cap;
     vmcu_plat_mutex_unlock(g.sync_mx);
 
-    vmcu_status_t st = send_frame(type, VMCU_FLAG_SYNC, payload, len, slot);
+    vmcu_status_t st = send_frame(type, VMCU_FLAG_SYNC, payload, len, slot, NULL);
     if (st != VMCU_OK) {
         vmcu_plat_mutex_lock(g.sync_mx);
         slot->in_use = false;
@@ -457,6 +488,15 @@ static void dispatch(const vmcu_frame_header_t *h, const uint8_t *payload)
         }
         break;
     }
+    case VMCU_MSG_ADC_VALUE: {
+        uint8_t unit = vmcu_rbuf_u8(&r);
+        uint8_t channel = vmcu_rbuf_u8(&r);
+        uint16_t raw = vmcu_rbuf_u16(&r);
+        if (!r.error) {
+            vmcu__adc_on_value(unit, channel, raw);
+        }
+        break;
+    }
     case VMCU_MSG_UART_RX: {
         uint8_t id = vmcu_rbuf_u8(&r);
         (void)vmcu_rbuf_u8(&r);
@@ -648,6 +688,7 @@ vmcu_status_t vmcu_init(const char *board, const char *framework)
     vmcu__time_init();
     vmcu__gpio_init();
     vmcu__uart_init();
+    vmcu__pwm_init();
     vmcu__diag_init();
     create_primitives();
     connect_to_app(address);

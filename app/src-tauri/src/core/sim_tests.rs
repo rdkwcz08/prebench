@@ -51,7 +51,9 @@ impl Recorder {
                     self.seen.borrow()
                 );
             };
-            {
+            // Sortie série et mesures CPU : trop fréquentes, elles masqueraient
+            // les événements utiles dans le diagnostic d'un échec.
+            if name != "sim:uart" && name != "sim:usage" {
                 let mut seen = self.seen.borrow_mut();
                 if seen.len() == 12 {
                     seen.remove(0);
@@ -62,6 +64,14 @@ impl Recorder {
             }
             if name == "sim:status" && v["state"] == "error" {
                 panic!("erreur de simulation : {}", v["message"]);
+            }
+            // Composant arrêté (budget de temps, exception) : le test ne peut plus aboutir.
+            if name == "sim:warn"
+                && v["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("composant ") && t.contains(" arrêté"))
+            {
+                panic!("{}", v["text"]);
             }
             if name == "sim:status"
                 && ["starting", "debug-wait", "stopped"]
@@ -172,6 +182,8 @@ fn start_project_full(
         "sim:uart",
         "sim:uart-config",
         "sim:test-gpio",
+        "sim:test-pwm",
+        "sim:pins",
     ] {
         let tx = tx.clone();
         app.handle().listen_any(name, move |event| {
@@ -247,6 +259,18 @@ fn blinky_led_and_button() {
 
     let slow = mean_toggle_ms(&rec, 4);
     println!("LD2 : période {slow:.1} ms avant l'appui sur B1");
+    // Inspecteur : PA5 en sortie push-pull, période entre fronts montants
+    // (deux bascules) mesurée par le cœur en temps du firmware.
+    let (_, pins) = rec.wait(|name, v| {
+        name == "sim:pins" && v["PA5"]["period_us"].as_u64().is_some_and(|p| p > 0)
+    });
+    assert_eq!(pins["PA5"]["mode"], 1, "{pins}");
+    assert_eq!(pins["PA5"]["function"], Value::Null, "{pins}");
+    let period = pins["PA5"]["period_us"].as_u64().unwrap_or(0);
+    assert!(
+        (900_000..2_000_000).contains(&period),
+        "période mesurée {period} µs"
+    );
     // Bornes en temps du firmware : un HAL_Delay ne finit jamais en avance
     // (borne basse stricte) ; la borne haute sépare seulement 500 ms de 100 ms,
     // une machine chargée pouvant retarder le réveil.
@@ -279,6 +303,50 @@ fn blinky_led_and_button() {
     assert!((90.0..400.0).contains(&fast), "période rapide {fast} ms");
 
     let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Coupure d'alimentation (section 10.4) : firmware arrêté, LD2 éteinte,
+/// broches relâchées, ligne au Journal ; à la remise sous tension, le
+/// firmware repart de zéro (son horloge aussi) et LD2 clignote de nouveau.
+#[test]
+fn power_cut_and_restore() {
+    let dir = repo_root().join("templates").join("blinky-stm32-hal");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    ld2_toggles(&rec, 2);
+
+    sim.tx.try_send(SimMsg::Power(false)).expect("coupure");
+    // Journal, état, broches relâchées, LD2 éteinte, et PC13 flottante : le
+    // pull-up de la carte n'est plus alimenté. Dans l'ordre d'arrivée, à
+    // l'image près.
+    let (mut off, mut logged, mut cleared, mut dark, mut floating) =
+        (false, false, false, false, false);
+    rec.wait(|name, v| {
+        off |= name == "sim:status" && v["state"] == "off";
+        logged |= name == "sim:log" && v["text"] == "Alimentation coupée";
+        cleared |= name == "sim:pins" && v.as_object().is_some_and(|m| m.is_empty());
+        dark |= name == "sim:states" && v["LD2"]["brightness"] == 0;
+        floating |= name == "sim:nets" && v["PC13"] == "floating";
+        off && logged && cleared && dark && floating
+    });
+    // Coupée : ni reset ni pause n'ont d'effet, aucune écriture du firmware.
+    sim.tx.try_send(SimMsg::Reset).expect("reset");
+    sim.tx.try_send(SimMsg::Pause).expect("pause");
+
+    sim.tx
+        .try_send(SimMsg::Power(true))
+        .expect("remise sous tension");
+    rec.wait(|name, v| name == "sim:log" && v["text"] == "Alimentation rétablie");
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let restarted = ld2_toggles(&rec, 2);
+    // Horloge du firmware repartie de zéro : processus neuf, RAM perdue.
+    assert!(
+        restarted[0] < 2_000_000,
+        "temps du firmware {} µs",
+        restarted[0]
+    );
+    let period = mean_toggle_ms(&rec, 2);
+    assert!((450.0..1000.0).contains(&period), "période {period} ms");
 }
 
 /// Reset (docs/protocol.md, 5.4) : le firmware se termine (code 71) et le cœur
@@ -458,6 +526,151 @@ fn uart_echo_and_plotter_lines() {
         }
         echoed.contains("Bonjour")
     });
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Étape 8 : fondu de LD2 par TIM2_CH1 sur PA5, configuré comme dans CubeMX.
+/// La broche porte la fonction PWM, 1 kHz ; la luminosité de LD2 (modèle led)
+/// suit le rapport cyclique : pleine, éteinte et intermédiaire.
+#[test]
+fn pwm_fade_drives_led() {
+    let dir = repo_root().join("tests").join("pwm-fade");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let (_, pins) =
+        rec.wait(|name, v| name == "sim:pins" && v["PA5"]["pwm"]["freq_hz"].as_u64().is_some());
+    assert_eq!(pins["PA5"]["mode"], 3, "{pins}");
+    assert_eq!(pins["PA5"]["function"], "pwm:TIM2_CH1", "{pins}");
+    assert_eq!(pins["PA5"]["pwm"]["freq_hz"], 1000, "{pins}");
+
+    let (mut low, mut mid, mut high) = (false, false, false);
+    rec.wait(|name, v| {
+        if let Some(b) = (name == "sim:states")
+            .then(|| v["LD2"]["brightness"].as_f64())
+            .flatten()
+        {
+            low |= b <= 0.05;
+            mid |= (0.3..0.7).contains(&b);
+            high |= b >= 0.95;
+        }
+        low && mid && high
+    });
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Étape 8 : PWM à 20 kHz dont la consigne change toutes les 100 µs pendant
+/// 3 s. Rien ne transite pour la PWM elle-même ; les consignes sont regroupées
+/// (au plus une par lot de 1 ms) et le firmware ne sature pas le CPU.
+#[test]
+fn pwm_20khz_no_overload() {
+    let dir = repo_root().join("tests").join("pwm-20khz");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let mut frames = 0u64;
+    let mut freq = None;
+    let mut cpu_ms = Vec::new();
+    let mut guard = None;
+    let (_, log) = rec.wait(|name, v| {
+        match name {
+            "sim:test-pwm" => {
+                frames += 1;
+                freq = v["freq_hz"].as_u64();
+            }
+            "sim:usage" => cpu_ms.push(v["cpu_time_ms"].as_u64().unwrap_or(0)),
+            "sim:guard" => guard = Some(v.clone()),
+            _ => {}
+        }
+        name == "sim:log"
+            && v["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("pwm-20khz :"))
+    });
+    let text = log["text"].as_str().unwrap_or_default();
+    let consignes: u64 = text
+        .split_whitespace()
+        .find_map(|w| w.parse().ok())
+        .unwrap_or(0);
+    let cpu = cpu_ms.last().copied().unwrap_or(0);
+    println!(
+        "PWM 20 kHz : {consignes} consignes -> {frames} trames PWM ; CPU du firmware {cpu} ms"
+    );
+    assert_eq!(freq, Some(20_000));
+    assert!(guard.is_none(), "garde-fou déclenché : {guard:?}");
+    // 3 s de consignes : au plus un lot par milliseconde (marge de 20 %).
+    assert!(
+        frames <= 3_600,
+        "{frames} trames PWM pour {consignes} consignes"
+    );
+    assert!(
+        consignes > frames,
+        "aucun regroupement : {consignes} consignes, {frames} trames"
+    );
+    // Temps CPU du firmware sur toute la durée : bien sous un cœur plein.
+    assert!(
+        cpu < 2_000,
+        "CPU du firmware : {cpu} ms en un peu plus de 3 s"
+    );
+    // Fin de rafale : 50 % sur LD2.
+    rec.wait(|name, v| {
+        name == "sim:states"
+            && v["LD2"]["brightness"]
+                .as_f64()
+                .is_some_and(|b| (b - 0.5).abs() < 0.01)
+    });
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Étape 8 : le potentiomètre (curseur sur A0) commande le servo (D5, 50 Hz).
+/// ADC : tension et valeur brute selon adc_bits et adc_vref de la carte ;
+/// servo : angle déduit de la largeur d'impulsion.
+#[test]
+fn potentiometer_drives_servo() {
+    let dir = repo_root().join("tests").join("pot-servo");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let (_, pins) = rec.wait(|name, v| {
+        name == "sim:pins"
+            && v["PB4"]["pwm"]["freq_hz"] == 50
+            && v["PA0"]["adc"]["raw"].as_u64().is_some()
+    });
+    assert_eq!(pins["PB4"]["function"], "pwm:TIM3_CH1", "{pins}");
+    assert_eq!(pins["PA0"]["mode"], 5, "{pins}");
+    assert_eq!(pins["PA0"]["adc"]["max"], 4095, "{pins}");
+
+    for (position, raw, angle, expected_volts) in [
+        ("0", 0u64, 0.0, 0.0),
+        ("1", 4095, 180.0, 3.3),
+        ("0.5", 2048, 90.0, 1.65),
+    ] {
+        sim.tx
+            .try_send(SimMsg::Control {
+                component: "pot1".into(),
+                control: "position".into(),
+                value_json: position.into(),
+            })
+            .expect("commande vers l'acteur");
+        // Valeur ADC et angle du servo, dans n'importe quel ordre : l'état des
+        // modèles et l'instantané des broches partent par deux chemins.
+        let mut volts = None;
+        let mut servo_ok = false;
+        rec.wait(|name, v| {
+            if name == "sim:pins" && v["PA0"]["adc"]["raw"] == raw {
+                volts = v["PA0"]["adc"]["volts"].as_f64();
+            }
+            if name == "sim:states"
+                && v["servo1"]["status"] == "ok"
+                && v["servo1"]["angle"]
+                    .as_f64()
+                    .is_some_and(|a| (a - angle).abs() <= 1.0)
+            {
+                servo_ok = true;
+            }
+            volts.is_some() && servo_ok
+        });
+        // Tension du curseur : 3V3 × position.
+        let volts = volts.unwrap_or(-1.0);
+        assert!((volts - expected_volts).abs() < 0.001, "{volts} V");
+    }
     let _ = sim.tx.try_send(SimMsg::Stop);
 }
 
@@ -761,5 +974,9 @@ fn cubemx_generated_project() {
         name == "sim:uart-config" && v["id"] == 2 && v["baud"] == 115_200
     });
     assert!(!warned, "HAL_UART_Init encore signalé non simulé");
+    // Inspecteur : PA2 en fonction alternative AF7, nommée par la carte.
+    let (_, pins) = rec.wait(|name, v| name == "sim:pins" && v["PA2"].is_object());
+    assert_eq!(pins["PA2"]["mode"], 3, "{pins}");
+    assert_eq!(pins["PA2"]["function"], "uart2:TX", "{pins}");
     let _ = sim.tx.try_send(SimMsg::Stop);
 }

@@ -11,6 +11,10 @@
 //   vue -> component_control -> acteur -> onControl (modèles)
 //   modèles -> invalidate -> une fois par image : getState -> « sim:states » (vues)
 //   réseau -> niveaux des broches utilisées, une fois par image -> « sim:nets » ;
+//   PWM_CONFIG / PWM_DUTY -> broche en fonction alternative du timer -> réseau
+//     (fréquence et rapport cyclique, jamais les fronts) -> modèles (PinState.pwm) ;
+//   modèle -> setVoltage -> réseau -> ADC_VALUE (tension -> valeur brute selon
+//     adc_bits et adc_vref de la carte) ; valeurs initiales avant WELCOME ;
 //   UART_CONFIG -> « sim:uart-config » ; UART_TX -> une fois par image -> « sim:uart » ;
 //   moniteur série -> uart_send -> UART_RX (trames de 4 Kio au plus)
 //   conflit ou entrée lue flottante -> avertissement (section 9.2)
@@ -31,7 +35,7 @@
 // figé par le débogueur (« Arrêté sur un point d'arrêt »). Ni pause CPU, ni
 // suspension, ni arrêt pour mémoire pendant une session de débogage.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -47,7 +51,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::board::{pin_address, Board};
 use super::components::engine::{self, InstanceSpec, ModelCmd, ModelEvent, Models};
-use super::net::{Drive, Level, Network, Node, Pull, Source};
+use super::net::{Drive, Level, NetState, Network, Node, Pull, Pwm, Source};
 use super::protocol::{self, msg, Header, Reader, Writer, FLAG_REPLY, HEADER_SIZE};
 use crate::error::{CoreError, CoreResult};
 use crate::platform;
@@ -89,6 +93,10 @@ const UART_OUT_MAX: usize = 64 * 1024;
 /// Avertissements du réseau logique (section 9.2), hors des codes du firmware.
 const WARN_CONFLICT: u16 = 100;
 const WARN_FLOATING: u16 = 101;
+/// PWM démarrée sans broche configurée sur sa fonction alternative.
+const WARN_PWM_NO_PIN: u16 = 102;
+/// Tension au-delà de la référence de l'ADC.
+const WARN_ADC_RANGE: u16 = 103;
 /// Débogage : sans HEARTBEAT (toutes les 200 ms) pendant ce délai, le firmware
 /// est arrêté sur un point d'arrêt.
 const BREAKPOINT_AFTER: Duration = Duration::from_millis(600);
@@ -114,6 +122,8 @@ pub enum SimMsg {
     Model(ModelEvent),
     FlushUi,
     Reset,
+    /// Interrupteur d'alimentation : false coupe, true rétablit (section 10.4).
+    Power(bool),
     Stop,
     /// Mise en pause demandée par l'utilisateur.
     Pause,
@@ -139,6 +149,9 @@ pub enum SimMsg {
     BeatTimeout(u64),
     /// Câblage modifié dans l'app (section 10.4) : appliqué sans relance.
     SetWiring(Vec<crate::project::Wire>),
+    /// Paramètres des composants (complétés par les défauts), par identifiant :
+    /// ceux qui ont changé sont transmis aux modèles (onParamsChange).
+    SetParams(BTreeMap<String, serde_json::Map<String, serde_json::Value>>),
     /// Moniteur série : octets vers l'UART `id` du firmware.
     UartSend {
         id: u8,
@@ -263,6 +276,53 @@ struct FwPin {
     mode: u8,
     pull: u8,
     out: u8,
+    /// Fonction alternative (GPIO_AFx) ; 0xFF : aucune.
+    af: u8,
+    /// Dernier front montant écrit par le firmware (temps du firmware, µs).
+    last_rise_us: Option<u64>,
+    /// Période entre les deux derniers fronts montants (µs).
+    period_us: Option<u64>,
+}
+
+/// Configuration d'une broche par le firmware, pour l'inspecteur (« sim:pins »).
+#[derive(Serialize, Clone)]
+struct PinConfigEvent {
+    /// GPIO_CONFIG (docs/protocol.md) : 0 entrée, 1 sortie push-pull, 2 sortie
+    /// drain ouvert, 3 et 4 alternative, 5 analogique, 6 désactivée.
+    mode: u8,
+    /// 0 aucune, 1 pull-up, 2 pull-down.
+    pull: u8,
+    /// Capacité portée en mode alternatif (« uart2:TX ») ; « AF7 » si la carte
+    /// ne la connaît pas ; null pour une broche GPIO.
+    function: Option<String>,
+    /// Période mesurée entre deux fronts montants écrits par le firmware (µs).
+    period_us: Option<u64>,
+    /// Sortie PWM active : fréquence et rapport cyclique.
+    pwm: Option<PwmView>,
+    /// Entrée analogique : tension et valeur brute lue par l'ADC.
+    adc: Option<AdcView>,
+}
+
+#[derive(Serialize, Clone, Copy)]
+struct PwmView {
+    freq_hz: u32,
+    /// Rapport cyclique de 0 à 1.
+    duty: f64,
+}
+
+#[derive(Serialize, Clone, Copy)]
+struct AdcView {
+    volts: f64,
+    raw: u16,
+    /// Valeur brute maximale (4095 en 12 bits).
+    max: u16,
+}
+
+/// Canal PWM du firmware (unité, canal) : STM32, timer et canal 1..4.
+#[derive(Clone, Copy, Default)]
+struct PwmChannel {
+    freq_hz: u32,
+    duty: u16,
 }
 
 impl FwPin {
@@ -296,6 +356,13 @@ struct Actor<R: Runtime> {
     net: Network,
     link: Option<FirmwareLink>,
     fw_pins: HashMap<String, FwPin>,
+    /// Configuration des broches modifiée : « sim:pins » à l'image suivante.
+    pins_dirty: bool,
+    /// Alimentation de la paillasse (section 10.4) : coupée, le firmware est
+    /// arrêté et les alimentations de la carte retombent.
+    powered: bool,
+    /// Coupure demandée : la fin du processus firmware achève la coupure.
+    power_off_pending: bool,
     addr_to_pin: HashMap<(u8, u8), String>,
     last_input: HashMap<String, (u8, u8)>,
     models: Option<Models>,
@@ -308,6 +375,18 @@ struct Actor<R: Runtime> {
     wired: HashSet<String>,
     /// Avertissements du réseau déjà émis (code, broche) : une fois par broche.
     net_warned: HashSet<(u16, String)>,
+    /// Canaux PWM du firmware ; une broche en fonction alternative du timer les porte.
+    pwm_channels: BTreeMap<(u8, u8), PwmChannel>,
+    /// Broche choisie explicitement par PWM_ATTACH (ESP32).
+    pwm_attached: BTreeMap<(u8, u8), String>,
+    /// Broches de la carte reliées à un canal ADC (capacités adcN:CHx).
+    adc_pins: BTreeMap<String, (u8, u8)>,
+    /// Broches dont le canal ADC est déclaré par le firmware (ADC_CONFIG).
+    adc_configured: BTreeSet<String>,
+    /// Dernière valeur brute envoyée au firmware, par broche.
+    last_adc: HashMap<String, u16>,
+    /// Paramètres connus des modèles, par composant.
+    params: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     ui_flush_scheduled: bool,
     out_seq: u32,
     echo: Option<String>,
@@ -350,6 +429,17 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         .iter()
         .find(|c| c.source.id == "echo")
         .map(|c| c.id.clone());
+    let params = cfg
+        .components
+        .iter()
+        .map(|c| (c.id.clone(), c.params.clone()))
+        .collect();
+    let adc_pins = cfg
+        .board
+        .pins
+        .keys()
+        .filter_map(|name| Some((name.clone(), cfg.board.adc_channel(name)?)))
+        .collect();
     let mut actor = Actor {
         app,
         cfg,
@@ -357,6 +447,9 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         net: Network::default(),
         link: None,
         fw_pins: HashMap::new(),
+        pins_dirty: false,
+        powered: true,
+        power_off_pending: false,
         addr_to_pin: HashMap::new(),
         last_input: HashMap::new(),
         models: None,
@@ -365,6 +458,12 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         uart_out: BTreeMap::new(),
         wired: HashSet::new(),
         net_warned: HashSet::new(),
+        pwm_channels: BTreeMap::new(),
+        pwm_attached: BTreeMap::new(),
+        adc_pins,
+        adc_configured: BTreeSet::new(),
+        last_adc: HashMap::new(),
+        params,
         ui_flush_scheduled: false,
         out_seq: 0,
         echo,
@@ -418,6 +517,7 @@ impl<R: Runtime> Actor<R> {
                 }
                 SimMsg::BeatTimeout(seq) => self.on_beat_timeout(seq),
                 SimMsg::SetWiring(wires) => self.rewire(wires).await,
+                SimMsg::SetParams(all) => self.set_params(all),
                 SimMsg::UartSend { id, data } => {
                     for chunk in data.chunks(UART_CHUNK) {
                         let mut w = Writer::default();
@@ -428,7 +528,12 @@ impl<R: Runtime> Actor<R> {
                 SimMsg::Exited(code) => {
                     self.stop_monitor();
                     let reload = self.guards.reload.take();
-                    if let Some(firmware) = reload {
+                    if std::mem::take(&mut self.power_off_pending) {
+                        if let Some(firmware) = reload {
+                            self.cfg.firmware = firmware; // pris à la remise sous tension
+                        }
+                        self.power_down().await;
+                    } else if let Some(firmware) = reload {
                         self.cfg.firmware = firmware;
                         self.status("starting", "rechargement du firmware".into());
                         self.log("firmware rechargé après le build");
@@ -464,6 +569,13 @@ impl<R: Runtime> Actor<R> {
                 SimMsg::Reset => {
                     self.resume().await;
                     self.send(msg::RESET, 0, 0, &[]).await;
+                }
+                SimMsg::Power(false) => self.power_off().await,
+                SimMsg::Power(true) => {
+                    if let Err(e) = self.power_on().await {
+                        self.status("error", e.to_string());
+                        return;
+                    }
                 }
                 SimMsg::Pause => self.pause(None).await,
                 SimMsg::Resume => self.resume().await,
@@ -580,30 +692,14 @@ impl<R: Runtime> Actor<R> {
     /// composants intégrés, fils du projet.
     fn connect_all(&mut self) {
         let board = self.cfg.board.clone();
-        for (name, def) in &board.pins {
-            let node = Node::Board(name.clone());
-            self.net.add_node(node.clone());
-            let pull = match def.external_pull.as_deref() {
-                Some("up") => Pull::Up,
-                Some("down") => Pull::Down,
-                _ => Pull::None,
-            };
-            if pull != Pull::None {
-                self.net.set_pull(&node, Source::Board, pull);
-            }
+        self.net.set_logic_voltage(board.logic_voltage);
+        for name in board.pins.keys() {
+            self.net.add_node(Node::Board(name.clone()));
             if let Some(addr) = pin_address(name) {
                 self.addr_to_pin.insert(addr, name.clone());
             }
         }
-        for (name, volts) in &board.power {
-            let drive = if *volts > 0.0 {
-                Drive::High
-            } else {
-                Drive::Low
-            };
-            self.net
-                .set_drive(&Node::Board(name.clone()), Source::Board, drive);
-        }
+        self.apply_supply();
         for (id, onboard) in &board.onboard {
             for (pin, target) in &onboard.wires {
                 self.net.connect(
@@ -634,6 +730,87 @@ impl<R: Runtime> Actor<R> {
         }
     }
 
+    /// Alimentations et résistances de tirage soudées sur la carte, selon
+    /// l'interrupteur : coupé, les alimentations positives et les tirages
+    /// retombent (flottants), la masse reste à 0 V. Renvoie les nœuds changés.
+    fn apply_supply(&mut self) -> Vec<Node> {
+        let mut changed = Vec::new();
+        for (name, def) in &self.cfg.board.pins {
+            let pull = match (self.powered, def.external_pull.as_deref()) {
+                (true, Some("up")) => Pull::Up,
+                (true, Some("down")) => Pull::Down,
+                _ => Pull::None,
+            };
+            let node = Node::Board(name.clone());
+            changed.extend(self.net.set_pull(&node, Source::Board, pull));
+        }
+        for (name, volts) in &self.cfg.board.power {
+            let (drive, v) = match (*volts > 0.0, self.powered) {
+                (false, _) => (Drive::Low, Some(0.0)),
+                (true, true) => (Drive::High, Some(*volts)),
+                (true, false) => (Drive::Z, None),
+            };
+            let node = Node::Board(name.clone());
+            changed.extend(self.net.set_drive(&node, Source::Board, drive));
+            changed.extend(self.net.set_volts(&node, Source::Board, v));
+        }
+        changed
+    }
+
+    /// Coupure de l'alimentation (section 10.4) : le firmware est arrêté (sa
+    /// RAM est perdue), la coupure s'achève à la fin du processus. Sans effet
+    /// en débogage : le processus appartient au débogueur.
+    async fn power_off(&mut self) {
+        if !self.powered || self.cfg.debug.is_some() {
+            return;
+        }
+        self.powered = false;
+        self.stop_monitor();
+        if let Some(kill) = self.link.as_mut().and_then(|l| l.kill.take()) {
+            self.power_off_pending = true;
+            let _ = kill.send(());
+        } else {
+            self.power_down().await;
+        }
+    }
+
+    /// Fin de la coupure : sorties du firmware relâchées, alimentations
+    /// retombées, composants prévenus (onPower), interface informée.
+    async fn power_down(&mut self) {
+        if let Some(link) = self.link.take() {
+            link.reader.abort();
+        }
+        self.guards.paused = false;
+        self.guards.suspended = false;
+        self.guards.busy = Duration::ZERO;
+        self.reset_firmware_state();
+        let changed = self.apply_supply();
+        self.propagate(changed).await;
+        self.send_model(ModelCmd::Power(false));
+        self.states_dirty = true;
+        self.schedule_ui();
+        self.log("Alimentation coupée");
+        self.status(
+            "off",
+            "rétablissez l'alimentation pour relancer le firmware depuis zéro".into(),
+        );
+    }
+
+    /// Remise sous tension : alimentations rétablies, firmware relancé depuis
+    /// zéro (la flash, c'est-à-dire l'exécutable, est conservée).
+    async fn power_on(&mut self) -> CoreResult<()> {
+        if self.powered {
+            return Ok(());
+        }
+        self.powered = true;
+        let changed = self.apply_supply();
+        self.propagate(changed).await;
+        self.send_model(ModelCmd::Power(true));
+        self.log("Alimentation rétablie");
+        self.status("starting", "remise sous tension".into());
+        self.launch().await
+    }
+
     /// Nouveau câblage pendant la simulation : réseau reconstruit, sorties du
     /// firmware et des composants reprises, niveaux changés propagés.
     async fn rewire(&mut self, wires: Vec<Wire>) {
@@ -662,12 +839,25 @@ impl<R: Runtime> Actor<R> {
 
     fn notify_model(&mut self, node: &Node) {
         if let Node::Component { id, pin } = node {
-            let level = self.net.level(node);
+            let state = self.net.state(node);
             self.send_model(ModelCmd::Pin {
                 id: id.clone(),
                 pin: pin.clone(),
-                level,
+                state,
             });
+        }
+    }
+
+    /// Paramètres modifiés dans l'inspecteur : transmis aux modèles concernés.
+    fn set_params(&mut self, all: BTreeMap<String, serde_json::Map<String, serde_json::Value>>) {
+        for (id, params) in all {
+            match self.params.get(&id) {
+                Some(old) if *old != params => {}
+                _ => continue, // inchangés, ou composant en attente du prochain démarrage
+            }
+            let params_json = serde_json::Value::Object(params.clone()).to_string();
+            self.params.insert(id.clone(), params);
+            self.send_model(ModelCmd::Params { id, params_json });
         }
     }
 
@@ -683,6 +873,12 @@ impl<R: Runtime> Actor<R> {
                 let changed =
                     self.net
                         .set_pull(&Node::Component { id, pin }, Source::Component, pull);
+                self.propagate(changed).await;
+            }
+            ModelEvent::Volts { id, pin, volts } => {
+                let changed =
+                    self.net
+                        .set_volts(&Node::Component { id, pin }, Source::Component, volts);
                 self.propagate(changed).await;
             }
             ModelEvent::Pong { seq, handler_us } => self.pong(seq, 0, handler_us).await,
@@ -719,6 +915,12 @@ impl<R: Runtime> Actor<R> {
     fn reset_firmware_state(&mut self) {
         let pins: Vec<String> = self.fw_pins.keys().cloned().collect();
         self.fw_pins.clear();
+        self.pwm_channels.clear();
+        self.pwm_attached.clear();
+        self.adc_configured.clear();
+        self.last_adc.clear();
+        self.pins_dirty = true;
+        self.schedule_ui();
         self.last_input.clear();
         for name in pins {
             let node = Node::Board(name);
@@ -735,6 +937,9 @@ impl<R: Runtime> Actor<R> {
                     let fw = self.fw_pins.get(name).copied().unwrap_or_default();
                     if self.link.is_some() && fw.reads_net() {
                         self.send_input(name.clone()).await;
+                    }
+                    if self.link.is_some() && self.adc_pins.contains_key(name) {
+                        self.send_adc(name).await;
                     }
                     self.watch_net(name);
                 }
@@ -767,11 +972,187 @@ impl<R: Runtime> Actor<R> {
             .await;
     }
 
+    /// Tension vue par l'ADC sur une broche : tension connue du net, sinon
+    /// déduite du niveau (rapport cyclique × tension logique pour une PWM).
+    fn adc_volts(&self, name: &str) -> f64 {
+        let state: NetState = self.net.state(&Node::Board(name.to_string()));
+        let logic = self.cfg.board.logic_voltage;
+        state.volts.unwrap_or(match (state.pwm, state.level) {
+            (Some(p), Level::High | Level::Low) => p.ratio() * logic,
+            (_, Level::High | Level::PulledHigh) => logic,
+            _ => 0.0,
+        })
+    }
+
+    /// Valeur brute de l'ADC pour une tension : adc_bits et adc_vref de la carte.
+    fn adc_raw(&self, volts: f64) -> (u16, u16) {
+        let bits = u32::from(self.cfg.board.adc_bits.clamp(1, 16));
+        let max = ((1u32 << bits) - 1) as u16;
+        let ratio = (volts / self.cfg.board.adc_vref()).clamp(0.0, 1.0);
+        ((ratio * f64::from(max)).round() as u16, max)
+    }
+
+    /// Broche lue par l'ADC du firmware (mode analogique ou ADC_CONFIG).
+    fn adc_used(&self, name: &str) -> bool {
+        self.adc_configured.contains(name) || self.fw_pins.get(name).is_some_and(|f| f.mode == 5)
+    }
+
+    /// ADC_VALUE si la valeur brute de la broche a changé ; tension hors de la
+    /// plage de l'ADC signalée une fois.
+    async fn send_adc(&mut self, name: &str) {
+        let Some(&(unit, channel)) = self.adc_pins.get(name) else {
+            return;
+        };
+        let volts = self.adc_volts(name);
+        let (raw, max) = self.adc_raw(volts);
+        let vref = self.cfg.board.adc_vref();
+        if self.adc_used(name)
+            && volts > vref + 0.01
+            && self.net_warned.insert((WARN_ADC_RANGE, name.to_string()))
+        {
+            let label = self.pin_label(name);
+            self.warn(
+                WARN_ADC_RANGE,
+                format!(
+                    "{label} reçoit {} V, au-delà de la référence de l'ADC ({} V) : la valeur sature à {max}. \
+                     Alimentez le capteur en {} V ou ajoutez un pont diviseur.",
+                    fr_volts(volts),
+                    fr_volts(vref),
+                    fr_volts(vref)
+                ),
+            );
+        }
+        if self.last_adc.get(name) == Some(&raw) {
+            return;
+        }
+        self.last_adc.insert(name.to_string(), raw);
+        let mut w = Writer::default();
+        w.u8(unit).u8(channel).u16(raw);
+        self.send(msg::ADC_VALUE, 0, 0, &w.buf).await;
+        if self.adc_used(name) {
+            self.pins_dirty = true;
+            self.schedule_ui();
+        }
+    }
+
+    /// « D13 (PA5) », ou le nom seul.
+    fn pin_label(&self, name: &str) -> String {
+        match self
+            .cfg
+            .board
+            .pins
+            .get(name)
+            .and_then(|p| p.label.as_deref())
+        {
+            Some(l) if l != name => format!("{l} ({name})"),
+            _ => name.to_string(),
+        }
+    }
+
+    // --- PWM -------------------------------------------------------------------------------
+
+    /// Broche qui porte un canal PWM : choisie par PWM_ATTACH, sinon la broche
+    /// configurée en fonction alternative « pwm:TIMx_CHy » (af de la carte).
+    fn pwm_pin(&self, key: (u8, u8)) -> Option<String> {
+        if let Some(pin) = self.pwm_attached.get(&key) {
+            return Some(pin.clone());
+        }
+        let cap = format!("pwm:TIM{}_CH{}", key.0, key.1);
+        self.cfg
+            .board
+            .pins
+            .iter()
+            .find(|(name, def)| {
+                def.af.get(&cap).is_some_and(|af| {
+                    self.fw_pins
+                        .get(*name)
+                        .is_some_and(|fw| matches!(fw.mode, 3 | 4) && fw.af == *af)
+                })
+            })
+            .map(|(name, _)| name.clone())
+    }
+
+    /// Canal PWM porté par une broche.
+    fn pwm_channel_of(&self, name: &str) -> Option<PwmChannel> {
+        self.pwm_channels
+            .iter()
+            .find(|(key, _)| self.pwm_pin(**key).as_deref() == Some(name))
+            .map(|(_, c)| *c)
+    }
+
+    /// Ce que la broche impose au réseau : PWM du timer en fonction
+    /// alternative (timer arrêté : niveau bas), sinon la sortie GPIO.
+    fn pin_drive(&self, name: &str, fw: FwPin) -> Drive {
+        if matches!(fw.mode, 3 | 4) {
+            if let Some(c) = self.pwm_channel_of(name) {
+                return if c.freq_hz > 0 {
+                    Drive::Pwm(Pwm {
+                        freq_hz: c.freq_hz,
+                        duty: c.duty,
+                    })
+                } else {
+                    Drive::Low
+                };
+            }
+        }
+        fw.drive()
+    }
+
+    /// Canal PWM modifié : sa broche est mise à jour (réseau, modèles, inspecteur).
+    async fn pwm_changed(&mut self, key: (u8, u8), previous_pin: Option<String>) {
+        let pin = self.pwm_pin(key);
+        for name in previous_pin
+            .iter()
+            .chain(pin.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+        {
+            if let Some(fw) = self.fw_pins.get(&name).copied() {
+                self.apply_firmware_pin(&name, fw).await;
+            }
+        }
+        self.pins_dirty = true;
+        self.schedule_ui();
+        let running = self.pwm_channels.get(&key).is_some_and(|c| c.freq_hz > 0);
+        if pin.is_none() && running {
+            let cap = format!("pwm:TIM{}_CH{}", key.0, key.1);
+            let candidates: Vec<String> = self
+                .cfg
+                .board
+                .pins
+                .iter()
+                .filter_map(|(name, def)| {
+                    def.af
+                        .get(&cap)
+                        .map(|af| format!("{} (GPIO_AF{af})", self.pin_label(name)))
+                })
+                .collect();
+            let tag = format!("TIM{}_CH{}", key.0, key.1);
+            if self.net_warned.insert((WARN_PWM_NO_PIN, tag.clone())) {
+                let hint = if candidates.is_empty() {
+                    format!(
+                        "aucune broche de la carte {} ne porte cette fonction",
+                        self.cfg.board.name
+                    )
+                } else {
+                    format!("configurez {} en GPIO_MODE_AF_PP", candidates.join(" ou "))
+                };
+                self.warn(
+                    WARN_PWM_NO_PIN,
+                    format!("{tag} produit une PWM, mais aucune broche n'est configurée sur cette fonction : {hint}."),
+                );
+            }
+        }
+    }
+
     // --- Interface ----------------------------------------------------------------------
 
     /// Une image : getState des modèles modifiés au plus une fois par 16 ms.
     fn schedule_ui(&mut self) {
-        if (!self.states_dirty && self.nets_out.is_empty() && self.uart_out.is_empty())
+        if (!self.states_dirty
+            && !self.pins_dirty
+            && self.nets_out.is_empty()
+            && self.uart_out.is_empty())
             || self.ui_flush_scheduled
         {
             return;
@@ -796,6 +1177,67 @@ impl<R: Runtime> Actor<R> {
         for (id, data) in std::mem::take(&mut self.uart_out) {
             let _ = self.app.emit("sim:uart", UartEvent { id, data });
         }
+        if std::mem::take(&mut self.pins_dirty) {
+            let _ = self.app.emit("sim:pins", self.pin_configs());
+        }
+    }
+
+    /// Configuration de toutes les broches réglées par le firmware (instantané).
+    fn pin_configs(&self) -> BTreeMap<String, PinConfigEvent> {
+        let analog = FwPin {
+            mode: 5,
+            af: 0xFF,
+            ..Default::default()
+        };
+        let adc_only: Vec<(String, FwPin)> = self
+            .adc_configured
+            .iter()
+            .filter(|n| !self.fw_pins.contains_key(*n))
+            .map(|n| (n.clone(), analog))
+            .collect();
+        self.fw_pins
+            .iter()
+            .map(|(n, f)| (n.clone(), *f))
+            .chain(adc_only)
+            .map(|(name, fw)| {
+                let name = &name;
+                let function = matches!(fw.mode, 3 | 4).then(|| {
+                    self.cfg
+                        .board
+                        .pins
+                        .get(name)
+                        .and_then(|def| def.af.iter().find(|(_, n)| **n == fw.af))
+                        .map(|(cap, _)| cap.clone())
+                        .unwrap_or_else(|| format!("AF{}", fw.af))
+                });
+                (
+                    name.clone(),
+                    PinConfigEvent {
+                        mode: fw.mode,
+                        pull: fw.pull,
+                        function,
+                        period_us: fw.period_us,
+                        pwm: matches!(fw.mode, 3 | 4)
+                            .then(|| self.pwm_channel_of(name))
+                            .flatten()
+                            .filter(|c| c.freq_hz > 0)
+                            .map(|c| PwmView {
+                                freq_hz: c.freq_hz,
+                                duty: Pwm {
+                                    freq_hz: c.freq_hz,
+                                    duty: c.duty,
+                                }
+                                .ratio(),
+                            }),
+                        adc: (self.adc_used(name) && self.adc_pins.contains_key(name)).then(|| {
+                            let volts = self.adc_volts(name);
+                            let (raw, max) = self.adc_raw(volts);
+                            AdcView { volts, raw, max }
+                        }),
+                    },
+                )
+            })
+            .collect()
     }
 
     fn status(&self, state: &'static str, message: String) {
@@ -844,11 +1286,15 @@ impl<R: Runtime> Actor<R> {
             msg::HELLO => self.on_hello(h, &mut r).await,
             msg::GPIO_CONFIG => {
                 let (port, pin, mode, pull) = (r.u8(), r.u8(), r.u8(), r.u8());
+                let (_edge, af) = (r.u8(), r.u8());
                 if let Some(name) = self.pin_name(port, pin) {
                     let fw = self.fw_pins.entry(name.clone()).or_default();
                     fw.mode = mode;
                     fw.pull = pull;
+                    fw.af = af;
                     let fw = *fw;
+                    self.pins_dirty = true;
+                    self.schedule_ui();
                     self.apply_firmware_pin(&name, fw).await;
                 }
             }
@@ -863,9 +1309,74 @@ impl<R: Runtime> Actor<R> {
                         serde_json::json!({ "pin": name, "level": level, "t_us": h.timestamp_us }),
                     );
                     let fw = self.fw_pins.entry(name.clone()).or_default();
+                    if level == 1 && fw.out == 0 {
+                        // Front montant : période en temps du firmware (inspecteur).
+                        let t = h.timestamp_us;
+                        let period = fw.last_rise_us.map(|prev| t.saturating_sub(prev));
+                        if period.is_some() && period != fw.period_us {
+                            fw.period_us = period;
+                            self.pins_dirty = true;
+                        }
+                        fw.last_rise_us = Some(t);
+                    }
                     fw.out = level;
                     let fw = *fw;
+                    if self.pins_dirty {
+                        self.schedule_ui();
+                    }
                     self.apply_firmware_pin(&name, fw).await;
+                }
+            }
+            msg::PWM_CONFIG | msg::PWM_DUTY | msg::PWM_ATTACH => {
+                let key = (r.u8(), r.u8());
+                let previous = self.pwm_pin(key);
+                match h.msg_type {
+                    msg::PWM_CONFIG => {
+                        let _ = r.u16();
+                        self.pwm_channels.entry(key).or_default().freq_hz = r.u32();
+                    }
+                    msg::PWM_DUTY => self.pwm_channels.entry(key).or_default().duty = r.u16(),
+                    _ => {
+                        let (port, pin) = (r.u8(), r.u8());
+                        if let Some(name) = self.pin_name(port, pin) {
+                            self.pwm_attached.insert(key, name);
+                        }
+                        self.pwm_channels.entry(key).or_default();
+                    }
+                }
+                // Tests : chaque trame PWM reçue, pour compter ce qui transite.
+                #[cfg(test)]
+                {
+                    let c = self.pwm_channels.get(&key).copied().unwrap_or_default();
+                    let _ = self.app.emit(
+                        "sim:test-pwm",
+                        serde_json::json!({ "unit": key.0, "channel": key.1, "freq_hz": c.freq_hz, "duty": c.duty, "t_us": h.timestamp_us }),
+                    );
+                }
+                self.pwm_changed(key, previous).await;
+            }
+            msg::ADC_CONFIG => {
+                let key = (r.u8(), r.u8());
+                let pin = self
+                    .adc_pins
+                    .iter()
+                    .find(|(_, k)| **k == key)
+                    .map(|(n, _)| n.clone());
+                match pin {
+                    Some(name) => {
+                        self.adc_configured.insert(name.clone());
+                        self.pins_dirty = true;
+                        self.schedule_ui();
+                        self.watch_net(&name);
+                        self.send_adc(&name).await;
+                    }
+                    None => self.warn(
+                        4,
+                        format!(
+                            "ADC{} canal {} absent de la carte {}",
+                            key.0, key.1, self.cfg.board.name
+                        ),
+                    ),
                 }
             }
             msg::WARN => {
@@ -953,7 +1464,8 @@ impl<R: Runtime> Actor<R> {
 
     async fn apply_firmware_pin(&mut self, name: &str, fw: FwPin) {
         let node = Node::Board(name.to_string());
-        let mut changed = self.net.set_drive(&node, Source::Firmware, fw.drive());
+        let drive = self.pin_drive(name, fw);
+        let mut changed = self.net.set_drive(&node, Source::Firmware, drive);
         changed.extend(self.net.set_pull(&node, Source::Firmware, fw.pull()));
         self.propagate(changed).await;
         self.watch_net(name); // configurée par le firmware : utilisée, même sans changement de niveau
@@ -1012,6 +1524,11 @@ impl<R: Runtime> Actor<R> {
         let names: Vec<String> = self.addr_to_pin.values().cloned().collect();
         for name in names {
             self.send_input(name).await;
+        }
+        self.last_adc.clear();
+        let adc: Vec<String> = self.adc_pins.keys().cloned().collect();
+        for name in adc {
+            self.send_adc(&name).await;
         }
         let mut w = Writer::default();
         // Version retenue : la plus petite des deux mineures (docs/protocol.md, 3.2).
@@ -1472,6 +1989,13 @@ impl<R: Runtime> Actor<R> {
             }
         });
     }
+}
+
+/// Tension en français : « 3,3 », « 4,98 ».
+fn fr_volts(v: f64) -> String {
+    let text = format!("{:.2}", v);
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    text.replace('.', ",")
 }
 
 fn endpoint_node(board: &Board, endpoint: &str) -> Option<Node> {

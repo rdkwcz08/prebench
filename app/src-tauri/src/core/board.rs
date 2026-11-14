@@ -20,6 +20,9 @@ pub struct Board {
     pub framework: Vec<String>,
     pub logic_voltage: f64,
     pub adc_bits: u8,
+    /// Tension de référence de l'ADC (pleine échelle) ; absente : logic_voltage.
+    #[serde(default)]
+    pub adc_vref: Option<f64>,
     #[serde(default)]
     pub reset: Option<String>,
     pub power: BTreeMap<String, f64>,
@@ -79,6 +82,9 @@ pub struct PinDef {
     pub caps: Vec<String>,
     #[serde(default)]
     pub external_pull: Option<String>,
+    /// STM32 : numéro de fonction alternative de chaque capacité (GPIO_AFx).
+    #[serde(default)]
+    pub af: BTreeMap<String, u8>,
     /// Contraintes signalées (input-only, strapping, flash ; section 7.2).
     #[serde(default)]
     pub constraints: Vec<String>,
@@ -110,6 +116,25 @@ impl Board {
 }
 
 impl Board {
+    /// Tension de pleine échelle de l'ADC, en volts.
+    pub fn adc_vref(&self) -> f64 {
+        self.adc_vref.unwrap_or(self.logic_voltage)
+    }
+
+    /// Canal ADC d'une broche (« adc1:CH0 » -> (1, 0) ; « adc:CH3 » -> (1, 3)).
+    pub fn adc_channel(&self, pin: &str) -> Option<(u8, u8)> {
+        self.pins.get(pin)?.caps.iter().find_map(|cap| {
+            let rest = cap.strip_prefix("adc")?;
+            let (unit, ch) = rest.split_once(':')?;
+            let unit = if unit.is_empty() {
+                1
+            } else {
+                unit.parse().ok()?
+            };
+            Some((unit, ch.strip_prefix("CH")?.parse().ok()?))
+        })
+    }
+
     /// Signal d'une extrémité côté carte : pastille « CN6:4 » (à partir de 1)
     /// ou signal « PA5 », « GND ». None : inconnu ou non câblable (NC…).
     pub fn signal_of(&self, endpoint: &str) -> Option<String> {

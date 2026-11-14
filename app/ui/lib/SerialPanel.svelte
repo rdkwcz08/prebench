@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { tick } from 'svelte';
+  import { bench } from './bench.svelte';
   import { decode, LINE_ENDINGS, serial, stamp, toHex, type LineEnding } from './serial.svelte';
   import Button from './ui/Button.svelte';
   import Icon from './ui/Icon.svelte';
@@ -19,16 +20,25 @@
 
   const port = $derived(serial.active);
   const warning = $derived(serial.mismatch(port));
+  /** Alimentation coupée : aucun firmware pour recevoir. */
+  const off = $derived(bench.status.state === 'off');
 
   /** Lignes à afficher : horodatage de leur premier octet, texte ou hexadécimal. */
   const lines = $derived.by(() => {
     if (!port) return [];
-    const out: { t: number; text: string }[] = [];
+    const out: { t: number; text: string; sys?: boolean }[] = [];
     if (serial.hex) {
-      for (const c of port.chunks) out.push({ t: c.t, text: toHex(c.data) });
+      for (const c of port.chunks) out.push({ t: c.t, text: c.sys ? decode(c.data) : toHex(c.data), sys: c.sys });
     } else {
       let current: { t: number; text: string } | null = null;
       for (const c of port.chunks) {
+        if (c.sys) {
+          // Repère sur sa propre ligne : la ligne en cours est close.
+          if (current !== null && (current as { text: string }).text !== '') out.push(current);
+          current = null;
+          out.push({ t: c.t, text: decode(c.data), sys: true });
+          continue;
+        }
         const parts = decode(c.data).replace(/\r\n?/g, '\n').split('\n');
         parts.forEach((part, i) => {
           if (current === null) current = { t: c.t, text: '' };
@@ -71,7 +81,7 @@
       <p class="empty">{port.label} : rien reçu pour l'instant.</p>
     {/if}
     {#each lines as l, i (i)}
-      <div class="line">{#if serial.timestamps}<span class="t">{stamp(l.t)}</span>{/if}{l.text}</div>
+      <div class="line" class:sys={l.sys}>{#if serial.timestamps}<span class="t">{stamp(l.t)}</span>{/if}{l.text}</div>
     {/each}
   </div>
   {#if port && port.id !== null}
@@ -79,7 +89,8 @@
       <input
         class="data"
         bind:value={text}
-        placeholder="Texte à envoyer sur {port.label}"
+        placeholder={off ? 'Alimentation coupée : rien à recevoir' : `Texte à envoyer sur ${port.label}`}
+        disabled={off}
         aria-label="Texte à envoyer"
         spellcheck="false"
         onkeydown={(e) => e.stopPropagation()}
@@ -95,7 +106,7 @@
           <option value={k}>{v.label}</option>
         {/each}
       </select>
-      <Button type="submit">Envoyer</Button>
+      <Button type="submit" disabled={off}>Envoyer</Button>
     </form>
   {/if}
 </div>
@@ -138,6 +149,11 @@
     margin-right: 16px;
     color: var(--pb-text-quiet);
   }
+  /* Repère de Prebench (maquette : .log .sys) : texte secondaire, police de l'interface. */
+  .sys {
+    color: var(--pb-text-quiet);
+    font-family: var(--pb-font-ui);
+  }
   .empty {
     margin: 0;
     color: var(--pb-text-quiet);
@@ -160,6 +176,9 @@
     color: var(--pb-text);
     font-size: 12px;
     user-select: text;
+  }
+  .send input:disabled {
+    opacity: 0.6;
   }
   .send input:focus {
     outline: 2px solid var(--pb-accent);

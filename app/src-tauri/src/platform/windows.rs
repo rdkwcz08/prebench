@@ -316,3 +316,48 @@ pub fn debug_requirements() -> super::DebugRequirements {
 pub fn bundle_debug_symbols(_program: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
+
+/// Temps CPU consommé par le fil appelant, en ns : budget des modèles de
+/// composants (section 8.1), indépendant de la charge de la machine.
+/// GetThreadTimes n'avance que par pas d'environ 15,6 ms (un appel court qui
+/// chevauche un pas compterait 15,6 ms) : on lit les cycles du fil
+/// (QueryThreadCycleTime, cycles du compteur TSC), convertis en ns par une
+/// fréquence du TSC mesurée une fois. Repli sur l'horloge monotone hors x86_64
+/// ou si l'appel échoue.
+pub fn thread_cpu_ns() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use windows_sys::Win32::System::Threading::GetCurrentThread;
+        use windows_sys::Win32::System::WindowsProgramming::QueryThreadCycleTime;
+        let mut cycles: u64 = 0;
+        // SAFETY : pseudo-handle du fil courant, toujours valide ; `cycles` est écrit par l'appel.
+        let ok = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) } != 0;
+        if ok {
+            let per_ns = tsc_cycles_per_ns();
+            if per_ns > 0.0 {
+                return (cycles as f64 / per_ns) as u64;
+            }
+        }
+    }
+    super::monotonic_ns()
+}
+
+/// Cycles du TSC par nanoseconde, mesurés une fois sur 20 ms d'horloge.
+#[cfg(target_arch = "x86_64")]
+fn tsc_cycles_per_ns() -> f64 {
+    static PER_NS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PER_NS.get_or_init(|| {
+        let t0 = std::time::Instant::now();
+        // SAFETY : instruction RDTSC, disponible sur tout processeur x86_64.
+        let c0 = unsafe { core::arch::x86_64::_rdtsc() };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // SAFETY : idem.
+        let c1 = unsafe { core::arch::x86_64::_rdtsc() };
+        let ns = t0.elapsed().as_nanos() as f64;
+        if ns > 0.0 {
+            c1.wrapping_sub(c0) as f64 / ns
+        } else {
+            0.0
+        }
+    })
+}

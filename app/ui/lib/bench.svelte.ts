@@ -28,7 +28,10 @@ import type {
 import { BOARD_ORIGIN } from './geometry';
 import { serial } from './serial.svelte';
 import { settings } from './settings.svelte';
-import type { Check, Level, Note, PlacedComponent, SaveView, Wire } from './types';
+import type { Check, Level, Note, PinConfig, PlacedComponent, SaveView, Wire } from './types';
+
+/** États d'une session de simulation : le cœur envoie états, nets et broches. */
+const SESSION: SimState[] = ['starting', 'running', 'paused', 'breakpoint', 'off'];
 import { loadView, type ViewComponent } from './views';
 
 /** Tampons bornés (règle 16.2.11). */
@@ -58,7 +61,8 @@ export interface LogLine {
 export class Instance {
   readonly id: string;
   readonly type: string;
-  readonly params: InstanceInfo['params'];
+  /** Paramètres (prebench.toml) ; modifiables dans l'inspecteur en mode Édition. */
+  params = $state<InstanceInfo['params']>({});
   readonly info: ComponentInfo | undefined;
   /** Coin haut-gauche, coordonnées monde ; modifiable en mode Édition. */
   pos = $state<[number, number]>([0, 0]);
@@ -118,6 +122,8 @@ export class Bench {
   pending = $state<string[]>([]);
   /** Niveaux des broches utilisées pendant la simulation (« sim:nets »). */
   nets = $state<Record<string, Level>>({});
+  /** Configuration des broches par le firmware (« sim:pins ») : inspecteur. */
+  pins = $state<Record<string, PinConfig>>({});
   /** Validations du câblage (section 9.2), recalculées à chaque enregistrement. */
   checks = $state<Check[]>([]);
   canUndo = $state(false);
@@ -143,12 +149,20 @@ export class Bench {
     this.watchBattery();
     await listen<StatesEvent>('sim:states', (e) => this.onStates(e.payload));
     await listen<StatusEvent>('sim:status', (e) => {
+      const previous = this.status.state;
       this.status = e.payload;
       if (e.payload.state === 'building' || e.payload.state === 'debug-wait') {
         this.pending = [];
         serial.reset(); // nouvelle simulation : tampons série vidés
       }
-      if (!['starting', 'running', 'paused', 'breakpoint'].includes(e.payload.state)) this.nets = {};
+      // Coupure et remise sous tension : repères dans le moniteur série (le
+      // Journal reçoit les siens du cœur).
+      if (e.payload.state === 'off' && previous !== 'off') serial.marker('Alimentation coupée');
+      if (previous === 'off' && e.payload.state === 'starting') serial.marker('Alimentation rétablie');
+      if (!SESSION.includes(e.payload.state)) {
+        this.nets = {};
+        this.pins = {};
+      }
       const s = e.payload.state;
       if (s !== 'running' && s !== 'paused' && s !== 'breakpoint') this.usage = null;
       if (s === 'stopped' || s === 'error' || s === 'idle') this.debug = null;
@@ -167,6 +181,9 @@ export class Bench {
       this.build = { running: false, result: e.payload };
     });
     await listen<ProjectChangedEvent>('project:changed', () => void this.refresh());
+    await listen<Record<string, PinConfig>>('sim:pins', (e) => {
+      this.pins = e.payload;
+    });
     await listen<Record<string, Level>>('sim:nets', (e) => {
       this.nets = { ...this.nets, ...e.payload };
     });
@@ -221,9 +238,14 @@ export class Bench {
     await this.loadPreview();
   }
 
-  /** Simulation en cours (états envoyés par le cœur). */
+  /** Simulation en cours (états envoyés par le cœur), alimentation coupée comprise. */
   get live(): boolean {
-    return ['starting', 'running', 'paused', 'breakpoint'].includes(this.status.state);
+    return SESSION.includes(this.status.state);
+  }
+
+  /** Session de débogage : reset et coupure appartiennent au débogueur. */
+  get debugging(): boolean {
+    return this.debug !== null || this.status.state === 'debug-wait' || this.status.state === 'breakpoint';
   }
 
   /** États initiaux hors simulation (modèles créés puis libérés par le cœur). */
@@ -267,6 +289,7 @@ export class Bench {
       if (old !== undefined && old.type === c.type) {
         old.pos = [c.pos[0], c.pos[1]];
         old.name = c.name ?? '';
+        old.params = { ...c.params };
         return old;
       }
       const inst = new Instance({ id: c.id, type: c.type, params: c.params, pos: c.pos }, this.project?.components[c.type], c.pos);
@@ -383,6 +406,15 @@ export class Bench {
     await this.commit(before);
   }
 
+  /** Modifie un paramètre d'un composant placé ; transmis au modèle en cours (onParamsChange). */
+  async setParam(id: string, key: string, value: string | number | boolean): Promise<void> {
+    const inst = this.instances.find((i) => i.id === id);
+    if (inst === undefined || inst.onboard || inst.params[key] === value) return;
+    const before = this.snapshot();
+    inst.params = { ...inst.params, [key]: value };
+    await this.commit(before);
+  }
+
   /** Pose une note en `pos` (monde) ; renvoie son index. */
   async addNote(pos: [number, number], text = 'Note'): Promise<number> {
     const before = this.snapshot();
@@ -461,7 +493,6 @@ export class Bench {
     await this.loadPreview();
   }
 
-  /** Exporte la sortie série dans le dossier du projet ; chemin écrit dans le Journal. */
   /** Export série : fenêtre « Enregistrer sous » ouverte par le cœur. */
   async exportSerial(name: string, text: string): Promise<void> {
     try {
@@ -536,8 +567,14 @@ export class Bench {
     await invoke('resume_simulation').catch((e: unknown) => this.log('prebench', String(e)));
   }
 
+  /** Reset : le firmware redémarre, la paillasse garde son état. Hors historique d'édition. */
   async reset(): Promise<void> {
     await invoke('reset_simulation').catch((e: unknown) => this.log('prebench', String(e)));
+  }
+
+  /** Interrupteur d'alimentation (section 10.4). Hors historique d'édition. */
+  async setPower(on: boolean): Promise<void> {
+    await invoke('set_power', { on }).catch((e: unknown) => this.log('prebench', String(e)));
   }
 
   /** Sur batterie : 30 images/s au lieu de 60 (section 11.3). */
