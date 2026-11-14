@@ -55,12 +55,11 @@
   .orange {
     stroke: #e07b39;
   }
-  .ears,
   .body {
     fill: #2e5fa8;
   }
   .ears {
-    filter: brightness(0.85);
+    fill: #27518f; /* teinte plus sombre, sans filtre (coût de rendu) */
   }
   .boss {
     fill: #24497f;

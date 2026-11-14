@@ -49,7 +49,7 @@ La référence unique du projet est [docs/cahier-des-charges.md](docs/cahier-des
 
 - `prebench-dev` (privé) : travail quotidien. `prebench` (public) : un commit « Release vX.Y.Z » par version, publié par `./release.sh vX.Y.Z`.
 - Les fichiers internes sont marqués `export-ignore` dans `.gitattributes`. Aucun secret dans le dépôt : clé de l'updater et tokens vont uniquement dans les secrets GitHub.
-- CI privée (`ci.yml`) : Windows + Linux. Release publique (`release.yml`) : macOS arm64 + Windows x64.
+- CI privée (`ci.yml`) : Linux à chaque push ; Windows quand le code propre au système change, sur un tag, ou à la demande (`gh workflow run ci.yml --ref main`, exigé par `release.sh` avant une release). Release publique (`release.yml`) : macOS arm64 + Windows x64.
 
 ## Vérifications locales
 

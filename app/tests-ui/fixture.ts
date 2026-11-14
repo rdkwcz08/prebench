@@ -202,8 +202,31 @@ function installTauriMock(json: string): void {
   w.__pbSetResponse = (cmd: string, json: string): void => {
     data[cmd] = JSON.parse(json);
   };
-  w.__pbEmit = (event: string, payload: unknown): void => {
+  const send = (event: string, payload: unknown): void => {
     for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload });
+  };
+  // Les tests émettent encore « sim:states », « sim:nets », « sim:pins »
+  // (instantané complet) et « sim:uart » : traduits en image « sim:frame »,
+  // comme le cœur les regroupe (broches : changements, null si retirée).
+  let sentPins: Record<string, unknown> = {};
+  w.__pbEmit = (event: string, payload: unknown): void => {
+    switch (event) {
+      case 'sim:states':
+        return send('sim:frame', { states: payload });
+      case 'sim:nets':
+        return send('sim:frame', { nets: payload });
+      case 'sim:uart':
+        return send('sim:frame', { uart: [payload] });
+      case 'sim:pins': {
+        const full = payload as Record<string, unknown>;
+        const delta: Record<string, unknown> = { ...full };
+        for (const name of Object.keys(sentPins)) if (!(name in full)) delta[name] = null;
+        sentPins = full;
+        return send('sim:frame', { pins: delta });
+      }
+      default:
+        return send(event, payload);
+    }
   };
 }
 

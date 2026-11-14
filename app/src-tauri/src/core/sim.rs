@@ -9,13 +9,15 @@
 //   firmware -> lecteur -> acteur -> réseau -> GPIO_INPUT (firmware) / onPinChange (modèles)
 //   modèle -> drive/pull -> acteur -> réseau -> ...
 //   vue -> component_control -> acteur -> onControl (modèles)
-//   modèles -> invalidate -> une fois par image : getState -> « sim:states » (vues)
-//   réseau -> niveaux des broches utilisées, une fois par image -> « sim:nets » ;
+//   une fois par image, un seul événement « sim:frame » (section 11.3 : une
+//   seule évaluation dans la WebView par image) : états des modèles modifiés
+//   (getState, après invalidate), niveaux des broches utilisées, octets UART,
+//   configuration des broches qui a changé (null : plus configurée) ;
 //   PWM_CONFIG / PWM_DUTY -> broche en fonction alternative du timer -> réseau
 //     (fréquence et rapport cyclique, jamais les fronts) -> modèles (PinState.pwm) ;
 //   modèle -> setVoltage -> réseau -> ADC_VALUE (tension -> valeur brute selon
 //     adc_bits et adc_vref de la carte) ; valeurs initiales avant WELCOME ;
-//   UART_CONFIG -> « sim:uart-config » ; UART_TX -> une fois par image -> « sim:uart » ;
+//   UART_CONFIG -> « sim:uart-config » ;
 //   moniteur série -> uart_send -> UART_RX (trames de 4 Kio au plus)
 //   conflit ou entrée lue flottante -> avertissement (section 9.2)
 //   PING Worker : firmware -> acteur -> onPing du composant d'écho -> PONG (sans WebView)
@@ -284,8 +286,9 @@ struct FwPin {
     period_us: Option<u64>,
 }
 
-/// Configuration d'une broche par le firmware, pour l'inspecteur (« sim:pins »).
-#[derive(Serialize, Clone)]
+/// Configuration d'une broche par le firmware, pour l'inspecteur (partie
+/// « pins » de « sim:frame »).
+#[derive(Serialize, Clone, PartialEq)]
 struct PinConfigEvent {
     /// GPIO_CONFIG (docs/protocol.md) : 0 entrée, 1 sortie push-pull, 2 sortie
     /// drain ouvert, 3 et 4 alternative, 5 analogique, 6 désactivée.
@@ -303,14 +306,14 @@ struct PinConfigEvent {
     adc: Option<AdcView>,
 }
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, Clone, Copy, PartialEq)]
 struct PwmView {
     freq_hz: u32,
     /// Rapport cyclique de 0 à 1.
     duty: f64,
 }
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, Clone, Copy, PartialEq)]
 struct AdcView {
     volts: f64,
     raw: u16,
@@ -385,6 +388,10 @@ struct Actor<R: Runtime> {
     adc_configured: BTreeSet<String>,
     /// Dernière valeur brute envoyée au firmware, par broche.
     last_adc: HashMap<String, u16>,
+    /// Configuration des broches déjà envoyée à l'interface (envoi des seuls changements).
+    sent_pins: BTreeMap<String, PinConfigEvent>,
+    /// Image en attente des états des modèles (FlushStates envoyé).
+    awaiting_states: bool,
     /// Paramètres connus des modèles, par composant.
     params: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     ui_flush_scheduled: bool,
@@ -463,6 +470,8 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         adc_pins,
         adc_configured: BTreeSet::new(),
         last_adc: HashMap::new(),
+        sent_pins: BTreeMap::new(),
+        awaiting_states: false,
         params,
         ui_flush_scheduled: false,
         out_seq: 0,
@@ -896,7 +905,8 @@ impl<R: Runtime> Actor<R> {
                         )
                     })
                     .collect();
-                let _ = self.app.emit("sim:states", map);
+                self.awaiting_states = false;
+                self.emit_frame(map);
             }
             ModelEvent::Warn(text) => self.warn(0, text),
             ModelEvent::Log(text) => {
@@ -1165,20 +1175,70 @@ impl<R: Runtime> Actor<R> {
         });
     }
 
+    /// Une image : les états des modèles sont demandés au fil « modèles » ;
+    /// l'image part avec eux (ModelEvent::States), sinon tout de suite.
     fn flush_ui(&mut self) {
         self.ui_flush_scheduled = false;
+        if self.awaiting_states {
+            return; // l'image en attente emportera aussi ces changements
+        }
         if std::mem::take(&mut self.states_dirty) {
-            self.send_model(ModelCmd::FlushStates);
+            let sent = self
+                .models
+                .as_ref()
+                .is_some_and(|m| m.send(ModelCmd::FlushStates));
+            if sent {
+                self.awaiting_states = true;
+                return;
+            }
+        }
+        self.emit_frame(serde_json::Map::new());
+    }
+
+    /// « sim:frame » : états, niveaux, octets UART et broches modifiés depuis
+    /// l'image précédente, en un seul événement ; rien s'il n'y a rien.
+    fn emit_frame(&mut self, states: serde_json::Map<String, serde_json::Value>) {
+        let mut frame = serde_json::Map::new();
+        if !states.is_empty() {
+            frame.insert("states".into(), serde_json::Value::Object(states));
         }
         if !self.nets_out.is_empty() {
             let nets = std::mem::take(&mut self.nets_out);
-            let _ = self.app.emit("sim:nets", nets);
+            frame.insert("nets".into(), serde_json::json!(nets));
         }
-        for (id, data) in std::mem::take(&mut self.uart_out) {
-            let _ = self.app.emit("sim:uart", UartEvent { id, data });
+        let uart: Vec<UartEvent> = std::mem::take(&mut self.uart_out)
+            .into_iter()
+            .map(|(id, data)| UartEvent { id, data })
+            .collect();
+        if !uart.is_empty() {
+            frame.insert("uart".into(), serde_json::json!(uart));
         }
         if std::mem::take(&mut self.pins_dirty) {
-            let _ = self.app.emit("sim:pins", self.pin_configs());
+            let now = self.pin_configs();
+            let mut delta = serde_json::Map::new();
+            for (name, cfg) in &now {
+                if self.sent_pins.get(name) != Some(cfg) {
+                    delta.insert(name.clone(), serde_json::json!(cfg));
+                }
+            }
+            for name in self.sent_pins.keys().filter(|n| !now.contains_key(*n)) {
+                delta.insert(name.clone(), serde_json::Value::Null);
+            }
+            self.sent_pins = now;
+            if !delta.is_empty() {
+                frame.insert("pins".into(), serde_json::Value::Object(delta));
+            }
+        }
+        if !frame.is_empty() {
+            let _ = self.app.emit("sim:frame", frame);
+        }
+        // Changements arrivés pendant l'attente des états : image suivante.
+        if self.states_dirty
+            || self.pins_dirty
+            || !self.nets_out.is_empty()
+            || !self.uart_out.is_empty()
+        {
+            self.schedule_ui();
         }
     }
 
@@ -1989,6 +2049,41 @@ impl<R: Runtime> Actor<R> {
             }
         });
     }
+}
+
+/// Tests : « sim:frame » découpé en événements séparés, comme avant le
+/// regroupement par image (« sim:nets », « sim:uart », « sim:pins »,
+/// « sim:states »). La configuration des broches est cumulée : « sim:pins »
+/// porte l'instantané complet, reconstruit à partir des changements.
+#[cfg(test)]
+pub(crate) fn split_frame(
+    frame: &serde_json::Value,
+    pins: &mut serde_json::Map<String, serde_json::Value>,
+) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    if let Some(nets) = frame.get("nets") {
+        out.push(("sim:nets".to_string(), nets.clone()));
+    }
+    for u in frame["uart"].as_array().into_iter().flatten() {
+        out.push(("sim:uart".to_string(), u.clone()));
+    }
+    if let Some(delta) = frame["pins"].as_object() {
+        for (name, cfg) in delta {
+            if cfg.is_null() {
+                pins.remove(name);
+            } else {
+                pins.insert(name.clone(), cfg.clone());
+            }
+        }
+        out.push((
+            "sim:pins".to_string(),
+            serde_json::Value::Object(pins.clone()),
+        ));
+    }
+    if let Some(states) = frame.get("states") {
+        out.push(("sim:states".to_string(), states.clone()));
+    }
+    out
 }
 
 /// Tension en français : « 3,3 », « 4,98 ».

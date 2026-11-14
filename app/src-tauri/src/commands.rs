@@ -1298,8 +1298,7 @@ mod reload_tests {
     );
 
     /// Événements écoutés par les tests de ce module.
-    const EVENTS: [&str; 6] = [
-        "sim:states",
+    const EVENTS: [&str; 5] = [
         "sim:status",
         "sim:log",
         "sim:test-gpio",
@@ -1309,6 +1308,20 @@ mod reload_tests {
 
     fn listen_events(app: &tauri::App<tauri::test::MockRuntime>) -> Events {
         let (tx, rx) = mpsc::channel();
+        // Images du cœur : leurs états, comme l'ancien « sim:states ».
+        {
+            let tx = tx.clone();
+            let pins = std::sync::Mutex::new(serde_json::Map::new());
+            app.handle().listen_any("sim:frame", move |e| {
+                let v = serde_json::from_str(e.payload()).unwrap_or(Value::Null);
+                let mut pins = pins.lock().unwrap_or_else(|e| e.into_inner());
+                for (name, part) in crate::core::sim::split_frame(&v, &mut pins) {
+                    if name == "sim:states" {
+                        let _ = tx.send((name, part));
+                    }
+                }
+            });
+        }
         for name in EVENTS {
             let tx = tx.clone();
             app.handle().listen_any(name, move |e| {

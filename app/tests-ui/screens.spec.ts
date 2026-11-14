@@ -174,7 +174,7 @@ for (const theme of THEMES) {
   test(`inspecteur de broche, thème ${theme.name}`, async ({ bench }, info) => {
     const { page } = bench;
     await page.emulateMedia({ colorScheme: theme.scheme, reducedMotion: 'reduce' });
-    await bench.emit('sim:status', { state: 'running', message: 'Nucleo-F401RE — stm32-hal, libvmcu 0.2.0' });
+    await bench.emit('sim:status', { state: 'running', message: 'Nucleo-F401RE — stm32-hal, libvmcu 0.2.1' });
     await bench.emit('sim:states', { LD2: { brightness: 1 }, B1: { pressed: false }, echo: { pings: 0 } });
     await bench.emit('sim:pins', { PA5: { mode: 1, pull: 0, function: null, period_us: 1_000_000 } });
     await bench.emit('sim:nets', { PA5: 'high', PC13: 'pulled-high' });
@@ -209,7 +209,7 @@ for (const theme of THEMES) {
     });
     await bench.emit('project:changed', { project: true, views: [], models: [] });
     await page.getByRole('button', { name: 'Ajuster la vue' }).click();
-    await bench.emit('sim:status', { state: 'running', message: 'Nucleo-F401RE — stm32-hal, libvmcu 0.2.0' });
+    await bench.emit('sim:status', { state: 'running', message: 'Nucleo-F401RE — stm32-hal, libvmcu 0.2.1' });
     await bench.emit('sim:states', {
       LD2: { brightness: 0 },
       B1: { pressed: false },

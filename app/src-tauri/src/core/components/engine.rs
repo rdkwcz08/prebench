@@ -593,9 +593,8 @@ fn run(specs: Vec<InstanceSpec>, rx: &mpsc::Receiver<ModelCmd>, emit: &dyn Fn(Mo
                         }
                     }
                 }
-                if !states.is_empty() {
-                    emit(ModelEvent::States(states));
-                }
+                // Toujours une réponse, même vide : l'image du cœur l'attend.
+                emit(ModelEvent::States(states));
             }
         }
         flush_events(&mut instances, &mut dirty_notified, emit);

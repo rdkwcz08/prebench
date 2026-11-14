@@ -139,7 +139,7 @@ prebench/
 ├── CHANGELOG.md
 ├── release.sh           # publication vers le dépôt public (section 12.5)
 ├── .gitattributes       # export-ignore des fichiers internes
-├── .github/workflows/   # ci.yml (privé : Windows + Linux), release.yml (public)
+├── .github/workflows/   # ci.yml (privé : Linux, Windows à la demande), release.yml (public)
 ├── app/                 # Tauri : src-tauri (Rust) + ui (Svelte)
 │   ├── src-tauri/src/
 │   │   ├── core/        # orchestrateur, routage, réseau logique
@@ -576,7 +576,8 @@ Taille de l'app visée : de l'ordre de 10 à 20 Mo, hors toolchains.
 
 ### 11.3 Rendu de l'interface
 
-- **Coalescence** : le cœur envoie à l'interface l'état par image (`requestAnimationFrame`), jamais chaque événement.
+- **Coalescence** : le cœur envoie à l'interface un seul événement par image (`sim:frame` : états des composants modifiés, niveaux, octets série, broches dont la configuration a changé), jamais chaque événement ; l'interface l'applique en une seule mise à jour (`requestAnimationFrame`), donc une seule recomposition de la fenêtre par image.
+- **Coût d'une image** : chaque image qui change quelque chose à l'écran coûte une recomposition de la fenêtre (WebContent et GPU) ; aucune animation n'est entretenue quand l'état ne bouge pas (halo d'une LED seulement à l'allumage, pas de transition sur une variation de luminosité, aucun filtre SVG ou CSS), le moniteur série n'ajoute que ses nouvelles lignes, le traceur ne se redessine qu'à l'arrivée de données. Mesure manuelle du rendu : `app/tests-ui/perf.spec.ts` (flux du cœur enregistré par le test `budget_core_profile`, rejoué dans l'interface).
 - Luminosité d'une LED en PWM = rapport cyclique mesuré sur l'image.
 - Écrans : redessinés uniquement si le framebuffer est marqué « modifié ».
 - Fenêtre masquée ou réduite : rendu arrêté, la simulation continue.
@@ -625,7 +626,7 @@ L'app fonctionne entièrement hors ligne et cible macOS (Apple Silicon) et Windo
 ### 12.4 Méthode
 
 - Développement sur Mac, dans le dépôt privé.
-- CI du dépôt privé : Windows et Linux à chaque push. Les minutes macOS y sont décomptées dix fois sur le quota gratuit : les tests macOS se font en local.
+- CI du dépôt privé : Linux à chaque push (aucun run si seuls des fichiers `.md` ou la maquette changent ; Playwright seulement si l'interface, les composants ou la carte changent) ; Windows, dont les minutes comptent double, seulement quand le code propre au système change (`platform/`, `vmcu_platform_*`, `build/`, CMake, dépendances Cargo), sur un tag de version ou à la demande (`gh workflow run ci.yml --ref main`) ; `release.sh` refuse de publier sans CI Windows réussie sur le commit. Les minutes macOS y sont décomptées dix fois : les tests macOS se font en local.
 - CI complète macOS + Windows dans le dépôt public, à chaque release, gratuite et illimitée pour un dépôt public.
 - Surcoût estimé du multiplateforme prévu dès le départ : environ 20 à 30 % d'effort, surtout sur la compilation hôte et les délais.
 
@@ -716,7 +717,7 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
 
 ### Phase 2 — Socle V1
 
-Étapes livrables, dans l'ordre. Chacune est testée, committée et passe la CI (Windows + Linux) avant la suivante. Toute étape qui touche l'interface applique la charte `docs/design.md` et la maquette `docs/design/maquette-ecran-principal.html`. Tests manuels sous Windows à chaque release seulement : entre deux releases, la CI suffit.
+Étapes livrables, dans l'ordre. Chacune est testée, committée et passe la CI (Linux, et Windows quand le code propre au système change) avant la suivante. Toute étape qui touche l'interface applique la charte `docs/design.md` et la maquette `docs/design/maquette-ecran-principal.html`. Tests manuels sous Windows à chaque release seulement : entre deux releases, la CI suffit.
 
 1. **CI et reports de la phase 1** : tests des vues dans un navigateur headless (Playwright), uniquement dans la CI Linux, avec montage réel des vues compilées à l'exécution (le test Node de la phase 1 ne vérifie que l'évaluation en module ES) ; captures de l'écran principal en thème clair et sombre publiées comme artefact de la CI ; rapport de `--verifier-installation` affiché une seule fois sur macOS.
 2. **Fondations visuelles** (étape 1 bis) : jetons CSS `--pb-*` clair et sombre (charte, section 2), thème du système ou choix manuel, squelette de l'écran (charte, section 4), composants de base (charte, section 5), jeu d'icônes au trait ; vues led, button, echo et bannière des prérequis sur ces fondations.
@@ -733,7 +734,8 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
 **Critère de passage** : budgets de la section 11.1 respectés ; un firmware en `while(1)` sans délai ne dépasse pas le plafond.
 
 - [ ] Budgets de la section 11.1 mesurés avec le projet `tests/budget` (Nucleo + 5 composants simples, tous actifs ; l'OLED du budget arrive en phase 3) et les scripts `mesure.sh` / `mesure.ps1` : CPU consommé pendant 60 s ÷ durée (% d'un cœur), mémoire de l'app, de sa WebView et du firmware (build « sim » en Debug).
-  - macOS (14 novembre 2026, MacBook Apple Silicon, app 0.2.0 en release) : app ouverte sans simulation 0,0 % (moins de 0,01 s de CPU en 60 s) et 87 Mo (app 27, WebKit 60) ; en simulation : à mesurer.
+  - macOS, app 0.2.0 installée (14 novembre 2026, MacBook Air Apple Silicon, mesures de l'utilisateur) : à vide 0 % et 67 Mo ; en simulation 60 % d'un cœur et 301 Mo (app 10 %, WebContent 27 %, GPU 23 %) : **budget dépassé**. Causes trouvées par rejeu du flux du cœur dans l'interface (`perf.spec.ts`, Chromium, 24,5 images/s) : transition du halo des LED relancée à chaque variation de luminosité (animation permanente), quatre événements par image au lieu d'un, moniteur série reconstruit à chaque octet. Corrigé en 0.2.1 : navigateur de 43 % à 21 % d'un cœur dans ce banc. App 0.2.1 : à mesurer.
+  - Le script `mesure.sh` de la 0.2.0 comptait des processus WebKit d'autres apps et manquait le firmware : corrigé en 0.2.1 (processus responsable = Prebench).
   - Windows : à mesurer.
   - Taille de l'app : 12,5 Mo (bundle macOS), dans la cible de 10 à 20 Mo.
 - [x] Garde-fous (14 novembre 2026, Mac ; mêmes tests en CI Windows et Linux) : un `while(1)` sans délai est mis en pause après 5,8 s de temps CPU consommé (seuil : 5 s à plus de 80 % d'un cœur), puis suspendu (test `guard_busy_loop_pauses`) ; une fuite mémoire est arrêtée à 270 Mo (plafond 256 Mo, mesure à 4 Hz au-delà de 128 Mo, test `guard_memory_leak_stops`).
@@ -849,7 +851,7 @@ Produis, complets et précédés de leur chemin :
    I2C1 PB8/PB9, SPI1, 4 entrées ADC, 4 sorties PWM).
 6. Le schéma de prebench.toml.
 7. CLAUDE.md : résumé de la section 16 et renvoi au cahier des charges.
-8. release.sh, .github/workflows/ci.yml (privé : Windows + Linux) et release.yml
+8. release.sh, .github/workflows/ci.yml (privé : Linux, Windows à la demande) et release.yml
    (public : macOS arm64 + Windows x64, GitHub Release, updater Tauri), section 12.5.
 Avant d'écrire, liste en 10 lignes maximum tes hypothèses et les points ambigus.
 Après l'étape 1, ARRÊTE-TOI et attends ma validation.

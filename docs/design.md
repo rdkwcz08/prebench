@@ -156,11 +156,11 @@ Icônes : un seul jeu au trait (1,5 px), 16 px dans les barres. Symboles électr
 
 Le mouvement ne montre qu'un changement d'état réel :
 
-- une LED s'allume avec un halo de 80 ms, s'éteint sans transition ;
+- une LED s'allume avec un halo de 80 ms, s'éteint sans transition ; une variation de luminosité (fondu PWM) s'affiche sans transition, pour qu'aucune animation ne tourne en continu ;
 - un panneau s'ouvre ou se replie en 120 ms ;
 - un fil se pose avec une courte retombée.
 
-Rien d'autre ne bouge. `prefers-reduced-motion` supprime halos et transitions.
+Rien d'autre ne bouge. `prefers-reduced-motion` supprime halos et transitions. Pas de filtre (SVG ou CSS `filter`) ni d'effet recalculé à chaque image : une teinte plus sombre est une autre couleur, pas un filtre.
 
 ## 7. Écriture
 

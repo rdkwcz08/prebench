@@ -171,19 +171,27 @@ fn start_project_full(
     let firmware = build_locked(root, dir, build_dir);
 
     let (tx, rx) = mpsc::channel();
+    // Images du cœur : découpées en événements séparés pour les tests.
+    {
+        let tx = tx.clone();
+        let pins = std::sync::Mutex::new(serde_json::Map::new());
+        app.handle().listen_any("sim:frame", move |event| {
+            let value = serde_json::from_str(event.payload()).unwrap_or(Value::Null);
+            let mut pins = pins.lock().unwrap_or_else(|e| e.into_inner());
+            for part in super::split_frame(&value, &mut pins) {
+                let _ = tx.send(part);
+            }
+        });
+    }
     for name in [
-        "sim:states",
         "sim:status",
         "sim:log",
         "sim:warn",
         "sim:usage",
         "sim:guard",
-        "sim:nets",
-        "sim:uart",
         "sim:uart-config",
         "sim:test-gpio",
         "sim:test-pwm",
-        "sim:pins",
     ] {
         let tx = tx.clone();
         app.handle().listen_any(name, move |event| {
@@ -978,5 +986,76 @@ fn cubemx_generated_project() {
     let (_, pins) = rec.wait(|name, v| name == "sim:pins" && v["PA2"].is_object());
     assert_eq!(pins["PA2"]["mode"], 3, "{pins}");
     assert_eq!(pins["PA2"]["function"], "uart2:TX", "{pins}");
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Temps CPU consommé par ce processus (cœur, fil « modèles », test), en ms.
+fn self_cpu_ms() -> u64 {
+    crate::platform::process_usage(std::process::id())
+        .map(|u| u64::try_from(u.cpu_time.as_millis()).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// Mesure du cœur sur la paillasse de tests/budget (section 11.1), hors
+/// interface : CPU du cœur et du firmware, événements envoyés à la WebView
+/// (nombre et taille par seconde). Enregistre le flux dans
+/// target/budget-events.json pour le rejouer dans l'interface
+/// (app/tests-ui/perf.spec.ts). À lancer à la main, en release :
+///   cargo test --release --lib -- --ignored budget_core_profile --nocapture
+#[test]
+#[ignore = "mesure manuelle (release)"]
+fn budget_core_profile() {
+    let dir = repo_root().join("tests").join("budget");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    // Pot à mi-course, puis 3 s de mise en route.
+    let _ = sim.tx.try_send(SimMsg::Control {
+        component: "pot1".into(),
+        control: "position".into(),
+        value_json: "0.6".into(),
+    });
+    let warm = Instant::now() + Duration::from_secs(3);
+    rec.wait(|_, _| Instant::now() >= warm);
+
+    const SECONDS: u64 = 20;
+    let cpu0 = self_cpu_ms();
+    let mut fw0 = None;
+    let mut fw1 = 0;
+    let t0 = Instant::now();
+    let end = t0 + Duration::from_secs(SECONDS);
+    let mut stats: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    let mut log = Vec::new();
+    rec.wait(|name, v| {
+        let text = v.to_string();
+        let s = stats.entry(name.to_string()).or_default();
+        s.0 += 1;
+        s.1 += text.len() as u64;
+        if name == "sim:usage" {
+            let ms = v["cpu_time_ms"].as_u64().unwrap_or(0);
+            fw0.get_or_insert(ms);
+            fw1 = ms;
+        }
+        if !name.starts_with("sim:test-") && name != "sim:usage" {
+            log.push(serde_json::json!({ "t": t0.elapsed().as_millis() as u64, "name": name, "payload": v }));
+        }
+        Instant::now() >= end
+    });
+    let wall = t0.elapsed().as_secs_f64();
+    let core = (self_cpu_ms() - cpu0) as f64 / 10.0 / wall;
+    let fw = (fw1 - fw0.unwrap_or(fw1)) as f64 / 10.0 / wall;
+    println!("Cœur (processus de test) : {core:.1} % d'un cœur ; firmware : {fw:.1} %");
+    println!("Événements vers l'interface, par seconde :");
+    for (name, (n, bytes)) in &stats {
+        println!(
+            "  {name:<16} {:>7.1} /s {:>9.0} octets/s",
+            *n as f64 / wall,
+            *bytes as f64 / wall
+        );
+    }
+    let out = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("budget-events.json");
+    std::fs::write(&out, serde_json::Value::Array(log).to_string()).expect("écriture du flux");
+    println!("Flux enregistré : {}", out.display());
     let _ = sim.tx.try_send(SimMsg::Stop);
 }

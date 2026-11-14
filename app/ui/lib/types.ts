@@ -174,6 +174,17 @@ export interface PinConfig {
 /** États des composants modifiés depuis l'image précédente. */
 export type StatesEvent = Record<string, unknown>;
 
+/**
+ * Une image du cœur (« sim:frame », section 11.3) : seulement ce qui a changé
+ * depuis l'image précédente. Broches : null quand le firmware ne la configure plus.
+ */
+export interface FrameEvent {
+  states?: StatesEvent;
+  nets?: Record<string, Level>;
+  uart?: { id: number; data: number[] }[];
+  pins?: Record<string, PinConfig | null>;
+}
+
 export type SimState =
   | 'idle'
   | 'building'

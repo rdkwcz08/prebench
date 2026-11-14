@@ -1,6 +1,7 @@
 // app/ui/lib/serial.svelte.ts — Moniteur série et traceur (section 10.4, phase 2 étape 6).
 //
-// Un port par UART du firmware (« sim:uart », « sim:uart-config ») plus la
+// Un port par UART du firmware (partie « uart » de « sim:frame »,
+// « sim:uart-config ») plus la
 // sortie standard du firmware (printf de l'ordinateur hôte, lignes « stdout »).
 // - Tampon borné à 1 Mo par port (section 11.2) : les plus anciens octets cèdent.
 // - Débit du moniteur choisi par port ; différent du débit configuré par le
@@ -47,6 +48,10 @@ export interface Port {
   firmwareBaud: number | null;
   chunks: Chunk[];
   bytes: number;
+  /** Morceaux retirés en tête (tampon plein) : index absolu = dropped + index. */
+  dropped: number;
+  /** Augmente à chaque « Effacer » : les lignes affichées sont à reconstruire. */
+  epoch: number;
 }
 
 export interface Series {
@@ -84,8 +89,10 @@ class Serial {
         this.monitorBaud = { ...this.monitorBaud, [p.key]: DEFAULT_BAUD };
       }
     });
-    await listen<{ id: number; data: number[] }>('sim:uart', (e) => {
-      this.push(this.port(String(e.payload.id), uartLabel(e.payload.id), e.payload.id), Uint8Array.from(e.payload.data));
+    await listen<{ uart?: { id: number; data: number[] }[] }>('sim:frame', (e) => {
+      for (const u of e.payload.uart ?? []) {
+        this.push(this.port(String(u.id), uartLabel(u.id), u.id), Uint8Array.from(u.data));
+      }
     });
     await listen<{ source: string; text: string }>('sim:log', (e) => {
       if (e.payload.source === 'stdout') {
@@ -105,7 +112,7 @@ class Serial {
   private port(key: string, label: string, id: number | null): Port {
     let p = this.ports.find((x) => x.key === key);
     if (p === undefined) {
-      this.ports = [...this.ports, { key, label, id, firmwareBaud: null, chunks: [], bytes: 0 }];
+      this.ports = [...this.ports, { key, label, id, firmwareBaud: null, chunks: [], bytes: 0, dropped: 0, epoch: 0 }];
       p = this.ports[this.ports.length - 1]!;
       if (this.current === '' || (this.current === 'stdout' && id !== null)) this.current = key;
     }
@@ -117,6 +124,7 @@ class Serial {
     p.bytes += data.length;
     while (p.bytes > MAX_BYTES && p.chunks.length > 1) {
       p.bytes -= p.chunks.shift()!.data.length;
+      p.dropped++;
     }
     if (p.key === this.current) this.plot(p.key, decoder.decode(data, { stream: false }));
   }
@@ -178,6 +186,8 @@ class Serial {
     if (p) {
       p.chunks = [];
       p.bytes = 0;
+      p.dropped = 0;
+      p.epoch++;
     }
     this.series = [];
     this.partial = {};

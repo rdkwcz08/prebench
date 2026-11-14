@@ -62,3 +62,6 @@ __pycache__/
 app/test-results/
 app/test-screens/
 app/playwright-report/
+
+# Icône Liquid Glass compilée par release.yml (jamais commitée)
+app/src-tauri/icons/Assets.car

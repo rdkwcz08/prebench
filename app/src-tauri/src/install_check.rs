@@ -98,7 +98,8 @@ async fn check<R: Runtime>(
     report.push(format!("projet : {}", req.project_dir.display()));
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Seen>();
-    for name in ["sim:log", "sim:status", "sim:states"] {
+    // « sim:frame » : une image du cœur ; l'état de LD2 est dans sa partie « states ».
+    for name in ["sim:log", "sim:status", "sim:frame"] {
         let tx = tx.clone();
         app.listen_any(name, move |event| {
             let v: serde_json::Value =
@@ -109,7 +110,7 @@ async fn check<R: Runtime>(
                     v["state"].as_str().unwrap_or_default().to_owned(),
                     v["message"].as_str().unwrap_or_default().to_owned(),
                 ),
-                _ => match v["LD2"]["brightness"].as_f64() {
+                _ => match v["states"]["LD2"]["brightness"].as_f64() {
                     Some(b) => Seen::Ld2(format!("{b}")),
                     None => return,
                 },

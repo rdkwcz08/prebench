@@ -16,7 +16,7 @@
 #ifndef VMCU_DEFAULT_FRAMEWORK
 #define VMCU_DEFAULT_FRAMEWORK "stm32-hal"
 #endif
-#define VMCU_LIBVMCU_VERSION "0.2.0"
+#define VMCU_LIBVMCU_VERSION "0.2.1"
 
 /* Garde-fous (section 5.5). */
 #define VMCU_GUARD_CALLS       10000u   /* appels sans sommeil avant micro-pause */

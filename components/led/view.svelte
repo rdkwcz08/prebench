@@ -3,13 +3,14 @@
   (docs/design/maquette-ecran-principal.html, LED1).
   Redessinée uniquement quand `state` change (le modèle appelle invalidate()).
   Coordonnées identiques au manifeste : 40 × 80, anode en x = 14, cathode en x = 26.
-  Halo de 80 ms à l'allumage, extinction sans transition (charte, section 6).
+  Halo de 80 ms à l'allumage seulement ; extinction et variations de luminosité sans transition (charte, section 6).
 -->
 <script lang="ts">
   import type { ComponentViewProps } from '../component-api';
   import type { LedColor, LedParams, LedState } from './model';
 
-  let { state, params }: ComponentViewProps<LedParams, LedState> = $props();
+  // Prop « state » renommé : le nom state masquerait la rune $state.
+  let { state: model, params }: ComponentViewProps<LedParams, LedState> = $props();
 
   /** Matériaux : couleur allumée, éteinte et halo de chaque LED. */
   const COLORS: Record<LedColor, { on: string; off: string; glow: string; name: string }> = {
@@ -23,15 +24,34 @@
 
   const uid = $props.id();
   const palette = $derived(COLORS[params.color] ?? COLORS.red);
-  const level = $derived(Math.min(1, Math.max(0, state.brightness)));
+  const level = $derived(Math.min(1, Math.max(0, model.brightness)));
   const lit = $derived(level > 0);
+
+  /*
+   * Halo de 80 ms seulement à l'allumage (passage d'éteinte à allumée) : une
+   * variation de luminosité (fondu PWM) s'affiche sans transition, sinon la
+   * vue serait en animation permanente (section 11.1).
+   */
+  let igniting = $state(false);
+  let wasLit = false;
+  $effect(() => {
+    const now = lit;
+    if (now && !wasLit) {
+      wasLit = true;
+      igniting = true;
+      const timer = setTimeout(() => (igniting = false), 80);
+      return () => clearTimeout(timer);
+    }
+    wasLit = now;
+    igniting = false;
+  });
 </script>
 
 <svg
   width="40"
   height="80"
   viewBox="0 0 40 80"
-  class:lit
+  class:igniting
   role="img"
   aria-label="LED {palette.name}, {lit ? `allumée à ${Math.round(level * 100)} %` : 'éteinte'}"
 >
@@ -66,8 +86,8 @@
   .dome {
     transition: none;
   }
-  .lit .glow,
-  .lit .dome {
+  .igniting .glow,
+  .igniting .dome {
     transition: opacity var(--pb-glow-motion, 80ms);
   }
 </style>

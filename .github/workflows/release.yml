@@ -81,6 +81,67 @@ jobs:
         with:
           workspaces: app/src-tauri
 
+      # Icône macOS 26 : icons/source/prebench.icon (Icon Composer) est compilé ici en
+      # Assets.car avec actool de Xcode 26 ou plus, ses variantes sont vérifiées, puis il
+      # est donné à Tauri (--config), qui le copie dans l'app et pose CFBundleIconName ;
+      # le .icns reste le repli des macOS antérieurs. La compilation par Tauri lui-même
+      # (bundle.icon .icon) plante dans actool sur le runner (exception interne,
+      # release v0.2.1 du 14 novembre 2026) alors que la même commande, lancée seule,
+      # réussit : on la lance donc nous-mêmes. On sélectionne explicitement le Xcode 26
+      # ou plus le plus récent du runner, et on échoue clairement s'il n'y en a pas.
+      - name: "macOS : Xcode 26 ou plus (actool, icône Liquid Glass)"
+        if: runner.os == 'macOS'
+        run: |
+          actool_major() {
+            xcrun actool --version --output-format=human-readable-text 2>/dev/null \
+              | sed -n 's/.*short-bundle-version: *\([0-9][0-9]*\).*/\1/p'
+          }
+          # « version chemin » de chaque Xcode non bêta de 26 ou plus. Fonction plutôt
+          # que boucle dans $( ) : le bash 3.2 de macOS lit mal un « case » dans une
+          # substitution de commande. Statut toujours nul (pipefail).
+          xcodes() {
+            for candidate in /Applications/Xcode*.app; do
+              [ -d "$candidate" ] || continue
+              case "$candidate" in *[Bb]eta*) continue ;; esac
+              v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$candidate/Contents/version.plist" 2>/dev/null || true)"
+              if [ "${v%%.*}" -ge 26 ] 2>/dev/null; then echo "$v $candidate"; fi
+            done
+            return 0
+          }
+          xcodes | sed 's/^/Candidat : /'
+          XCODE="$(xcodes | sort -V | tail -n 1 | cut -d' ' -f2-)"
+          if [ -z "$XCODE" ]; then
+            echo "::error::Aucun Xcode 26 ou plus sur le runner $(sw_vers -productVersion) : l'icône Liquid Glass (Assets.car) ne peut pas être compilée. Xcode présents : $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' ')"
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          MAJOR="$(actool_major)"
+          if [ "${MAJOR:-0}" -lt 26 ]; then
+            echo "::error::$XCODE sélectionné, mais actool indique la version ${MAJOR:-introuvable} (26 ou plus attendu)"
+            exit 1
+          fi
+          echo "Xcode : $XCODE ; actool $MAJOR"
+          # Compilation dans un dossier neuf, chemins absolus, service ibtoold relancé.
+          WORK="$RUNNER_TEMP/icone"
+          rm -rf "$WORK" && mkdir -p "$WORK/out"
+          cp -R app/src-tauri/icons/source/prebench.icon "$WORK/Icon.icon"
+          pkill -9 ibtoold 2>/dev/null || true
+          xcrun actool "$WORK/Icon.icon" --compile "$WORK/out" --output-format human-readable-text \
+            --notices --warnings --output-partial-info-plist "$WORK/out/assetcatalog_generated_info.plist" \
+            --app-icon Icon --include-all-app-icons --enable-on-demand-resources NO \
+            --development-region en --target-device mac --minimum-deployment-target 10.13 \
+            --platform macosx
+          app/src-tauri/icons/verifier-assets-car.sh "$WORK/out/Assets.car" Icon
+          cp "$WORK/out/Assets.car" app/src-tauri/icons/Assets.car
+          # Liste d'icônes de tauri.conf.json, plus l'Assets.car compilé (Tauri le copie tel quel).
+          node -e '
+            const c = require("./app/src-tauri/tauri.conf.json");
+            const icon = [...c.bundle.icon.filter((p) => !p.endsWith(".icon")), "icons/Assets.car"];
+            require("fs").writeFileSync(process.argv[1], JSON.stringify({ bundle: { icon } }));
+          ' "$RUNNER_TEMP/icone.json"
+          cat "$RUNNER_TEMP/icone.json"
+          echo "TAURI_ICON_CONFIG=$RUNNER_TEMP/icone.json" >> "$GITHUB_ENV"
+
       - name: Dépendances de l'interface
         working-directory: app
         run: npm ci
@@ -90,7 +151,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${TAURI_ICON_CONFIG:+--config "$TAURI_ICON_CONFIG"}
 
       - name: Renommage selon la section 12.5
         run: |
@@ -171,6 +232,15 @@ jobs:
           hdiutil detach "$MNT"
           APP=/Applications/Prebench.app
           test -d "$APP/Contents/Resources/sdk/libvmcu" || { echo "sdk absent de $APP" >&2; exit 1; }
+          # Icône (app/src-tauri/icons/README.md) : Assets.car compilé avant le build depuis
+          # icons/source/prebench.icon, avec ses variantes claire, sombre et teintée
+          # (macOS 26 et plus), désigné par CFBundleIconName ; .icns en repli
+          # (CFBundleIconFile) pour les macOS antérieurs.
+          ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$APP/Contents/Info.plist")" \
+            || { echo "CFBundleIconName absent : Assets.car n'a pas été compilé" >&2; exit 1; }
+          app/src-tauri/icons/verifier-assets-car.sh "$APP/Contents/Resources/Assets.car" "$ICON_NAME"
+          ICON_FILE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist")"
+          test -f "$APP/Contents/Resources/$ICON_FILE" || { echo "$ICON_FILE absent de $APP" >&2; exit 1; }
           EXE="$(find "$APP/Contents/MacOS" -type f -perm -u+x | head -n 1)"
           chmod -R a-w "$APP"
 

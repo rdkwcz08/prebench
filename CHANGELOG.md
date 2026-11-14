@@ -6,6 +6,22 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.2.1] - 2026-11-14
+
+**Aperçu technique** : simulation plus sobre. Mesurée sur Mac avec `tests/budget`, la 0.2.0 dépassait le budget de la section 11.1 (60 % d'un cœur en simulation, pour 10 % visés) : le rendu de la paillasse est allégé.
+
+### Modifié
+
+- Nouvelle icône de l'app. Sur macOS 26 et plus, elle suit l'apparence choisie (claire, sombre, transparente, teintée) ; icône fixe sur les macOS antérieurs et sous Windows.
+- Une seule mise à jour de l'interface par image du cœur (états, niveaux, broches, sortie série), au lieu de quatre événements séparés ; seules les broches dont la configuration change sont envoyées.
+- LED : le halo de 80 ms ne joue plus qu'à l'allumage ; un fondu PWM s'affiche sans transition (il n'y a plus d'animation permanente).
+- Moniteur série : seules les nouvelles lignes sont décodées et ajoutées, au lieu de tout reconstruire à chaque octet reçu ; la sortie n'est plus une région annoncée aux lecteurs d'écran (chaque octet était lu).
+- Servomoteur : plus de filtre CSS.
+
+### Corrigé
+
+- `tests/budget/mesure.sh` comptait des processus WebKit d'autres apps (Safari, Mail…) et manquait le firmware : seuls les processus dont Prebench est responsable sont comptés, et le firmware lancé par l'app (`run/firmware-<horodatage>`) est reconnu. Même correction pour le firmware dans `mesure.ps1`.
+
 ## [0.2.0] - 2026-11-14
 
 **Aperçu technique** : fin du socle de la version 1 pour la Nucleo-F401RE. Après l'UART de la 0.1.3, le firmware pilote des PWM et lit des tensions sur l'ADC ; l'inspecteur montre la configuration et l'état de chaque broche, fil et composant.

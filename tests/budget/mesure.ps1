@@ -6,8 +6,11 @@
 #   script sans toucher à la fenêtre. Si l'exécution des scripts est bloquée :
 #   powershell -ExecutionPolicy Bypass -File .\mesure.ps1
 #
-# Processus mesurés : l'app (prebench.exe), ses processus WebView2
-# (msedgewebview2.exe descendants de l'app) et le firmware (firmware.exe).
+# Processus mesurés : l'app (prebench.exe) et tous ses descendants : processus
+# WebView2 (msedgewebview2.exe, lancés par l'app, contrairement à macOS où
+# WebKit est partagé entre apps) et firmware (firmware-<horodatage>.exe).
+# Un Edge ouvert à côté n'est pas compté : ses processus ne descendent pas de
+# Prebench.
 # CPU : temps CPU consommé pendant la mesure ÷ durée, en % d'un cœur.
 # RAM : mémoire privée (PrivateMemorySize64), relevée à la fin.
 
@@ -31,8 +34,10 @@ do {
         }
     }
 } while ($added)
-# Firmware lancé par le débogueur (hors arborescence de l'app) : ajouté par son nom.
-Get-Process -Name firmware -ErrorAction SilentlyContinue | ForEach-Object {
+# Firmware lancé par le débogueur (hors arborescence de l'app) : ajouté par son
+# nom. L'app, elle, lance une copie nommée run\firmware-<horodatage>.exe : elle
+# fait partie des descendants ci-dessus.
+Get-Process -Name 'firmware*' -ErrorAction SilentlyContinue | ForEach-Object {
     if (-not ($ids -contains $_.Id)) { $ids += $_.Id }
 }
 

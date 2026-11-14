@@ -17,6 +17,7 @@ import type {
   LogEvent,
   Prerequisites,
   ProjectChangedEvent,
+  FrameEvent,
   ProjectView,
   SimState,
   StatesEvent,
@@ -143,11 +144,22 @@ export class Bench {
   /** Dernière intervention d'un garde-fou, affichée en bannière. */
   guard = $state<GuardEvent | null>(null);
   private frameStates: StatesEvent = {};
+  private frameNets: Record<string, Level> = {};
+  /** Broches modifiées depuis l'image précédente ; null : plus configurée. */
+  private framePins: Record<string, PinConfig | null> | null = null;
   private frameRequested = false;
 
   async init(): Promise<void> {
     this.watchBattery();
-    await listen<StatesEvent>('sim:states', (e) => this.onStates(e.payload));
+    // Une image du cœur (section 11.3) : états, niveaux, broches modifiées ;
+    // les octets UART sont pris par le moniteur série (serial.svelte.ts).
+    await listen<FrameEvent>('sim:frame', (e) => {
+      const f = e.payload;
+      if (f.states) Object.assign(this.frameStates, f.states);
+      if (f.nets) Object.assign(this.frameNets, f.nets);
+      if (f.pins) Object.assign((this.framePins ??= {}), f.pins);
+      if (f.states || f.nets || f.pins) this.requestFrame();
+    });
     await listen<StatusEvent>('sim:status', (e) => {
       const previous = this.status.state;
       this.status = e.payload;
@@ -160,6 +172,8 @@ export class Bench {
       if (e.payload.state === 'off' && previous !== 'off') serial.marker('Alimentation coupée');
       if (previous === 'off' && e.payload.state === 'starting') serial.marker('Alimentation rétablie');
       if (!SESSION.includes(e.payload.state)) {
+        this.frameNets = {};
+        this.framePins = null;
         this.nets = {};
         this.pins = {};
       }
@@ -181,12 +195,6 @@ export class Bench {
       this.build = { running: false, result: e.payload };
     });
     await listen<ProjectChangedEvent>('project:changed', () => void this.refresh());
-    await listen<Record<string, PinConfig>>('sim:pins', (e) => {
-      this.pins = e.payload;
-    });
-    await listen<Record<string, Level>>('sim:nets', (e) => {
-      this.nets = { ...this.nets, ...e.payload };
-    });
     await listen<LogEvent>('sim:log', (e) => this.log(e.payload.source, e.payload.text));
     await listen<WarnEvent>('sim:warn', (e) => this.warn(e.payload.text));
   }
@@ -599,11 +607,13 @@ export class Bench {
   }
 
   /**
-   * États reçus du cœur, appliqués une fois par image (requestAnimationFrame,
-   * section 11.3) ; fenêtre masquée : aucune image, la simulation continue.
+   * États, nets et broches reçus du cœur, appliqués ensemble une fois par
+   * image (requestAnimationFrame, section 11.3) : une seule recomposition de
+   * la fenêtre, même quand le cœur envoie ses trois événements à quelques
+   * millisecondes d'écart. Fenêtre masquée : aucune image, la simulation
+   * continue ; les derniers états sont appliqués au retour.
    */
-  private onStates(states: StatesEvent): void {
-    Object.assign(this.frameStates, states);
+  private requestFrame(): void {
     if (this.frameRequested) return;
     this.frameRequested = true;
     const frame = (t: number): void => {
@@ -614,10 +624,25 @@ export class Bench {
       }
       this.lastFrame = t;
       this.frameRequested = false;
-      const pending = this.frameStates;
+      const states = this.frameStates;
       this.frameStates = {};
       for (const inst of this.instances) {
-        if (inst.id in pending) inst.state = pending[inst.id];
+        if (inst.id in states) inst.state = states[inst.id];
+      }
+      if (Object.keys(this.frameNets).length > 0) {
+        const nets = this.frameNets;
+        this.frameNets = {};
+        // Seulement les niveaux qui changent : les pastilles inchangées ne bougent pas.
+        if (Object.entries(nets).some(([k, v]) => this.nets[k] !== v)) this.nets = { ...this.nets, ...nets };
+      }
+      if (this.framePins !== null) {
+        const pins = { ...this.pins };
+        for (const [name, cfg] of Object.entries(this.framePins)) {
+          if (cfg === null) delete pins[name];
+          else pins[name] = cfg;
+        }
+        this.pins = pins;
+        this.framePins = null;
       }
     };
     requestAnimationFrame(frame);

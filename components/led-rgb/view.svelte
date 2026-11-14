@@ -1,23 +1,43 @@
 <!--
   components/led-rgb/view.svelte — LED RGB 5 mm diffusante vue de dessus (Svelte 5), dans le
   style de la LED simple. La teinte est le mélange des trois canaux, son
-  opacité la luminosité du canal le plus fort ; halo de 80 ms à l'allumage,
-  extinction sans transition (charte, section 6). La patte commune est la plus longue.
+  opacité la luminosité du canal le plus fort ; halo de 80 ms à l'allumage seulement,
+  extinction et variations sans transition (charte, section 6). La patte commune est la plus longue.
   Coordonnées identiques au manifeste : 48 × 80, pattes R, COM, G, B en x = 12, 20, 28, 36.
 -->
 <script lang="ts">
   import type { ComponentViewProps } from '../component-api';
   import type { LedRgbParams, LedRgbState } from './model';
 
-  let { state, params }: ComponentViewProps<LedRgbParams, LedRgbState> = $props();
+  // Prop « state » renommé : le nom state masquerait la rune $state.
+  let { state: model, params }: ComponentViewProps<LedRgbParams, LedRgbState> = $props();
 
   const uid = $props.id();
   const clamp = (v: number): number => Math.min(1, Math.max(0, v));
-  const r = $derived(clamp(state.r));
-  const g = $derived(clamp(state.g));
-  const b = $derived(clamp(state.b));
+  const r = $derived(clamp(model.r));
+  const g = $derived(clamp(model.g));
+  const b = $derived(clamp(model.b));
   const level = $derived(Math.max(r, g, b));
   const lit = $derived(level > 0);
+
+  /*
+   * Halo de 80 ms seulement à l'allumage (passage d'éteinte à allumée) : une
+   * variation de luminosité (fondu PWM) s'affiche sans transition, sinon la
+   * vue serait en animation permanente (section 11.1).
+   */
+  let igniting = $state(false);
+  let wasLit = false;
+  $effect(() => {
+    const now = lit;
+    if (now && !wasLit) {
+      wasLit = true;
+      igniting = true;
+      const timer = setTimeout(() => (igniting = false), 80);
+      return () => clearTimeout(timer);
+    }
+    wasLit = now;
+    igniting = false;
+  });
   /** Teinte à pleine intensité ; l'opacité porte la luminosité. */
   const hue = $derived(
     lit ? `rgb(${Math.round((255 * r) / level)}, ${Math.round((255 * g) / level)}, ${Math.round((255 * b) / level)})` : '#ffffff',
@@ -29,7 +49,7 @@
   width="48"
   height="80"
   viewBox="0 0 48 80"
-  class:lit
+  class:igniting
   role="img"
   aria-label="LED RGB, {params.common === 'anode' ? 'anode' : 'cathode'} commune, {lit
     ? `rouge ${pct(r)}, vert ${pct(g)}, bleu ${pct(b)}`
@@ -71,8 +91,8 @@
   .dome {
     transition: none;
   }
-  .lit .glow,
-  .lit .dome {
+  .igniting .glow,
+  .igniting .dome {
     transition: opacity var(--pb-glow-motion, 80ms);
   }
 </style>

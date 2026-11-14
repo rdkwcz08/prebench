@@ -6,14 +6,21 @@
 #   mesure « en simulation »), attendre 30 s de stabilisation, puis lancer ce
 #   script sans toucher à la fenêtre.
 #
-# Processus mesurés : l'app (prebench), ses processus WebKit (contenu,
-# réseau, GPU : lancés dans la minute qui suit l'app) et le firmware. Fonctionne
-# avec l'app installée (/Applications) comme avec un build local. CPU : temps CPU consommé
-# pendant la mesure ÷ durée, en % d'un cœur (indépendant de la fréquence
-# d'échantillonnage). RAM : empreinte physique (footprint, comme le Moniteur
-# d'activité), relevée à la fin.
+# Processus mesurés : l'app (prebench), ses processus WebKit (contenu, réseau,
+# GPU) et le firmware. Les processus WebKit sont des services XPC partagés
+# entre apps (Safari, Mail…), lancés par launchd : on ne garde que ceux dont
+# le processus responsable (au sens de macOS) est Prebench, lu par la fonction
+# système responsibility_get_pid_responsible_for_pid, via un petit programme
+# compilé à la volée (cc, fourni par les outils en ligne de commande Xcode,
+# prérequis de Prebench). Le firmware est un enfant de l'app
+# (run/firmware-<horodatage>) ; un firmware lancé par le débogueur est
+# reconnu par son nom. Fonctionne avec l'app installée comme avec un build local.
+# CPU : temps CPU consommé pendant la mesure ÷ durée, en % d'un cœur
+# (indépendant de la fréquence d'échantillonnage). RAM : empreinte physique
+# (footprint, comme le Moniteur d'activité), relevée à la fin.
 
 set -eu
+export LC_ALL=C # nombres avec un point, quelle que soit la langue du système
 DURATION="${1:-60}"
 
 app=$(pgrep -x prebench | head -n 1 || true)
@@ -22,22 +29,37 @@ if [ -z "$app" ]; then
     exit 1
 fi
 
-# Heure de lancement d'un processus, en secondes (epoch).
-started() {
-    date -j -f "%a %b %d %T %Y" "$(ps -o lstart= -p "$1" | xargs)" +%s 2>/dev/null || echo 0
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cat > "$work/resp.c" <<'C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+extern pid_t responsibility_get_pid_responsible_for_pid(pid_t);
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+        pid_t p = (pid_t)atoi(argv[i]);
+        printf("%d %d\n", (int)p, (int)responsibility_get_pid_responsible_for_pid(p));
+    }
+    return 0;
 }
-app_start=$(started "$app") # WebKit lancés après l'app : les siens
+C
+if ! cc -o "$work/resp" "$work/resp.c" 2>/dev/null; then
+    echo "cc introuvable : installez les outils en ligne de commande (xcode-select --install)." >&2
+    exit 1
+fi
+
 pids="$app"
-for p in $(pgrep -f 'com.apple.WebKit' || true); do
-    start=$(started "$p")
-    # Lancés avec l'app (dans la minute) : ses processus ; un onglet Safari
-    # ouvert plus tard n'est pas compté.
-    if [ "$start" -ge "$((app_start - 1))" ] && [ "$start" -le "$((app_start + 60))" ]; then
+webkit=$(pgrep -f 'com.apple.WebKit' || true)
+if [ -n "$webkit" ]; then
+    # shellcheck disable=SC2086
+    for p in $("$work/resp" $webkit | awk -v app="$app" '$2 == app { print $1 }'); do
         pids="$pids $p"
-    fi
-done
-for p in $(pgrep -x firmware || true); do
-    pids="$pids $p"
+    done
+fi
+for p in $(pgrep -P "$app" || true) $(pgrep '^firmware' || true); do
+    case " $pids " in *" $p "*) continue ;; esac
+    case "$(ps -o comm= -p "$p" | sed 's|.*/||')" in firmware*) pids="$pids $p" ;; esac
 done
 
 # Temps CPU cumulé d'un processus, en centièmes de seconde (ps : [[h:]m:]s.cc).
