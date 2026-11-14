@@ -26,8 +26,11 @@ pub mod defaults {
     pub const CPU_LIMIT_SECONDS: u64 = 5;
     /// Plafond mémoire d'un firmware, en Mo.
     pub const MEMORY_LIMIT_MB: u64 = 256;
-    /// Images par seconde de l'interface, sur secteur puis sur batterie.
-    pub const FRAME_RATE: u64 = 60;
+    /// Cadence d'affichage de la simulation (images par seconde), appliquée par
+    /// le cœur (une image par intervalle) et par l'interface ; sur batterie, la
+    /// plus basse des deux. 15 par défaut : banc WKWebView, tests/budget, flux à
+    /// 40 i/s : 36 % d'un cœur à 60, 32 % à 30, 24 % à 15 (section 11.1).
+    pub const FRAME_RATE: u64 = 15;
     pub const FRAME_RATE_BATTERY: u64 = 30;
 }
 
@@ -74,9 +77,9 @@ pub fn declared() -> Vec<Setting> {
         Setting {
             key: "frame_rate",
             scope: Scope::App,
-            label: "Images par seconde",
-            values: &[],
-            editable: false,
+            label: "Cadence d'affichage (images par seconde)",
+            values: &["60", "30", "15"],
+            editable: true,
             default: || Value::from(defaults::FRAME_RATE),
         },
         Setting {
@@ -141,7 +144,11 @@ fn accepts(s: &Setting, v: &Value) -> bool {
     if s.values.is_empty() {
         return v.is_number() || v.is_string();
     }
-    v.as_str().is_some_and(|x| s.values.contains(&x))
+    // Valeur numérique d'une liste (« 60 », « 30 », « 15 ») : acceptée en nombre.
+    match v {
+        Value::Number(n) => s.values.contains(&n.to_string().as_str()),
+        _ => v.as_str().is_some_and(|x| s.values.contains(&x)),
+    }
 }
 
 /// Modifie un réglage de l'app ; les autres réglages du fichier sont conservés.
@@ -189,6 +196,11 @@ mod tests {
         assert!(set(&dir, "theme", &Value::from("violet")).is_err());
         assert!(set(&dir, "memory_limit_mb", &Value::from(512)).is_err()); // pas encore modifiable
         assert!(set(&dir, "inconnu", &Value::from(1)).is_err());
+        // Cadence d'affichage : 60, 30 ou 15 seulement.
+        assert_eq!(effective(&dir)["frame_rate"], defaults::FRAME_RATE);
+        set(&dir, "frame_rate", &Value::from(15)).expect("cadence");
+        assert_eq!(effective(&dir)["frame_rate"], 15);
+        assert!(set(&dir, "frame_rate", &Value::from(45)).is_err());
         // Fichier modifié à la main : valeur invalide ignorée, défaut conservé.
         std::fs::write(dir.join(FILE), "theme = \"violet\"\n").expect("écriture");
         assert_eq!(effective(&dir)["theme"], "system");

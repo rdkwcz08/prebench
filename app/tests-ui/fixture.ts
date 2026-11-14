@@ -113,7 +113,7 @@ export function demoProject(): Json {
 }
 
 /** Réponses des commandes du cœur. */
-function responses(): Record<string, Json> {
+export function responses(): Record<string, Json> {
   return {
     default_project: PROJECT_PATH,
     open_project: demoProject(),
@@ -151,7 +151,7 @@ function responses(): Record<string, Json> {
 }
 
 /** Exécuté dans la page avant tout script : imitation minimale de l'IPC Tauri 2. */
-function installTauriMock(json: string): void {
+export function installTauriMock(json: string): void {
   const data = JSON.parse(json) as Record<string, unknown>;
   type Callback = (payload: unknown) => void;
   const callbacks = new Map<number, Callback>();

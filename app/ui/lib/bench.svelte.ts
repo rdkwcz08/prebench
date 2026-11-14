@@ -109,6 +109,21 @@ function placeInstances(project: ProjectView, previous?: Map<string, Instance>):
   });
 }
 
+/** Même configuration de broche (champs affichés) : rien à redessiner. */
+function samePin(a: PinConfig | undefined, b: PinConfig): boolean {
+  return (
+    a !== undefined &&
+    a.mode === b.mode &&
+    a.pull === b.pull &&
+    a.function === b.function &&
+    a.period_us === b.period_us &&
+    a.pwm?.freq_hz === b.pwm?.freq_hz &&
+    a.pwm?.duty === b.pwm?.duty &&
+    a.adc?.raw === b.adc?.raw &&
+    a.adc?.volts === b.adc?.volts
+  );
+}
+
 export class Bench {
   project = $state<ProjectView | null>(null);
   instances = $state<Instance[]>([]);
@@ -617,9 +632,16 @@ export class Bench {
     if (this.frameRequested) return;
     this.frameRequested = true;
     const frame = (t: number): void => {
-      const battery = 1000 / settings.number('frame_rate_battery', 30) - 1;
-      if (this.onBattery && t - this.lastFrame < battery) {
-        requestAnimationFrame(frame); // cadence réduite sur batterie (réglage)
+      // Cadence d'affichage (réglage frame_rate : 60, 30 ou 15 images/s, 15 par
+      // défaut ; le cœur l'applique déjà, ceci couvre la batterie), plus
+      // basse sur batterie (frame_rate_battery). Trop tôt : attente par
+      // minuterie, sans reboucler à chaque rafraîchissement de l'écran.
+      const fps = this.onBattery
+        ? Math.min(settings.number('frame_rate', 15), settings.number('frame_rate_battery', 30))
+        : settings.number('frame_rate', 15);
+      const wait = 1000 / fps - 1 - (t - this.lastFrame);
+      if (wait > 0) {
+        setTimeout(() => requestAnimationFrame(frame), wait);
         return;
       }
       this.lastFrame = t;
@@ -629,19 +651,21 @@ export class Bench {
       for (const inst of this.instances) {
         if (inst.id in states) inst.state = states[inst.id];
       }
-      if (Object.keys(this.frameNets).length > 0) {
-        const nets = this.frameNets;
-        this.frameNets = {};
-        // Seulement les niveaux qui changent : les pastilles inchangées ne bougent pas.
-        if (Object.entries(nets).some(([k, v]) => this.nets[k] !== v)) this.nets = { ...this.nets, ...nets };
+      // Niveaux et broches mis à jour clé par clé, seulement s'ils changent :
+      // seules les pastilles concernées (et l'inspecteur s'il les montre) se
+      // redessinent, au lieu de toute la couche des pastilles (section 11.3).
+      for (const [k, v] of Object.entries(this.frameNets)) {
+        if (this.nets[k] !== v) this.nets[k] = v;
       }
+      this.frameNets = {};
       if (this.framePins !== null) {
-        const pins = { ...this.pins };
         for (const [name, cfg] of Object.entries(this.framePins)) {
-          if (cfg === null) delete pins[name];
-          else pins[name] = cfg;
+          if (cfg === null) {
+            if (name in this.pins) delete this.pins[name];
+          } else if (!samePin(this.pins[name], cfg)) {
+            this.pins[name] = cfg;
+          }
         }
-        this.pins = pins;
         this.framePins = null;
       }
     };

@@ -676,8 +676,18 @@ fn start_sim<R: Runtime>(
             board_id: BOARD_ID,
             components,
             debug,
+            frame_interval: sim::frame_interval(frame_rate(app)),
         },
     ))
+}
+
+/// Cadence d'affichage choisie (réglage frame_rate), lue au démarrage de la simulation.
+fn frame_rate<R: Runtime>(app: &AppHandle<R>) -> u64 {
+    config_dir(app)
+        .map(|d| crate::settings::effective(&d))
+        .ok()
+        .and_then(|v| v.get("frame_rate").and_then(serde_json::Value::as_u64))
+        .unwrap_or(crate::settings::defaults::FRAME_RATE)
 }
 
 #[derive(Clone, Serialize)]

@@ -6,6 +6,15 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.2.2] - 2026-11-14
+
+**Aperçu technique** : simulation visible moins coûteuse, pour tenir les budgets de la section 11.1.
+
+### Modifié
+
+- Rendu de la simulation encore allégé : pastilles et vues des composants dans leurs propres couches, niveaux et broches mis à jour un par un et seulement s'ils changent (banc WKWebView, `tests/budget` : de 25 % à 17 % d'un cœur).
+- Cadence d'affichage de la simulation : 15 images par seconde par défaut, appliquée par le cœur (une seule mise à jour par intervalle, qui regroupe tout ce qui a changé). Réglable à 60, 30 ou 15 (`frame_rate` dans `settings.toml`, pris en compte au démarrage d'une simulation) ; sur batterie, la plus basse de cette cadence et de celle sur batterie.
+
 ## [0.2.1] - 2026-11-14
 
 **Aperçu technique** : simulation plus sobre. Mesurée sur Mac avec `tests/budget`, la 0.2.0 dépassait le budget de la section 11.1 (60 % d'un cœur en simulation, pour 10 % visés) : le rendu de la paillasse est allégé.

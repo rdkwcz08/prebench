@@ -615,6 +615,12 @@
     height: 1px;
     overflow: visible;
   }
+  /* Pastilles : couche à part (section 11.3). Leurs états changent à chaque
+     image ; sans couche, WebKit repeint et recompose ce qui est dessous
+     (tapis, carte, fils). Mesuré avec app/tests-ui/wk/banc.sh. */
+  .layer.pins {
+    will-change: transform;
+  }
   .wires {
     pointer-events: none;
   }

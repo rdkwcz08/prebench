@@ -18,7 +18,8 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseToml } from 'smol-toml';
-import { demoProject, expect, test } from './fixture';
+import { demoProject, expect, installTauriMock, responses, test } from './fixture';
+import { mkdirSync, writeFileSync } from 'node:fs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const EVENTS = `${repo}app/src-tauri/target/budget-events.json`;
@@ -102,6 +103,20 @@ for (const tab of TABS) {
       Object.fromEntries(
         ((await cdp?.send('Performance.getMetrics'))?.metrics ?? []).map((m) => [m.name, m.value]),
       );
+    // PREBENCH_PERF_PAINT : trace Chromium (événements Paint, comme l'onglet
+    // Performance des outils de développement) : ce qui est réellement repeint.
+    const tracePath = `${repo}app/test-results/perf-trace.json`;
+    const tracing = cdp !== null && !!process.env.PREBENCH_PERF_PAINT;
+    if (tracing) {
+      await page.context().browser()!.startTracing(page, {
+        path: tracePath,
+        categories: [
+          'devtools.timeline',
+          'disabled-by-default-devtools.timeline',
+          'disabled-by-default-devtools.timeline.invalidationTracking',
+        ],
+      });
+    }
     const m0 = await metrics();
     const cpu0 = browserCpu();
     const t0 = Date.now();
@@ -122,6 +137,55 @@ for (const tab of TABS) {
     const cpu = ((browserCpu() - cpu0) / seconds) * 100;
     const m1 = await metrics();
     const share = (k: string): string => `${(((m1[k] ?? 0) - (m0[k] ?? 0)) / seconds * 100).toFixed(1)} %`;
+    if (tracing && cdp) {
+      await page.context().browser()!.stopTracing();
+      type Ev = { name: string; ts: number; dur?: number; args?: { data?: { nodeId?: number; clip?: number[]; layerId?: number } } };
+      const events = (JSON.parse(readFileSync(tracePath, 'utf8')) as { traceEvents: Ev[] }).traceEvents;
+      const byNode = new Map<number, { count: number; area: number; ms: number }>();
+      let paintMs = 0;
+      for (const e of events) {
+        if (e.name !== 'Paint') continue;
+        const d = e.args?.data;
+        const q = d?.clip ?? [];
+        const xs = [q[0] ?? 0, q[2] ?? 0, q[4] ?? 0, q[6] ?? 0];
+        const ys = [q[1] ?? 0, q[3] ?? 0, q[5] ?? 0, q[7] ?? 0];
+        const area = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
+        const k = d?.nodeId ?? -1;
+        const p = byNode.get(k) ?? { count: 0, area: 0, ms: 0 };
+        p.count++;
+        p.area += area;
+        p.ms += (e.dur ?? 0) / 1000;
+        paintMs += (e.dur ?? 0) / 1000;
+        byNode.set(k, p);
+      }
+      const count = (n: string): number => events.filter((e) => e.name === n).length;
+      // Invalidations : quel élément, pour quelle raison (style, géométrie…).
+      const inval = new Map<string, number>();
+      for (const e of events) {
+        if (e.name !== 'PaintInvalidationTracking' && e.name !== 'StyleRecalcInvalidationTracking') continue;
+        const d = (e.args as { data?: { nodeName?: string; reason?: string } } | undefined)?.data;
+        const k = `${e.name === 'PaintInvalidationTracking' ? 'peinture' : 'style'} : ${d?.nodeName ?? '?'} (${d?.reason ?? '?'})`;
+        inval.set(k, (inval.get(k) ?? 0) + 1);
+      }
+      console.log(
+        'Invalidations :\n' +
+          [...inval].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, n]) => `  ${(n / seconds).toFixed(1).padStart(6)}/s  ${k}`).join('\n'),
+      );
+      const rows: string[] = [];
+      for (const [node, p] of [...byNode].sort((x, y) => y[1].area - x[1].area).slice(0, 8)) {
+        let who = `nœud ${node}`;
+        const d = node > 0 ? await cdp.send('DOM.describeNode', { backendNodeId: node }).catch(() => null) : null;
+        if (d) {
+          const attrs = d.node.attributes ?? [];
+          const cls = attrs[attrs.indexOf('class') + 1];
+          who = `${d.node.localName}${attrs.includes('class') && cls ? '.' + cls.split(' ').join('.') : ''}`;
+        }
+        rows.push(`  ${who.slice(0, 44).padEnd(44)} ${(p.count / seconds).toFixed(1).padStart(6)} /s ${Math.round(p.area / p.count).toString().padStart(9)} px² ${(p.ms / seconds).toFixed(2).padStart(6)} ms/s`);
+      }
+      console.log(
+        `Repeintes : ${(byNode.size)} sources, peinture ${(paintMs / seconds).toFixed(1)} ms/s ; images composées ${(count('CompositeLayers') / seconds).toFixed(1)}/s, rasterisation ${(count('RasterTask') / seconds).toFixed(1)} tâches/s\n${rows.join('\n')}`,
+      );
+    }
     console.log(
       `${browserName}, onglet ${tab} : navigateur ${cpu.toFixed(1)} % d'un cœur sur ${seconds.toFixed(0)} s` +
         (cdp
@@ -130,3 +194,80 @@ for (const tab of TABS) {
     );
   });
 }
+
+/**
+ * Banc WKWebView (macOS) : écrit test-results/wk-init.js, injecté par
+ * tests/budget/wkbanc.swift avant le chargement de l'interface (vite preview) :
+ * imitation de l'IPC (projet tests/budget) et __pbReplay(), qui rejoue le flux
+ * du cœur au même rythme. Le rendu est alors celui du vrai WKWebView de l'app.
+ *   PREBENCH_PERF_EXPORT=1 npx playwright test perf -g export --project=chromium
+ */
+test('export du banc WKWebView', () => {
+  test.skip(!process.env.PREBENCH_PERF_EXPORT, 'manuel : PREBENCH_PERF_EXPORT=1');
+  const data = { ...responses(), open_project: budgetProject(), default_project: '/budget' };
+  let list = (JSON.parse(readFileSync(EVENTS, 'utf8')) as { t: number; name: string }[]).filter(
+    (e) => !SKIP.includes(e.name),
+  );
+  // Même recalage que plus haut (PREBENCH_PERF_RATE), sur 20 s au plus.
+  const rate = Number(process.env.PREBENCH_PERF_RATE ?? 0);
+  const frames = list.filter((e) => e.name === 'sim:states');
+  const span = (frames.at(-1)?.t ?? 0) - (frames[0]?.t ?? 0);
+  if (rate > 0 && frames.length > 1 && span > 0) {
+    const scale = frames.length / (span / 1000) / rate;
+    list = list.map((e) => ({ ...e, t: e.t * scale })).filter((e) => e.t <= 20_000);
+  }
+  // PREBENCH_PERF_FPS : cadence d'affichage, appliquée comme le fait le cœur
+  // (une image par intervalle, qui regroupe tout ce qui a changé), puis par
+  // l'interface (réglage frame_rate).
+  const coreFps = Number(process.env.PREBENCH_PERF_FPS ?? 0);
+  if (coreFps > 0) {
+    type E = { t: number; name: string; payload: Record<string, unknown> };
+    const step = 1000 / coreFps;
+    const out: E[] = [];
+    let bucket = new Map<string, E>();
+    let end = step;
+    const flush = (t: number): void => {
+      for (const e of bucket.values()) out.push({ ...e, t });
+      bucket = new Map();
+    };
+    for (const e of list as E[]) {
+      while (e.t >= end) {
+        flush(end);
+        end += step;
+      }
+      const key = e.name === 'sim:uart' ? `uart${String(e.payload.id)}` : e.name;
+      const prev = bucket.get(key);
+      if (!prev || e.name === 'sim:pins') bucket.set(key, { ...e, payload: { ...e.payload } });
+      else if (e.name === 'sim:uart')
+        prev.payload.data = [...(prev.payload.data as number[]), ...(e.payload.data as number[])];
+      else Object.assign(prev.payload, e.payload);
+    }
+    flush(end);
+    list = out;
+  }
+  const fps = Number(process.env.PREBENCH_PERF_FPS ?? 0);
+  const settingsInit = fps > 0 ? `sessionStorage.setItem('__pbSettings', JSON.stringify({ frame_rate: ${fps} }));` : '';
+  const replay = `${settingsInit}
+  window.__pbReplay = async () => {
+    const list = ${JSON.stringify(list)};
+    const emit = window.__pbEmit;
+    emit('sim:status', { state: 'running', message: 'En cours' });
+    const start = performance.now();
+    for (const e of list) {
+      const wait = e.t - (performance.now() - start);
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      emit(e.name, e.payload);
+    }
+    return (performance.now() - start) / 1000;
+  };
+  ${process.env.PREBENCH_PERF_CSS ? `document.addEventListener('DOMContentLoaded', () => {
+    const st = document.createElement('style');
+    st.textContent = ${JSON.stringify(process.env.PREBENCH_PERF_CSS)};
+    document.head.appendChild(st);
+  });` : ''}`;
+  mkdirSync(`${repo}app/test-results`, { recursive: true });
+  writeFileSync(
+    `${repo}app/test-results/wk-init.js`,
+    `(${installTauriMock.toString()})(${JSON.stringify(JSON.stringify(data))});\n${replay}\n`,
+  );
+});

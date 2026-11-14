@@ -539,7 +539,7 @@ Chaque brique arrive quand elle devient utile : un réglage peut être déclaré
 | --- | --- | --- | --- |
 | Thème (`system`, `light`, `dark`) | app | `system` | Modifiable (bouton de la barre d'outils) |
 | Éditeur pour ouvrir `fichier:ligne` | app | VS Code | Fixe ; autres éditeurs : Plus tard |
-| Images par seconde, sur secteur / sur batterie | app | 60 / 30 | Fixe |
+| Cadence d'affichage de la simulation (`frame_rate` : 60, 30 ou 15 images/s), appliquée par le cœur (un `sim:frame` par intervalle, qui regroupe tout ce qui a changé) et par l'interface ; sur batterie, au plus `frame_rate_battery` | app | 15 / 30 (banc WKWebView, `tests/budget`, flux à 40 i/s : 36 % d'un cœur à 60, 32 % à 30, 24 % à 15) | Modifiable dans `settings.toml` (lu au démarrage d'une simulation) ; écran des réglages : Plus tard |
 | Pause automatique : CPU du firmware et durée | projet | 80 % d'un cœur, 5 s | Fixe |
 | Plafond mémoire du firmware | projet | 256 Mo | Fixe ; modifiable : Plus tard |
 | Simulation quand la fenêtre est masquée | app | continue | Prévu |
@@ -577,7 +577,7 @@ Taille de l'app visée : de l'ordre de 10 à 20 Mo, hors toolchains.
 ### 11.3 Rendu de l'interface
 
 - **Coalescence** : le cœur envoie à l'interface un seul événement par image (`sim:frame` : états des composants modifiés, niveaux, octets série, broches dont la configuration a changé), jamais chaque événement ; l'interface l'applique en une seule mise à jour (`requestAnimationFrame`), donc une seule recomposition de la fenêtre par image.
-- **Coût d'une image** : chaque image qui change quelque chose à l'écran coûte une recomposition de la fenêtre (WebContent et GPU) ; aucune animation n'est entretenue quand l'état ne bouge pas (halo d'une LED seulement à l'allumage, pas de transition sur une variation de luminosité, aucun filtre SVG ou CSS), le moniteur série n'ajoute que ses nouvelles lignes, le traceur ne se redessine qu'à l'arrivée de données. Mesure manuelle du rendu : `app/tests-ui/perf.spec.ts` (flux du cœur enregistré par le test `budget_core_profile`, rejoué dans l'interface).
+- **Coût d'une image** : chaque image qui change quelque chose à l'écran coûte une recomposition de la fenêtre (WebContent et GPU) ; aucune animation n'est entretenue quand l'état ne bouge pas (halo d'une LED seulement à l'allumage, pas de transition sur une variation de luminosité, aucun filtre SVG ou CSS), le moniteur série n'ajoute que ses nouvelles lignes, le traceur ne se redessine qu'à l'arrivée de données. Les éléments qui changent à chaque image (couche des pastilles, vue de chaque composant) ont leur propre couche de composition, et les niveaux et broches sont mis à jour clé par clé, seulement s'ils changent. Mesure manuelle du rendu : `app/tests-ui/perf.spec.ts` (flux du cœur enregistré par le test `budget_core_profile`, rejoué dans l'interface, Chromium) et `app/tests-ui/wk/banc.sh` (même rejeu dans le vrai WKWebView de macOS, CPU et mémoire des processus WebKit).
 - Luminosité d'une LED en PWM = rapport cyclique mesuré sur l'image.
 - Écrans : redessinés uniquement si le framebuffer est marqué « modifié ».
 - Fenêtre masquée ou réduite : rendu arrêté, la simulation continue.
@@ -626,7 +626,7 @@ L'app fonctionne entièrement hors ligne et cible macOS (Apple Silicon) et Windo
 ### 12.4 Méthode
 
 - Développement sur Mac, dans le dépôt privé.
-- CI du dépôt privé : Linux à chaque push (aucun run si seuls des fichiers `.md` ou la maquette changent ; Playwright seulement si l'interface, les composants ou la carte changent) ; Windows, dont les minutes comptent double, seulement quand le code propre au système change (`platform/`, `vmcu_platform_*`, `build/`, CMake, dépendances Cargo), sur un tag de version ou à la demande (`gh workflow run ci.yml --ref main`) ; `release.sh` refuse de publier sans CI Windows réussie sur le commit. Les minutes macOS y sont décomptées dix fois : les tests macOS se font en local.
+- CI du dépôt privé : Linux à chaque push (aucun run si seuls des fichiers `.md` ou la maquette changent ; Playwright seulement si l'interface, les composants ou la carte changent) ; Windows, dont les minutes comptent double, seulement quand le code propre au système change (`platform/`, `vmcu_platform_*`, `build/`, CMake, dépendances Cargo), sur un tag de version ou à la demande (`gh workflow run ci.yml --ref main`) ; `release.sh` refuse de publier sans CI Windows réussie sur le commit. Le contournement `PREBENCH_SKIP_WINDOWS_CI=1` est exceptionnel (republication d'une release échouée dont les derniers commits ne touchent que ce que la CI Windows n'exécute pas ; conditions dans `release.sh`) et se signale dans le compte rendu. La CI Linux exécute aussi le contrôle d'installation de `release.yml` (`--verifier-installation`) sur l'app compilée, pour voir au commit une régression qui n'apparaîtrait qu'en release. Les minutes macOS y sont décomptées dix fois : les tests macOS se font en local.
 - CI complète macOS + Windows dans le dépôt public, à chaque release, gratuite et illimitée pour un dépôt public.
 - Surcoût estimé du multiplateforme prévu dès le départ : environ 20 à 30 % d'effort, surtout sur la compilation hôte et les délais.
 

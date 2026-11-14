@@ -153,7 +153,7 @@ fn start_project_with(
     dir: &Path,
     build_dir: &Path,
 ) -> (tauri::App<tauri::test::MockRuntime>, Sim, Recorder) {
-    let (app, handle, rec, _) = start_project_full(root, dir, build_dir, None);
+    let (app, handle, rec, _) = start_project_full(root, dir, build_dir, None, None);
     (app, handle, rec)
 }
 
@@ -163,6 +163,7 @@ fn start_project_full(
     dir: &Path,
     build_dir: &Path,
     debug: Option<DebugConfig>,
+    fps: Option<u64>,
 ) -> (tauri::App<tauri::test::MockRuntime>, Sim, Recorder, PathBuf) {
     let app = mock_builder()
         .build(mock_context(noop_assets()))
@@ -209,6 +210,13 @@ fn start_project_full(
             board_id: 1,
             components,
             debug,
+            // Cadence d'affichage : 60 i/s, sauf PREBENCH_FRAME_RATE (mesures).
+            frame_interval: frame_interval(fps.unwrap_or_else(|| {
+                std::env::var("PREBENCH_FRAME_RATE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(60)
+            })),
         },
     );
     (
@@ -404,6 +412,7 @@ fn debug_session_breakpoint_without_time_jump() {
             address: address.clone(),
             program: program.clone(),
         }),
+        None,
     );
     rec.wait(|name, v| name == "sim:status" && v["state"] == "debug-wait");
 
@@ -563,6 +572,53 @@ fn pwm_fade_drives_led() {
         }
         low && mid && high
     });
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Cadence d'affichage appliquée par le cœur (réglage frame_rate) : à 15 i/s,
+/// jamais deux « sim:frame » à moins de 66 ms, alors que le fondu de LD2 change
+/// toutes les 10 ms ; chaque image regroupe ce qui a changé entre-temps.
+#[test]
+fn frame_rate_caps_core_frames() {
+    let dir = repo_root().join("tests").join("pwm-fade");
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("app simulée");
+    drop(app);
+    let (app, sim, rec, _) =
+        start_project_full(&repo_root(), &dir, &test_build_dir(&dir), None, Some(15));
+    let times = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Instant>::new()));
+    {
+        let times = std::sync::Arc::clone(&times);
+        app.handle().listen_any("sim:frame", move |_| {
+            times
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Instant::now());
+        });
+    }
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    // 40 images d'états de LD2 (le fondu change sans cesse).
+    let mut n = 0;
+    rec.wait(|name, v| {
+        if name == "sim:states" && v["LD2"].is_object() {
+            n += 1;
+        }
+        n >= 40
+    });
+    let t = times.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let gaps: Vec<f64> = t
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0)
+        .collect();
+    let min = gaps.iter().copied().fold(f64::INFINITY, f64::min);
+    println!("Cadence 15 : {} images, écart minimal {min:.1} ms", t.len());
+    // Horloge de réception : l'acteur n'émet jamais plus tôt que 66 ms ; la
+    // livraison peut rapprocher deux images de quelques ms au plus.
+    assert!(
+        min >= 60.0,
+        "écart minimal {min:.1} ms entre deux images (66 ms attendus)"
+    );
     let _ = sim.tx.try_send(SimMsg::Stop);
 }
 

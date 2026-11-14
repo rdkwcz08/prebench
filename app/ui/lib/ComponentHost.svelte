@@ -111,6 +111,9 @@
   }
   .view {
     position: relative;
+    /* Couche à part : une vue qui change (LED, servo) se recompose seule, sans
+       repeindre la carte ni le tapis dessous (section 11.3, wk/banc.sh). */
+    will-change: transform;
   }
   .editing .view {
     pointer-events: none; /* en édition, la vue ne réagit pas : on déplace */

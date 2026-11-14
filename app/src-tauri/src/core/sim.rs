@@ -62,8 +62,11 @@ use crate::project::{split_endpoint, Project, Wire};
 /// Capacités des canaux : tous les tampons sont bornés (règle 16.2.11).
 const ACTOR_QUEUE: usize = 4096;
 const WRITER_QUEUE: usize = 4096;
-/// Regroupement des états vers l'interface : une fois par image (section 11.3).
-const UI_FRAME: Duration = Duration::from_millis(16);
+/// Intervalle entre deux images vers l'interface pour une cadence donnée
+/// (réglage frame_rate, section 10.7) : 16,7 ms à 60 i/s, 33 ms à 30, 66 ms à 15.
+pub fn frame_interval(fps: u64) -> Duration {
+    Duration::from_secs_f64(1.0 / fps.clamp(1, 240) as f64)
+}
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SYNC_TIMEOUT_MS: u32 = 1000;
 const EXIT_RESET: i32 = 71;
@@ -197,6 +200,8 @@ pub struct SimConfig {
     pub components: Vec<InstanceSpec>,
     /// Session de débogage : le firmware est lancé par le débogueur.
     pub debug: Option<DebugConfig>,
+    /// Intervalle minimal entre deux « sim:frame » (cadence d'affichage).
+    pub frame_interval: Duration,
 }
 
 /// Session de débogage (section 10.2).
@@ -392,6 +397,8 @@ struct Actor<R: Runtime> {
     sent_pins: BTreeMap<String, PinConfigEvent>,
     /// Image en attente des états des modèles (FlushStates envoyé).
     awaiting_states: bool,
+    /// Envoi de la dernière image : la suivante attend un intervalle de cadence.
+    last_frame: Option<Instant>,
     /// Paramètres connus des modèles, par composant.
     params: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     ui_flush_scheduled: bool,
@@ -472,6 +479,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         last_adc: HashMap::new(),
         sent_pins: BTreeMap::new(),
         awaiting_states: false,
+        last_frame: None,
         params,
         ui_flush_scheduled: false,
         out_seq: 0,
@@ -1157,20 +1165,29 @@ impl<R: Runtime> Actor<R> {
 
     // --- Interface ----------------------------------------------------------------------
 
-    /// Une image : getState des modèles modifiés au plus une fois par 16 ms.
+    /// Une image au plus par intervalle de cadence (réglage frame_rate) : tout
+    /// ce qui change entre-temps part dans la même image. Après un silence,
+    /// le premier changement part aussitôt.
     fn schedule_ui(&mut self) {
         if (!self.states_dirty
             && !self.pins_dirty
             && self.nets_out.is_empty()
             && self.uart_out.is_empty())
             || self.ui_flush_scheduled
+            || self.awaiting_states
         {
-            return;
+            return; // l'image en attente reprogrammera la suivante (emit_frame)
         }
         self.ui_flush_scheduled = true;
+        let wait = self
+            .last_frame
+            .map(|t| self.cfg.frame_interval.saturating_sub(t.elapsed()))
+            .unwrap_or_default();
         let tx = self.tx_self.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(UI_FRAME).await;
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
             let _ = tx.send(SimMsg::FlushUi).await;
         });
     }
@@ -1181,6 +1198,14 @@ impl<R: Runtime> Actor<R> {
         self.ui_flush_scheduled = false;
         if self.awaiting_states {
             return; // l'image en attente emportera aussi ces changements
+        }
+        // Trop tôt (programmée avant l'envoi de la dernière image) : reprogrammée.
+        if self
+            .last_frame
+            .is_some_and(|t| t.elapsed() < self.cfg.frame_interval)
+        {
+            self.schedule_ui();
+            return;
         }
         if std::mem::take(&mut self.states_dirty) {
             let sent = self
@@ -1231,6 +1256,7 @@ impl<R: Runtime> Actor<R> {
         }
         if !frame.is_empty() {
             let _ = self.app.emit("sim:frame", frame);
+            self.last_frame = Some(Instant::now());
         }
         // Changements arrivés pendant l'attente des états : image suivante.
         if self.states_dirty
