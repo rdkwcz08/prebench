@@ -1,6 +1,6 @@
 [package]
 name = "prebench"
-version = "0.2.2"
+version = "0.2.3"
 description = "Prebench — simulateur de cartes de développement"
 authors = ["Mathis Rudkiewicz"]
 license = "MIT"

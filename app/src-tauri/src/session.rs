@@ -12,11 +12,13 @@
 //   - components/<id>/model.ts ou manifest.json, prebench.toml : projet
 //     relu, simulation relancée si elle tourne.
 // Dossiers ignorés : cachés (.git, .vscode…) et dossiers de build.
-// Une source n'est retenue que si sa date de modification a changé : un
-// événement sans écriture (métadonnées, lecture par l'éditeur) ne lance aucun
-// build. L'app ne modifie jamais les fichiers du projet.
+// Une source, prebench.toml ou un modèle n'est retenu que si sa date de
+// modification a changé : un événement sans écriture (attributs étendus posés
+// par le système ou une synchronisation, lecture par l'éditeur) ne lance aucun
+// build et ne relance pas la simulation. L'app ne modifie jamais les fichiers
+// du projet.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,7 +37,7 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 const WATCH_QUEUE: usize = 256;
 /// Sources modifiées retenues par rafale.
 const MAX_FILES: usize = 256;
-/// Dates de modification connues des sources (règle 16.2.11).
+/// Dates de modification connues des fichiers surveillés (règle 16.2.11).
 const MAX_KNOWN: usize = 20_000;
 
 /// Extensions des sources du firmware.
@@ -65,6 +67,13 @@ pub struct Changes {
     /// Sources du firmware modifiées.
     #[serde(skip)]
     pub files: BTreeSet<PathBuf>,
+    /// Chemins à l'origine de `project` et `models`, filtrés par date de
+    /// modification comme les sources (keep_modified).
+    #[serde(skip)]
+    pub reload_files: BTreeMap<PathBuf, Change>,
+    /// Plus de MAX_FILES chemins : `project` et `models` gardés sans filtre.
+    #[serde(skip)]
+    reload_overflow: bool,
 }
 
 impl Changes {
@@ -79,10 +88,22 @@ impl Changes {
             Change::View(id) => {
                 self.views.insert(id);
             }
-            Change::Model(id) => {
-                self.models.insert(id);
+            Change::Model(ref id) => {
+                self.models.insert(id.clone());
+                self.track_reload(c, path);
             }
-            Change::Project => self.project = true,
+            Change::Project => {
+                self.project = true;
+                self.track_reload(c, path);
+            }
+        }
+    }
+
+    fn track_reload(&mut self, c: Change, path: PathBuf) {
+        if self.reload_files.len() < MAX_FILES {
+            self.reload_files.insert(path, c);
+        } else {
+            self.reload_overflow = true;
         }
     }
 
@@ -193,7 +214,7 @@ where
     let project = dir.clone();
     let task = tauri::async_runtime::spawn(async move {
         let root = canonical.clone();
-        let mut known = tauri::async_runtime::spawn_blocking(move || scan_sources(&root))
+        let mut known = tauri::async_runtime::spawn_blocking(move || scan_known(&root))
             .await
             .unwrap_or_default();
         while let Some(first) = rx.recv().await {
@@ -211,7 +232,7 @@ where
             if overflow.swap(false, Ordering::Relaxed) {
                 changes.firmware = true;
                 changes.project = true;
-            } else if changes.firmware {
+            } else {
                 keep_modified(&mut changes, &mut known);
             }
             if changes == Changes::default() {
@@ -231,21 +252,38 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Ne garde que les sources dont la date de modification a changé.
+/// Ne garde que les sources, prebench.toml et modèles dont la date de
+/// modification a changé (un dossier de composant créé ou supprimé change de
+/// date, ou disparaît).
 fn keep_modified(changes: &mut Changes, known: &mut HashMap<PathBuf, Option<SystemTime>>) {
-    changes.files.retain(|f| {
+    let mut modified = |f: &PathBuf| {
         let now = mtime(f);
         let changed = known.get(f) != Some(&now);
         if known.len() < MAX_KNOWN || known.contains_key(f) {
             known.insert(f.clone(), now);
         }
         changed
-    });
+    };
+    changes.files.retain(&mut modified);
     changes.firmware = !changes.files.is_empty();
+    if changes.reload_overflow {
+        return;
+    }
+    changes.reload_files.retain(|f, _| modified(f));
+    changes.project = changes.reload_files.values().any(|c| *c == Change::Project);
+    changes.models = changes
+        .reload_files
+        .values()
+        .filter_map(|c| match c {
+            Change::Model(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
 }
 
-/// Dates de modification des sources du projet à l'ouverture.
-fn scan_sources(root: &Path) -> HashMap<PathBuf, Option<SystemTime>> {
+/// Dates de modification, à l'ouverture, des fichiers et dossiers dont la
+/// modification lance un build ou relance la simulation.
+fn scan_known(root: &Path) -> HashMap<PathBuf, Option<SystemTime>> {
     let mut known = HashMap::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -260,10 +298,15 @@ fn scan_sources(root: &Path) -> HashMap<PathBuf, Option<SystemTime>> {
             let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
             if is_dir {
                 let name = entry.file_name();
-                if !ignored_dir(&name.to_string_lossy()) {
-                    stack.push(path);
+                if ignored_dir(&name.to_string_lossy()) {
+                    continue;
                 }
-            } else if classify(root, &path) == Some(Change::Firmware) {
+                stack.push(path.clone());
+            }
+            if matches!(
+                classify(root, &path),
+                Some(Change::Firmware | Change::Model(_) | Change::Project)
+            ) {
                 known.insert(path.clone(), mtime(&path));
             }
         }
@@ -308,5 +351,53 @@ mod tests {
         assert_eq!(c("README.md"), None);
         assert_eq!(c("sub/prebench.toml"), None);
         assert_eq!(classify(root, Path::new("/other/main.c")), None);
+    }
+
+    /// Événement sans écriture (attribut étendu, par exemple) sur prebench.toml
+    /// ou un modèle : la simulation n'est pas relancée.
+    #[test]
+    fn reload_needs_new_mtime() {
+        let root = std::env::temp_dir().join(format!("pb-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("components/pot")).expect("dossier");
+        let toml = root.join("prebench.toml");
+        let model = root.join("components/pot/model.ts");
+        std::fs::write(&toml, "a").expect("toml");
+        std::fs::write(&model, "a").expect("modèle");
+        let mut known = scan_known(&root);
+        let burst = |items: &[(Change, &Path)]| {
+            let mut c = Changes::default();
+            for (k, p) in items {
+                c.add((k.clone(), p.to_path_buf()));
+            }
+            c
+        };
+
+        let mut c = burst(&[
+            (Change::Project, &toml),
+            (Change::Model("pot".into()), &model),
+        ]);
+        keep_modified(&mut c, &mut known);
+        assert!(!c.needs_reload(), "dates inchangées : rien à relancer");
+
+        let later = SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&toml)
+            .and_then(|f| f.set_modified(later))
+            .expect("date");
+        let mut c = burst(&[
+            (Change::Project, &toml),
+            (Change::Model("pot".into()), &model),
+        ]);
+        keep_modified(&mut c, &mut known);
+        assert!(c.project && c.models.is_empty());
+
+        std::fs::create_dir_all(root.join("components/led")).expect("dossier");
+        let led = root.join("components/led");
+        let mut c = burst(&[(Change::Model("led".into()), &led)]);
+        keep_modified(&mut c, &mut known);
+        assert_eq!(c.models.iter().collect::<Vec<_>>(), ["led"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

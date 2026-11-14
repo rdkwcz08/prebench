@@ -127,6 +127,7 @@ export function responses(): Record<string, Json> {
     check_update: null,
     list_templates: [{ id: 'blinky-stm32-hal', suggested_dir: PROJECT_PATH }],
     start_simulation: null,
+    set_ui_visible: null,
     stop_simulation: null,
     reset_simulation: null,
     set_power: null,

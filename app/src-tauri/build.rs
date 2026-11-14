@@ -9,6 +9,7 @@ const COMMANDS: &[&str] = &[
     "stop_simulation",
     "reset_simulation",
     "set_power",
+    "set_ui_visible",
     "pause_simulation",
     "resume_simulation",
     "component_control",

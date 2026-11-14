@@ -38,6 +38,19 @@ pub struct AppState {
     own_write: std::sync::Mutex<Option<(PathBuf, std::time::SystemTime)>>,
     /// Fin du dernier build : voir build::invalidate_stale_objects.
     last_build_end: std::sync::Mutex<Option<std::time::SystemTime>>,
+    /// Page masquée (document.visibilityState, set_ui_visible).
+    page_hidden: std::sync::atomic::AtomicBool,
+    /// Fenêtre réduite (set_window_visible, appelé par lib.rs).
+    window_hidden: std::sync::atomic::AtomicBool,
+}
+
+impl AppState {
+    /// Interface affichée : ni la page ni la fenêtre ne sont masquées. Sinon,
+    /// la simulation n'envoie plus d'images à l'interface.
+    fn ui_visible(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        !self.page_hidden.load(Relaxed) && !self.window_hidden.load(Relaxed)
+    }
 }
 
 /// Lignes de la sortie d'un build en échec recopiées dans le Journal.
@@ -677,6 +690,7 @@ fn start_sim<R: Runtime>(
             components,
             debug,
             frame_interval: sim::frame_interval(frame_rate(app)),
+            ui_visible: tauri::Manager::state::<AppState>(app).ui_visible(),
         },
     ))
 }
@@ -865,6 +879,8 @@ async fn on_project_changed<R: Runtime>(app: AppHandle<R>, dir: PathBuf, changes
     let Some(handle) = slot.as_ref().filter(|h| h.is_alive()) else {
         return; // arrêtée pendant le build
     };
+    // Cause écrite dans le Journal : une relance doit toujours s'expliquer.
+    log(&app, relaunch_cause(&dir, &changes));
     if changes.needs_reload() {
         // Composants ou câblage modifiés : nouvelle paillasse.
         let debug = handle.debug.clone();
@@ -875,6 +891,36 @@ async fn on_project_changed<R: Runtime>(app: AppHandle<R>, dir: PathBuf, changes
         }
     } else if handle.send(SimMsg::Reload(firmware)).await.is_err() {
         log(&app, "rechargement impossible : simulation arrêtée".into());
+    }
+}
+
+/// Message du Journal avant une relance : « simulation relancée » (nouvelle
+/// paillasse) ou « firmware reconstruit », avec les fichiers en cause.
+fn relaunch_cause(dir: &Path, changes: &Changes) -> String {
+    const SHOWN: usize = 5;
+    let reload = changes.needs_reload();
+    let paths: Vec<&PathBuf> = if reload {
+        changes.reload_files.keys().collect()
+    } else {
+        changes.files.iter().collect()
+    };
+    let mut names: Vec<String> = paths
+        .iter()
+        .take(SHOWN)
+        .map(|p| p.strip_prefix(dir).unwrap_or(p).display().to_string())
+        .collect();
+    if paths.len() > SHOWN {
+        names.push(format!("et {} autres", paths.len() - SHOWN));
+    }
+    let what = if reload {
+        "simulation relancée"
+    } else {
+        "firmware reconstruit et rechargé"
+    };
+    if names.is_empty() {
+        format!("{what} : fichiers du projet modifiés")
+    } else {
+        format!("{what} : {} modifié(s)", names.join(", "))
     }
 }
 
@@ -1114,6 +1160,40 @@ pub async fn set_power(state: State<'_, AppState>, on: bool) -> CoreResult<()> {
         ));
     }
     send(&state, SimMsg::Power(on)).await
+}
+
+/// Page visible ou non (document.visibilityState) : masquée, le cœur n'envoie
+/// plus d'images (« sim:frame ») ; la simulation continue, et tout ce qui a
+/// changé part dans une image au retour (section 11.3).
+#[tauri::command]
+pub async fn set_ui_visible(state: State<'_, AppState>, visible: bool) -> CoreResult<()> {
+    state
+        .page_hidden
+        .store(!visible, std::sync::atomic::Ordering::Relaxed);
+    apply_ui_visibility(&state).await
+}
+
+/// Fenêtre réduite ou non (lib.rs) : sous Windows, la page reste « visible »
+/// fenêtre réduite (wry ne le signale pas à WebView2), d'où ce second signal.
+pub async fn set_window_visible(state: &AppState, visible: bool) -> CoreResult<()> {
+    // Appelé à chaque redimensionnement : rien à faire si l'état ne change pas.
+    if state
+        .window_hidden
+        .swap(!visible, std::sync::atomic::Ordering::Relaxed)
+        == !visible
+    {
+        return Ok(());
+    }
+    apply_ui_visibility(state).await
+}
+
+async fn apply_ui_visibility(state: &AppState) -> CoreResult<()> {
+    let visible = state.ui_visible();
+    let slot = state.sim.lock().await;
+    if let Some(sim) = slot.as_ref().filter(|s| s.is_alive()) {
+        sim.send(SimMsg::UiVisible(visible)).await?;
+    }
+    Ok(())
 }
 
 /// Pause de la simulation (barre d'outils, touche Espace) : horloge du firmware gelée.

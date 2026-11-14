@@ -166,6 +166,11 @@ export class Bench {
 
   async init(): Promise<void> {
     this.watchBattery();
+    // Fenêtre masquée ou réduite : le cœur n'envoie plus d'images (la
+    // simulation continue) ; au retour, une image emporte tout ce qui a changé.
+    document.addEventListener('visibilitychange', () => {
+      invoke('set_ui_visible', { visible: document.visibilityState === 'visible' }).catch(() => {});
+    });
     // Une image du cœur (section 11.3) : états, niveaux, broches modifiées ;
     // les octets UART sont pris par le moniteur série (serial.svelte.ts).
     await listen<FrameEvent>('sim:frame', (e) => {

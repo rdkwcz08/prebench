@@ -40,7 +40,24 @@ pub fn run() {
                 .find(|w| w.label == "main")
                 .cloned()
                 .ok_or("fenêtre « main » absente de tauri.conf.json")?;
-            tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.build()?;
+            let window =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.build()?;
+            // Fenêtre réduite : plus d'images envoyées (section 11.3). WKWebView
+            // et WebKitGTK passent alors la page à « hidden » (set_ui_visible),
+            // mais wry ne le signale pas à WebView2 : la réduction est donc
+            // aussi suivie ici, par l'API de Tauri, pour tous les systèmes.
+            let watched = window.clone();
+            let handle = app.handle().clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::Resized(_) = event {
+                    let visible = !watched.is_minimized().unwrap_or(false);
+                    let handle = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = tauri::Manager::state::<commands::AppState>(&handle);
+                        let _ = commands::set_window_visible(&state, visible).await;
+                    });
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -50,6 +67,7 @@ pub fn run() {
             commands::stop_simulation,
             commands::reset_simulation,
             commands::set_power,
+            commands::set_ui_visible,
             commands::pause_simulation,
             commands::resume_simulation,
             commands::component_control,

@@ -93,8 +93,10 @@ const MONITOR_PERIOD_FAST: Duration = Duration::from_millis(250);
 const SUSPEND_DELAY: Duration = Duration::from_millis(20);
 /// Trame UART_RX : 4 Kio au plus (docs/protocol.md).
 const UART_CHUNK: usize = 4096;
-/// Octets UART en attente d'une image, par UART (règle 16.2.11).
+/// Octets UART en attente d'une image, par UART (règle 16.2.11) ; fenêtre
+/// masquée, assez pour une longue absence sans rien perdre au moniteur.
 const UART_OUT_MAX: usize = 64 * 1024;
+const UART_OUT_HIDDEN_MAX: usize = 1024 * 1024;
 /// Avertissements du réseau logique (section 9.2), hors des codes du firmware.
 const WARN_CONFLICT: u16 = 100;
 const WARN_FLOATING: u16 = 101;
@@ -157,6 +159,10 @@ pub enum SimMsg {
     /// Paramètres des composants (complétés par les défauts), par identifiant :
     /// ceux qui ont changé sont transmis aux modèles (onParamsChange).
     SetParams(BTreeMap<String, serde_json::Map<String, serde_json::Value>>),
+    /// Fenêtre visible ou masquée/réduite : masquée, aucune image n'est
+    /// envoyée (la simulation continue) ; au retour, une image emporte tout ce
+    /// qui a changé entre-temps.
+    UiVisible(bool),
     /// Moniteur série : octets vers l'UART `id` du firmware.
     UartSend {
         id: u8,
@@ -202,6 +208,8 @@ pub struct SimConfig {
     pub debug: Option<DebugConfig>,
     /// Intervalle minimal entre deux « sim:frame » (cadence d'affichage).
     pub frame_interval: Duration,
+    /// Fenêtre visible : sinon, aucune image n'est envoyée (voir UiVisible).
+    pub ui_visible: bool,
 }
 
 /// Session de débogage (section 10.2).
@@ -535,6 +543,12 @@ impl<R: Runtime> Actor<R> {
                 SimMsg::BeatTimeout(seq) => self.on_beat_timeout(seq),
                 SimMsg::SetWiring(wires) => self.rewire(wires).await,
                 SimMsg::SetParams(all) => self.set_params(all),
+                SimMsg::UiVisible(visible) => {
+                    self.cfg.ui_visible = visible;
+                    if visible {
+                        self.schedule_ui(); // tout ce qui a changé, aussitôt
+                    }
+                }
                 SimMsg::UartSend { id, data } => {
                     for chunk in data.chunks(UART_CHUNK) {
                         let mut w = Writer::default();
@@ -1175,6 +1189,7 @@ impl<R: Runtime> Actor<R> {
             && self.uart_out.is_empty())
             || self.ui_flush_scheduled
             || self.awaiting_states
+            || !self.cfg.ui_visible
         {
             return; // l'image en attente reprogrammera la suivante (emit_frame)
         }
@@ -1196,8 +1211,8 @@ impl<R: Runtime> Actor<R> {
     /// l'image part avec eux (ModelEvent::States), sinon tout de suite.
     fn flush_ui(&mut self) {
         self.ui_flush_scheduled = false;
-        if self.awaiting_states {
-            return; // l'image en attente emportera aussi ces changements
+        if self.awaiting_states || !self.cfg.ui_visible {
+            return; // l'image en attente, ou le retour de la fenêtre, emportera ces changements
         }
         // Trop tôt (programmée avant l'envoi de la dernière image) : reprogrammée.
         if self
@@ -1490,9 +1505,14 @@ impl<R: Runtime> Actor<R> {
                 let data = r.bytes(len);
                 let out = self.uart_out.entry(id).or_default();
                 out.extend_from_slice(&data);
-                if out.len() > UART_OUT_MAX {
+                let max = if self.cfg.ui_visible {
+                    UART_OUT_MAX
+                } else {
+                    UART_OUT_HIDDEN_MAX
+                };
+                if out.len() > max {
                     // Interface en retard : les plus anciens octets cèdent la place (borné).
-                    let excess = out.len() - UART_OUT_MAX;
+                    let excess = out.len() - max;
                     out.drain(..excess);
                 }
                 self.schedule_ui();

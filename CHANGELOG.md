@@ -6,6 +6,19 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.2.3] - 2026-11-14
+
+**Aperçu technique** : fenêtre réduite presque gratuite, et plus de relance inattendue de la simulation. Budgets de la section 11.1 tenus sur Mac.
+
+### Modifié
+
+- Fenêtre réduite ou masquée : l'app n'envoie plus d'images à l'interface, la simulation continue ; au retour, l'affichage reprend avec tout ce qui a changé (banc WKWebView, `tests/budget` : de 19 % à 2,4 % d'un cœur pour le moteur web).
+- Journal : chaque relance de la simulation ou rechargement du firmware dit quels fichiers l'ont provoqué.
+
+### Corrigé
+
+- La simulation pouvait se relancer seule (nouveau processus firmware) quand le système modifiait les métadonnées de `prebench.toml` ou d'un modèle de composant sans en changer le contenu (attribut étendu posé par macOS ou une synchronisation). Seule une vraie écriture relance désormais la simulation.
+
 ## [0.2.2] - 2026-11-14
 
 **Aperçu technique** : simulation visible moins coûteuse, pour tenir les budgets de la section 11.1.

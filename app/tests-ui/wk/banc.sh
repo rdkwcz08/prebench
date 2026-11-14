@@ -62,4 +62,4 @@ for p in $pids; do
   printf "  %-32s %6s %% %6s Mo\n" "$(ps -o comm= -p "$p" | sed 's|.*/||' | cut -c1-32)" "$cpu" "${mem:-?}"
   total=$(echo "$total $cpu" | awk '{ print $1 + $2 }')
 done
-echo "Total : $total % d'un cœur sur $SECONDS_ s ($(grep -E 'FIN|ERREUR' "$WORK/out.txt"))"
+echo "Total : $total % d'un cœur sur $SECONDS_ s ($(grep -E 'FIN|ERREUR' "$WORK/out.txt")) $(grep VISIBILITE "$WORK/out.txt" || true)"

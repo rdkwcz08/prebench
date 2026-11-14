@@ -34,7 +34,7 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         web = WKWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 800), configuration: config)
         web.navigationDelegate = self
         window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1280, height: 800),
-                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                          styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Banc de rendu Prebench"
         window.contentView = web
         window.makeKeyAndOrderFront(nil)
@@ -45,6 +45,15 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             print("DEBUT"); fflush(stdout)
+            // BANC_REDUIRE=1 : fenêtre réduite dans le Dock pendant le rejeu.
+            if ProcessInfo.processInfo.environment["BANC_REDUIRE"] == "1" {
+                self.window.miniaturize(nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    webView.evaluateJavaScript("document.visibilityState") { v, _ in
+                        print("VISIBILITE page \(v ?? "?")"); fflush(stdout)
+                    }
+                }
+            }
             webView.callAsyncJavaScript("return await window.__pbReplay();", arguments: [:],
                                         in: nil, in: .page) { result in
                 switch result {

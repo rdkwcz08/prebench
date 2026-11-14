@@ -205,9 +205,7 @@ for (const tab of TABS) {
 test('export du banc WKWebView', () => {
   test.skip(!process.env.PREBENCH_PERF_EXPORT, 'manuel : PREBENCH_PERF_EXPORT=1');
   const data = { ...responses(), open_project: budgetProject(), default_project: '/budget' };
-  let list = (JSON.parse(readFileSync(EVENTS, 'utf8')) as { t: number; name: string }[]).filter(
-    (e) => !SKIP.includes(e.name),
-  );
+  let list = JSON.parse(readFileSync(EVENTS, 'utf8')) as { t: number; name: string }[];
   // Même recalage que plus haut (PREBENCH_PERF_RATE), sur 20 s au plus.
   const rate = Number(process.env.PREBENCH_PERF_RATE ?? 0);
   const frames = list.filter((e) => e.name === 'sim:states');
@@ -216,6 +214,10 @@ test('export du banc WKWebView', () => {
     const scale = frames.length / (span / 1000) / rate;
     list = list.map((e) => ({ ...e, t: e.t * scale })).filter((e) => e.t <= 20_000);
   }
+  // Durée du flux complet, gardée même si PREBENCH_PERF_SKIP retire tout
+  // (paillasse immobile : simulation en cours, rien ne change à l'écran).
+  const duration = list.at(-1)?.t ?? 0;
+  list = list.filter((e) => !SKIP.includes(e.name));
   // PREBENCH_PERF_FPS : cadence d'affichage, appliquée comme le fait le cœur
   // (une image par intervalle, qui regroupe tout ce qui a changé), puis par
   // l'interface (réglage frame_rate).
@@ -256,8 +258,11 @@ test('export du banc WKWebView', () => {
     for (const e of list) {
       const wait = e.t - (performance.now() - start);
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-      emit(e.name, e.payload);
+      // Comme le cœur (set_ui_visible) : rien n'est envoyé page masquée.
+      if (document.visibilityState !== 'hidden') emit(e.name, e.payload);
     }
+    const rest = ${duration} - (performance.now() - start);
+    if (rest > 0) await new Promise((r) => setTimeout(r, rest));
     return (performance.now() - start) / 1000;
   };
   ${process.env.PREBENCH_PERF_CSS ? `document.addEventListener('DOMContentLoaded', () => {

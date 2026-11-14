@@ -14,6 +14,7 @@
     "allow-stop-simulation",
     "allow-reset-simulation",
     "allow-set-power",
+    "allow-set-ui-visible",
     "allow-pause-simulation",
     "allow-resume-simulation",
     "allow-component-control",

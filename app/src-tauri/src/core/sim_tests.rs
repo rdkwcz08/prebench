@@ -217,6 +217,7 @@ fn start_project_full(
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(60)
             })),
+            ui_visible: true,
         },
     );
     (
@@ -619,6 +620,42 @@ fn frame_rate_caps_core_frames() {
         min >= 60.0,
         "écart minimal {min:.1} ms entre deux images (66 ms attendus)"
     );
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Fenêtre masquée ou réduite : aucune image tant qu'elle l'est, la simulation
+/// continue ; au retour, une image emporte l'état de LD2 qui a changé.
+#[test]
+fn hidden_window_stops_frames() {
+    let dir = repo_root().join("tests").join("pwm-fade");
+    let (app, sim, rec, _) =
+        start_project_full(&repo_root(), &dir, &test_build_dir(&dir), None, None);
+    let frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let frames = std::sync::Arc::clone(&frames);
+        app.handle().listen_any("sim:frame", move |_| {
+            frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+    rec.wait(|name, v| name == "sim:states" && v["LD2"].is_object());
+    sim.tx.try_send(SimMsg::UiVisible(false)).expect("masquée");
+    // Le firmware continue : 20 bascules de rapport cyclique (pas de 10 ms)
+    // vues par le test, sans aucune image.
+    let mut duty = 0;
+    let mut first = None;
+    rec.wait(|name, _| {
+        if name == "sim:test-pwm" {
+            duty += 1;
+            if duty == 3 {
+                first = Some(frames.load(std::sync::atomic::Ordering::Relaxed));
+            }
+        }
+        duty >= 23
+    });
+    let during = frames.load(std::sync::atomic::Ordering::Relaxed) - first.unwrap_or(0);
+    assert_eq!(during, 0, "{during} images envoyées fenêtre masquée");
+    sim.tx.try_send(SimMsg::UiVisible(true)).expect("visible");
+    rec.wait(|name, v| name == "sim:states" && v["LD2"].is_object());
     let _ = sim.tx.try_send(SimMsg::Stop);
 }
 
@@ -1072,6 +1109,11 @@ fn budget_core_profile() {
     });
     let warm = Instant::now() + Duration::from_secs(3);
     rec.wait(|_, _| Instant::now() >= warm);
+    // PREBENCH_BUDGET_HIDDEN=1 : fenêtre réduite (aucune image), flux non enregistré.
+    let hidden = std::env::var("PREBENCH_BUDGET_HIDDEN").is_ok_and(|v| v == "1");
+    if hidden {
+        sim.tx.try_send(SimMsg::UiVisible(false)).expect("masquée");
+    }
 
     const SECONDS: u64 = 20;
     let cpu0 = self_cpu_ms();
@@ -1107,6 +1149,10 @@ fn budget_core_profile() {
             *n as f64 / wall,
             *bytes as f64 / wall
         );
+    }
+    if hidden {
+        let _ = sim.tx.try_send(SimMsg::Stop);
+        return;
     }
     let out = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")

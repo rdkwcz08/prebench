@@ -470,7 +470,7 @@ to = "board.PB9"
 ### 10.2 Cycle édition → simulation
 
 1. L'utilisateur sauvegarde dans son éditeur.
-2. L'app détecte le changement et lance le build « sim » (et le build de la vraie cible pour la jauge mémoire).
+2. L'app détecte le changement et lance le build « sim » (et le build de la vraie cible pour la jauge mémoire). Seul compte un fichier dont la date de modification a changé : un événement sans écriture (attribut étendu posé par le système ou une synchronisation) ne lance aucun build et ne relance pas la simulation. Chaque relance est écrite dans le Journal avec les fichiers en cause.
 3. En cas d'erreur : liste cliquable qui ouvre `fichier:ligne` dans l'éditeur (schéma `vscode://file/…:ligne`, sinon application par défaut du fichier ; choix d'un autre éditeur : Plus tard). L'ancien firmware continue de tourner jusqu'au build réussi suivant.
 4. En cas de succès : rechargement du firmware ; câblage et valeurs des capteurs conservés.
 5. Débogage : l'app écrit dans `.vscode/launch.json` une configuration qui lance le firmware sous le débogueur (CodeLLDB sur Mac ; extension C/C++ et gdb de MSYS2 sous Windows) et l'attend sans délai ; elle signale l'extension ou le débogueur absent. Quand le débogueur s'arrête, toute la paillasse se fige (« Arrêté sur un point d'arrêt ») ; à la reprise, le temps du firmware repart sans saut (protocole 1.1, `docs/protocol.md` section 5.5).
@@ -542,7 +542,7 @@ Chaque brique arrive quand elle devient utile : un réglage peut être déclaré
 | Cadence d'affichage de la simulation (`frame_rate` : 60, 30 ou 15 images/s), appliquée par le cœur (un `sim:frame` par intervalle, qui regroupe tout ce qui a changé) et par l'interface ; sur batterie, au plus `frame_rate_battery` | app | 15 / 30 (banc WKWebView, `tests/budget`, flux à 40 i/s : 36 % d'un cœur à 60, 32 % à 30, 24 % à 15) | Modifiable dans `settings.toml` (lu au démarrage d'une simulation) ; écran des réglages : Plus tard |
 | Pause automatique : CPU du firmware et durée | projet | 80 % d'un cœur, 5 s | Fixe |
 | Plafond mémoire du firmware | projet | 256 Mo | Fixe ; modifiable : Plus tard |
-| Simulation quand la fenêtre est masquée | app | continue | Prévu |
+| Simulation quand la fenêtre est masquée | app | continue, sans images envoyées à l'interface (section 11.3) | Fait |
 | Accès internet du shim Wi-Fi | projet | non (localhost) | Prévu (déjà `network.internet` dans le schéma, V2) |
 
 **Écran des réglages** : Plus tard ; en attendant, seuls les contrôles existants (bouton de thème) modifient un réglage.
@@ -553,10 +553,13 @@ Aucun bug du firmware ne doit pouvoir geler l'ordinateur : au pire, la simulatio
 
 ### 11.1 Budgets cibles
 
+CPU en % d'un cœur, total de l'app, de sa WebView (contenu, GPU, réseau) et du firmware ; mesure avec `tests/budget/mesure.sh` ou `mesure.ps1`.
+
 | Situation | CPU | RAM |
 | --- | --- | --- |
 | App ouverte, pas de simulation | < 1 % | < 150 Mo |
-| 1 Nucleo + OLED + 5 composants simples | < 10 % d'un cœur | < 250 Mo |
+| 1 Nucleo + 5 composants simples (`tests/budget`), fenêtre réduite ou paillasse immobile | < 10 % d'un cœur | < 350 Mo, stable dans le temps |
+| Même paillasse, scène animée, cadence par défaut (15 images/s) | < 25 % d'un cœur | < 350 Mo, stable dans le temps |
 | ESP32 + TFT + audio I2S | < 25 % d'un cœur | < 400 Mo |
 | Plafond dur par carte | Pause automatique au-delà de 80 % d'un cœur pendant 5 s | 256 Mo par firmware |
 
@@ -580,7 +583,7 @@ Taille de l'app visée : de l'ordre de 10 à 20 Mo, hors toolchains.
 - **Coût d'une image** : chaque image qui change quelque chose à l'écran coûte une recomposition de la fenêtre (WebContent et GPU) ; aucune animation n'est entretenue quand l'état ne bouge pas (halo d'une LED seulement à l'allumage, pas de transition sur une variation de luminosité, aucun filtre SVG ou CSS), le moniteur série n'ajoute que ses nouvelles lignes, le traceur ne se redessine qu'à l'arrivée de données. Les éléments qui changent à chaque image (couche des pastilles, vue de chaque composant) ont leur propre couche de composition, et les niveaux et broches sont mis à jour clé par clé, seulement s'ils changent. Mesure manuelle du rendu : `app/tests-ui/perf.spec.ts` (flux du cœur enregistré par le test `budget_core_profile`, rejoué dans l'interface, Chromium) et `app/tests-ui/wk/banc.sh` (même rejeu dans le vrai WKWebView de macOS, CPU et mémoire des processus WebKit).
 - Luminosité d'une LED en PWM = rapport cyclique mesuré sur l'image.
 - Écrans : redessinés uniquement si le framebuffer est marqué « modifié ».
-- Fenêtre masquée ou réduite : rendu arrêté, la simulation continue.
+- Fenêtre masquée ou réduite : le cœur n'envoie plus d'images (`sim:frame`), la simulation continue ; au retour, une image regroupe tout ce qui a changé. Deux signaux : la page masquée (`document.visibilityState`, commande `set_ui_visible` ; WKWebView et WebKitGTK la passent à « hidden » fenêtre réduite) et la fenêtre réduite selon Tauri (`is_minimized` à chaque redimensionnement), car wry ne signale pas la réduction à WebView2.
 - Sur batterie : 30 images/s au lieu de 60.
 - Mode temps virtuel (plus tard) : plafonné à ×1 par défaut, accélération sur demande.
 
@@ -733,15 +736,17 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
 
 **Critère de passage** : budgets de la section 11.1 respectés ; un firmware en `while(1)` sans délai ne dépasse pas le plafond.
 
-- [ ] Budgets de la section 11.1 mesurés avec le projet `tests/budget` (Nucleo + 5 composants simples, tous actifs ; l'OLED du budget arrive en phase 3) et les scripts `mesure.sh` / `mesure.ps1` : CPU consommé pendant 60 s ÷ durée (% d'un cœur), mémoire de l'app, de sa WebView et du firmware (build « sim » en Debug).
+- [x] Budgets de la section 11.1 mesurés avec le projet `tests/budget` (Nucleo + 5 composants simples, tous actifs ; l'OLED du budget arrive en phase 3) et les scripts `mesure.sh` / `mesure.ps1` : CPU consommé pendant 60 s ÷ durée (% d'un cœur), mémoire de l'app, de sa WebView et du firmware (build « sim » en Debug).
   - macOS, app 0.2.0 installée (14 novembre 2026, MacBook Air Apple Silicon, mesures de l'utilisateur) : à vide 0 % et 67 Mo ; en simulation 60 % d'un cœur et 301 Mo (app 10 %, WebContent 27 %, GPU 23 %) : **budget dépassé**. Causes trouvées par rejeu du flux du cœur dans l'interface (`perf.spec.ts`, Chromium, 24,5 images/s) : transition du halo des LED relancée à chaque variation de luminosité (animation permanente), quatre événements par image au lieu d'un, moniteur série reconstruit à chaque octet. Corrigé en 0.2.1 : navigateur de 43 % à 21 % d'un cœur dans ce banc. App 0.2.1 : à mesurer.
   - Le script `mesure.sh` de la 0.2.0 comptait des processus WebKit d'autres apps et manquait le firmware : corrigé en 0.2.1 (processus responsable = Prebench).
-  - Windows : à mesurer.
+  - macOS, app 0.2.2 installée (14 novembre 2026, mesures de l'utilisateur) : à vide 0,1 % et 84 Mo ; simulation visible 23,4 % et 332 Mo (app 5,6 %, GPU 7,4 %, WebContent 10,0 %, firmware 0,4 %) ; après 10 min 24,4 % et 314 Mo (stable) ; fenêtre réduite 12,1 % (le moteur web dessinait encore : corrigé en 0.2.3).
+  - macOS, 0.2.3 (14 novembre 2026, banc WKWebView `app/tests-ui/wk/banc.sh` à 15 images/s et test `budget_core_profile`) : fenêtre réduite 2,4 % pour la WebView (`BANC_REDUIRE=1`, page « hidden ») + 1,4 % pour le cœur et 0,3 % pour le firmware sans images (`PREBENCH_BUDGET_HIDDEN=1`), soit environ 4 % ; paillasse immobile 1,4 % pour la WebView (`PREBENCH_PERF_SKIP=sim:states,sim:pins,sim:nets,sim:uart`), 5,2 % si la sortie série défile ; scène animée 20,9 % pour la WebView. Budgets tenus ; mesure de la 0.2.3 installée avec `mesure.sh` : à faire par l'utilisateur.
+  - Windows : à mesurer (`mesure.ps1`).
   - Taille de l'app : 12,5 Mo (bundle macOS), dans la cible de 10 à 20 Mo.
 - [x] Garde-fous (14 novembre 2026, Mac ; mêmes tests en CI Windows et Linux) : un `while(1)` sans délai est mis en pause après 5,8 s de temps CPU consommé (seuil : 5 s à plus de 80 % d'un cœur), puis suspendu (test `guard_busy_loop_pauses`) ; une fuite mémoire est arrêtée à 270 Mo (plafond 256 Mo, mesure à 4 Hz au-delà de 128 Mo, test `guard_memory_leak_stops`).
 - [x] Latence (14 novembre 2026, outil `tests/latency`, 2000 allers-retours) : Mac, cœur médiane 23 µs et 99e centile 60 µs, modèle 29 µs et 45 µs ; CI Windows, cœur 58 µs et 137 µs, modèle 141 µs et 254 µs (runners partagés : valeurs variables d'une exécution à l'autre, de 99 à 166 µs de médiane pour le cœur sur les CI précédentes). Le vidage différé des lots (délai de moins de 1 ms, protocole 5.1) ne touche pas les transactions synchrones, qui partent aussitôt.
 
-**Bilan de la phase 2** : paillasse éditable et câblage vérifié, réseau logique, moniteur série et traceur, débogage dans VS Code, inspecteur, reset et coupure d'alimentation, PWM et ADC avec quatre nouveaux composants (potentiomètre, servomoteur, buzzer, LED RGB) ; releases v0.1.2, v0.1.3 et v0.2.0. Reportés en phase 3 : palette de commandes et panneau environnement.
+**Bilan de la phase 2** : paillasse éditable et câblage vérifié, réseau logique, moniteur série et traceur, débogage dans VS Code, inspecteur, reset et coupure d'alimentation, PWM et ADC avec quatre nouveaux composants (potentiomètre, servomoteur, buzzer, LED RGB) ; releases v0.1.2, v0.1.3, v0.2.0 à v0.2.3 (budgets tenus sur Mac). Reportés en phase 3 : palette de commandes et panneau environnement.
 
 ### Phase 3 — Bus et écrans
 
