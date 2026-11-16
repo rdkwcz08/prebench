@@ -8,7 +8,10 @@
  * - TIM1 à 1 kHz : CH1 (PA8, D7) pour le vert, en fondu inverse ;
  * - PB5 (D4) : bleu, allumé tant que le bouton sur PA10 (D2) est appuyé ;
  * - ADC1 IN0 (PA0, A0) : potentiomètre -> servo et rouge, toutes les 10 ms ;
- * - USART2 : « pot:<valeur>,ld2:<pour mille> » toutes les 100 ms (traceur).
+ * - USART2 : « pot:<valeur>,ld2:<pour mille> » toutes les 100 ms (traceur) ;
+ * - I2C1 (PB8 SCL, PB9 SDA) : écran OLED SSD1306 en 0x3C, réécrit en entier
+ *   toutes les 100 ms (1 024 octets, phase 3) : barre du potentiomètre et
+ *   trait vertical qui défile.
  */
 #include <stdio.h>
 
@@ -17,6 +20,30 @@
 static TIM_HandleTypeDef htim1, htim2, htim3;
 static ADC_HandleTypeDef hadc1;
 static UART_HandleTypeDef huart2;
+static I2C_HandleTypeDef hi2c1;
+static uint8_t oled[128 * 8];
+
+static void oled_cmds(const uint8_t *cmds, uint16_t n)
+{
+    HAL_I2C_Mem_Write(&hi2c1, 0x3C << 1, 0x00, I2C_MEMADD_SIZE_8BIT, (uint8_t *)cmds, n, 10);
+}
+
+/* Image entière : barre (pages 2 et 3) selon le potentiomètre, trait vertical en x. */
+static void oled_frame(uint32_t raw, uint32_t x)
+{
+    static const uint8_t window[] = { 0x21, 0, 127, 0x22, 0, 7 };
+    for (uint32_t c = 0; c < 128; ++c) {
+        uint8_t bar = c < raw * 128U / 4096U ? 0xFF : 0x00;
+        oled[0 * 128 + c] = (c % 8U == 0U) ? 0x0F : 0x00;
+        oled[2 * 128 + c] = bar;
+        oled[3 * 128 + c] = bar;
+        for (uint32_t p = 4; p < 8; ++p) {
+            oled[p * 128 + c] = (c == x) ? 0xFF : 0x00;
+        }
+    }
+    oled_cmds(window, sizeof window);
+    HAL_I2C_Mem_Write(&hi2c1, 0x3C << 1, 0x40, I2C_MEMADD_SIZE_8BIT, oled, sizeof oled, 10);
+}
 
 static void SystemClock_Config(void)
 {
@@ -79,6 +106,7 @@ int main(void)
     pin(GPIOB, GPIO_PIN_5, GPIO_MODE_OUTPUT_PP, GPIO_NOPULL, 0);           /* bleu */
     pin(GPIOA, GPIO_PIN_10, GPIO_MODE_INPUT, GPIO_PULLUP, 0);              /* bouton */
     pin(GPIOA, GPIO_PIN_0, GPIO_MODE_ANALOG, GPIO_NOPULL, 0);              /* potentiomètre */
+    pin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9, GPIO_MODE_AF_OD, GPIO_NOPULL, GPIO_AF4_I2C1); /* OLED */
 
     const uint32_t ch2[] = { TIM_CHANNEL_1, TIM_CHANNEL_3 };
     const uint32_t ch3[] = { TIM_CHANNEL_1, TIM_CHANNEL_2 };
@@ -100,6 +128,16 @@ int main(void)
     huart2.Init.BaudRate = 115200;
     huart2.Init.Mode = UART_MODE_TX_RX;
     HAL_UART_Init(&huart2);
+
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.ClockSpeed = 400000;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    HAL_I2C_Init(&hi2c1);
+    static const uint8_t oled_init[] = {
+        0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40, 0x8D, 0x14, 0x20, 0x00,
+        0xA1, 0xC8, 0xDA, 0x12, 0x81, 0xCF, 0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF,
+    };
+    oled_cmds(oled_init, sizeof oled_init);
 
     uint32_t tick = 0;
     int32_t fade = 0, step = 23;
@@ -126,6 +164,7 @@ int main(void)
             int len = snprintf(line, sizeof line, "pot:%lu,ld2:%lu\r\n", (unsigned long)raw,
                                (unsigned long)fade * 1000UL / 2273UL);
             HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)len, 10);
+            oled_frame(raw, (tick / 10U) % 128U);
         }
         tick++;
         HAL_Delay(10);

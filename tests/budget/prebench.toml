@@ -1,13 +1,15 @@
 #:schema ../../docs/prebench.schema.json
 # Mesure des budgets (cahier des charges, section 11.1) : « 1 Nucleo + 5
-# composants simples », tous actifs. L'OLED du budget arrive en phase 3.
+# composants simples », tous actifs, plus l'OLED (phase 3, étape 3).
 # - LD2 : fondu PWM (TIM2_CH1, PA5) ;
 # - pot1 sur A0 commande servo1 sur D5 (TIM3_CH1, 50 Hz) ;
 # - rgb1 (cathode commune) : rouge sur D9 (TIM3_CH2), vert sur D7 (TIM1_CH1),
 #   bleu sur D4 (GPIO) ;
 # - buzzer1 sur D6 (TIM2_CH3) : 440 Hz une demi-seconde sur deux ;
 # - btn1 sur D2 (pull-up du firmware) : appui = bleu allumé ;
-# - USART2 : une ligne de traceur toutes les 100 ms.
+# - USART2 : une ligne de traceur toutes les 100 ms ;
+# - oled1 (SSD1306 128 × 64, 0x3C) sur I2C1 (D15 = PB8, D14 = PB9) : image
+#   entière toutes les 100 ms (barre du potentiomètre, trait qui défile).
 
 format_version = 1
 board          = "nucleo-f401re"
@@ -40,6 +42,11 @@ pos  = [528, 192]
 id   = "btn1"
 type = "button"
 pos  = [432, 432]
+
+[[components]]
+id   = "oled1"
+type = "ssd1306"
+pos  = [624, 72]
 
 [[wires]]
 from = "pot1.VCC"
@@ -96,3 +103,19 @@ to   = "board.CN9:3"
 [[wires]]
 from = "btn1.2"
 to   = "board.CN5:7"
+
+[[wires]]
+from = "oled1.GND"
+to   = "board.CN6:6"
+
+[[wires]]
+from = "oled1.VCC"
+to   = "board.CN6:4"
+
+[[wires]]
+from = "oled1.SCL"
+to   = "board.CN5:10"
+
+[[wires]]
+from = "oled1.SDA"
+to   = "board.CN5:9"

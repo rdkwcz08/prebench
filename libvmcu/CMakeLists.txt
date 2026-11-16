@@ -49,6 +49,7 @@ add_library(vmcu STATIC
   core/vmcu_uart.c
   core/vmcu_pwm.c
   core/vmcu_adc.c
+  core/vmcu_i2c.c
   core/vmcu_diag.c
   core/vmcu_unsupported.c
   ${_vmcu_platform}

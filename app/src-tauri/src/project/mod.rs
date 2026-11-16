@@ -258,4 +258,39 @@ mod tests {
         assert_eq!(p.notes, notes);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Paramètre « table » (joker I2C) : tableau de tables, venu du JSON de
+    /// l'interface, écrit dans prebench.toml et relu à l'identique.
+    #[test]
+    fn save_bench_table_param() {
+        let dir = std::env::temp_dir().join(format!("prebench-table-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("prebench.toml"),
+            "format_version = 1\nboard = \"nucleo-f401re\"\nframework = \"stm32-hal\"\n",
+        )
+        .expect("écriture");
+        let json = serde_json::json!({
+            "address": 80,
+            "registers": [{ "reg": 0, "value": 42, "mode": "fixed" }, { "reg": 32, "value": 128, "mode": "slider" }]
+        });
+        let params: BTreeMap<String, toml::Value> =
+            serde_json::from_value(json).expect("JSON -> TOML");
+        let comps = vec![ComponentInstance {
+            id: "joker1".into(),
+            kind: "joker-i2c".into(),
+            name: None,
+            params: params.clone(),
+            pos: [0.0, 0.0],
+        }];
+        save_bench(&dir, &comps, &[], &[]).expect("enregistrement");
+        let p = Project::load(&dir).expect("relecture");
+        assert_eq!(p.components[0].params, params);
+        let rows = p.components[0].params["registers"]
+            .as_array()
+            .expect("tableau");
+        assert_eq!(rows[1]["mode"].as_str(), Some("slider"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

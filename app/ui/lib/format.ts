@@ -31,6 +31,22 @@ export function adcRaw(raw: number, max: number): string {
   return `${fr(raw)} / ${fr(max)}`;
 }
 
+/** Entier en hexadécimal : « 0x3C » (adresses I2C, registres). */
+export function hex(value: number, digits = 2): string {
+  return `0x${Math.round(value).toString(16).toUpperCase().padStart(digits, '0')}`;
+}
+
+/**
+ * Saisie d'un entier : en hexadécimal (« 0x3C » ou « 3C ») si `asHex`, sinon
+ * en décimal ou avec le préfixe 0x. NaN si la saisie n'est pas un entier.
+ */
+export function parseInteger(text: string, asHex: boolean): number {
+  const t = text.trim().replace(/^0x/i, (p) => (asHex ? '' : p));
+  if (asHex) return /^[0-9a-f]+$/i.test(t) ? Number.parseInt(t, 16) : Number.NaN;
+  if (/^0x[0-9a-f]+$/i.test(t)) return Number.parseInt(t.slice(2), 16);
+  return /^-?\d+$/.test(t) ? Number.parseInt(t, 10) : Number.NaN;
+}
+
 /** Durée en ms : « 1,5 ms ». */
 export function millis(ms: number): string {
   return `${fr(ms, 3)} ms`;

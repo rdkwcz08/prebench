@@ -66,7 +66,8 @@
         "oneOf": [
           { "$ref": "#/$defs/i2c" },
           { "$ref": "#/$defs/spi" },
-          { "$ref": "#/$defs/uart" }
+          { "$ref": "#/$defs/uart" },
+          { "$ref": "#/$defs/ledStrip" }
         ]
       }
     },
@@ -157,7 +158,19 @@
         }
       }
     },
-    "param": {
+    "ledStrip": {
+      "description": "Entrée de données d'un ruban de LED adressables (WS2812) : reçoit les trames LED_STRIP (docs/protocol.md, section 4.4) par onLedStrip. Ajout compatible de la v1 (phase 3).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "din"],
+      "properties": {
+        "type": { "const": "led-strip" },
+        "name": { "type": "string" },
+        "din": { "$ref": "#/$defs/pinName" }
+      }
+    },
+    "scalarParam": {
+      "description": "Colonne d'un paramètre de type « table » : mêmes champs qu'un paramètre scalaire.",
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "label", "default"],
@@ -169,10 +182,78 @@
         "max": { "type": "number" },
         "step": { "type": "number", "exclusiveMinimum": 0 },
         "unit": { "type": "string" },
+        "display": {
+          "description": "Affichage et saisie d'un entier dans l'inspecteur : « hex » pour 0x3C (adresses, registres). Ajout compatible de la v1 (phase 3).",
+          "type": "string",
+          "enum": ["decimal", "hex"],
+          "default": "decimal"
+        },
         "values": { "type": "array", "items": { "type": ["string", "number"] }, "minItems": 1 }
       },
       "allOf": [
         { "if": { "properties": { "type": { "const": "enum" } } }, "then": { "required": ["values"] } }
+      ]
+    },
+    "tableRow": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+      "additionalProperties": { "type": ["number", "string", "boolean"] }
+    },
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "label", "default"],
+      "properties": {
+        "type": {
+          "description": "« table » (ajout compatible de la v1, phase 3) : liste de lignes dont les colonnes sont déclarées dans « columns », par exemple la table de registres du joker I2C.",
+          "type": "string",
+          "enum": ["integer", "number", "string", "boolean", "enum", "table"]
+        },
+        "label": { "type": "string" },
+        "default": {
+          "oneOf": [
+            { "type": ["number", "string", "boolean"] },
+            { "type": "array", "items": { "$ref": "#/$defs/tableRow" } }
+          ]
+        },
+        "columns": {
+          "description": "Colonnes d'un paramètre « table ».",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+          "additionalProperties": { "$ref": "#/$defs/scalarParam" }
+        },
+        "max_rows": {
+          "description": "Nombre de lignes maximal d'un paramètre « table » (tampon borné, règle 16.2.11).",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number", "exclusiveMinimum": 0 },
+        "unit": { "type": "string" },
+        "display": {
+          "description": "Affichage et saisie d'un entier dans l'inspecteur : « hex » pour 0x3C (adresses, registres). Ajout compatible de la v1 (phase 3).",
+          "type": "string",
+          "enum": ["decimal", "hex"],
+          "default": "decimal"
+        },
+        "values": { "type": "array", "items": { "type": ["string", "number"] }, "minItems": 1 }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "enum" } } }, "then": { "required": ["values"] } },
+        {
+          "if": { "properties": { "type": { "const": "table" } } },
+          "then": {
+            "required": ["columns", "max_rows"],
+            "properties": { "default": { "type": "array" } }
+          },
+          "else": {
+            "properties": { "default": { "type": ["number", "string", "boolean"] } },
+            "not": { "anyOf": [{ "required": ["columns"] }, { "required": ["max_rows"] }] }
+          }
+        }
       ]
     },
     "control": {

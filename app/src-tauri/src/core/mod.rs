@@ -3,6 +3,7 @@
 pub mod board;
 pub mod checks;
 pub mod components;
+pub mod environment;
 pub mod net;
 pub mod protocol;
 pub mod sim;

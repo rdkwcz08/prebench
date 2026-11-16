@@ -21,6 +21,8 @@
 //   moniteur série -> uart_send -> UART_RX (trames de 4 Kio au plus)
 //   conflit ou entrée lue flottante -> avertissement (section 9.2)
 //   PING Worker : firmware -> acteur -> onPing du composant d'écho -> PONG (sans WebView)
+//   I2C_XFER : firmware -> acteur (composant du bus à cette adresse, d'après
+//     le câblage) -> onI2C -> I2C_REPLY ; sans composant : NACK adresse
 //
 // Garde-fous (section 11.2) : pendant une simulation, et seulement alors, un
 // minuteur à 1 Hz mesure le CPU et la mémoire du firmware (« sim:usage »).
@@ -47,7 +49,7 @@ use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream as LocalStream;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -59,9 +61,21 @@ use crate::error::{CoreError, CoreResult};
 use crate::platform;
 use crate::project::{split_endpoint, Project, Wire};
 
+/// Canal binaire vers l'interface pour les images des écrans (commande
+/// display_channel) : message « displays » (components/display.rs), au plus
+/// un par image, jamais en JSON (section 11.3).
+#[derive(Default)]
+pub struct DisplaySink(
+    pub std::sync::Mutex<Option<tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>>>,
+);
+
 /// Capacités des canaux : tous les tampons sont bornés (règle 16.2.11).
 const ACTOR_QUEUE: usize = 4096;
 const WRITER_QUEUE: usize = 4096;
+/// Tampon de lecture du canal firmware (un lot du firmware fait 64 Kio au plus).
+const READ_BUFFER: usize = 64 * 1024;
+/// Trames au plus par message vers l'acteur (borne, règle 16.2.11).
+const MAX_FRAMES_PER_MSG: usize = 256;
 /// Intervalle entre deux images vers l'interface pour une cadence donnée
 /// (réglage frame_rate, section 10.7) : 16,7 ms à 60 i/s, 33 ms à 30, 66 ms à 15.
 pub fn frame_interval(fps: u64) -> Duration {
@@ -116,7 +130,8 @@ const DEBUG_LISTEN_RETRY: Duration = Duration::from_millis(50);
 const DEBUG_LISTEN_TRIES: u32 = 40;
 
 pub enum SimMsg {
-    Frame(Header, Vec<u8>),
+    /// Trames du firmware lues d'un même réveil du lecteur, dans l'ordre.
+    Frames(Vec<(Header, Vec<u8>)>),
     Disconnected,
     Exited(Option<i32>),
     /// Action de l'utilisateur sur un contrôle d'une vue.
@@ -125,8 +140,8 @@ pub enum SimMsg {
         control: String,
         value_json: String,
     },
-    /// Événement du fil « modèles ».
-    Model(ModelEvent),
+    /// Lot d'événements du fil « modèles », dans l'ordre.
+    Models(Vec<ModelEvent>),
     FlushUi,
     Reset,
     /// Interrupteur d'alimentation : false coupe, true rétablit (section 10.4).
@@ -163,6 +178,8 @@ pub enum SimMsg {
     /// envoyée (la simulation continue) ; au retour, une image emporte tout ce
     /// qui a changé entre-temps.
     UiVisible(bool),
+    /// Panneau environnement modifié : transmis à tous les modèles.
+    Environment(super::environment::Environment),
     /// Moniteur série : octets vers l'UART `id` du firmware.
     UartSend {
         id: u8,
@@ -210,6 +227,8 @@ pub struct SimConfig {
     pub frame_interval: Duration,
     /// Fenêtre visible : sinon, aucune image n'est envoyée (voir UiVisible).
     pub ui_visible: bool,
+    /// Panneau environnement (section 8.5), envoyé aux modèles au démarrage.
+    pub environment: super::environment::Environment,
 }
 
 /// Session de débogage (section 10.2).
@@ -412,6 +431,8 @@ struct Actor<R: Runtime> {
     ui_flush_scheduled: bool,
     out_seq: u32,
     echo: Option<String>,
+    /// Composants à interface I2C (manifeste), routés par adresse et câblage.
+    i2c_devices: Vec<I2cDevice>,
     unknown_warned: HashSet<u16>,
     unknown_pins: HashSet<(u8, u8)>,
     guards: Guards,
@@ -420,6 +441,52 @@ struct Actor<R: Runtime> {
     /// Débogage : numéro du dernier HEARTBEAT, firmware figé.
     beat_seq: u64,
     at_breakpoint: bool,
+}
+
+/// Interface I2C d'un composant (manifeste, interfaces[type = i2c]).
+struct I2cDevice {
+    id: String,
+    sda: String,
+    scl: String,
+    address: I2cAddress,
+}
+
+enum I2cAddress {
+    Fixed(u8),
+    /// Tirée d'un paramètre de l'instance ({ "param": "address" }).
+    Param(String),
+}
+
+impl I2cDevice {
+    fn from_specs(specs: &[InstanceSpec]) -> Vec<Self> {
+        let mut out = Vec::new();
+        for spec in specs {
+            let Some(ifaces) = spec.source.manifest["interfaces"].as_array() else {
+                continue;
+            };
+            for iface in ifaces.iter().filter(|i| i["type"] == "i2c") {
+                let address = match &iface["address"] {
+                    serde_json::Value::Number(n) => {
+                        match n.as_u64().and_then(|a| u8::try_from(a).ok()) {
+                            Some(a) => I2cAddress::Fixed(a),
+                            None => continue,
+                        }
+                    }
+                    other => match other["param"].as_str() {
+                        Some(p) => I2cAddress::Param(p.to_string()),
+                        None => continue,
+                    },
+                };
+                out.push(I2cDevice {
+                    id: spec.id.clone(),
+                    sda: iface["sda"].as_str().unwrap_or_default().to_string(),
+                    scl: iface["scl"].as_str().unwrap_or_default().to_string(),
+                    address,
+                });
+            }
+        }
+        out
+    }
 }
 
 /// État des garde-fous du firmware en cours.
@@ -451,6 +518,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         .iter()
         .find(|c| c.source.id == "echo")
         .map(|c| c.id.clone());
+    let i2c_devices = I2cDevice::from_specs(&cfg.components);
     let params = cfg
         .components
         .iter()
@@ -492,6 +560,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         ui_flush_scheduled: false,
         out_seq: 0,
         echo,
+        i2c_devices,
         unknown_warned: HashSet::new(),
         unknown_pins: HashSet::new(),
         guards: Guards::default(),
@@ -513,13 +582,15 @@ impl<R: Runtime> Actor<R> {
         let tx = self.tx_self.clone();
         match engine::spawn(
             specs,
-            Box::new(move |e| {
-                let _ = tx.blocking_send(SimMsg::Model(e));
+            Box::new(move |events| {
+                let _ = tx.blocking_send(SimMsg::Models(events));
             }),
         ) {
             Ok(models) => self.models = Some(models),
             Err(e) => self.warn(0, format!("fil des modèles impossible à démarrer : {e}")),
         }
+        let env = self.cfg.environment;
+        self.send_environment(env);
         self.build_network();
         if let Err(e) = self.launch().await {
             self.status("error", e.to_string());
@@ -527,7 +598,11 @@ impl<R: Runtime> Actor<R> {
         }
         while let Some(m) = rx.recv().await {
             match m {
-                SimMsg::Frame(h, payload) => self.on_frame(h, &payload).await,
+                SimMsg::Frames(frames) => {
+                    for (h, payload) in frames {
+                        self.on_frame(h, &payload).await;
+                    }
+                }
                 SimMsg::Disconnected => {
                     if self.cfg.debug.is_some() {
                         self.on_debug_session_end().await;
@@ -543,6 +618,7 @@ impl<R: Runtime> Actor<R> {
                 SimMsg::BeatTimeout(seq) => self.on_beat_timeout(seq),
                 SimMsg::SetWiring(wires) => self.rewire(wires).await,
                 SimMsg::SetParams(all) => self.set_params(all),
+                SimMsg::Environment(env) => self.send_environment(env),
                 SimMsg::UiVisible(visible) => {
                     self.cfg.ui_visible = visible;
                     if visible {
@@ -595,7 +671,11 @@ impl<R: Runtime> Actor<R> {
                     control,
                     value_json,
                 }),
-                SimMsg::Model(event) => self.on_model(event).await,
+                SimMsg::Models(events) => {
+                    for event in events {
+                        self.on_model(event).await;
+                    }
+                }
                 SimMsg::FlushUi => self.flush_ui(),
                 SimMsg::Reset => {
                     self.resume().await;
@@ -913,10 +993,12 @@ impl<R: Runtime> Actor<R> {
                 self.propagate(changed).await;
             }
             ModelEvent::Pong { seq, handler_us } => self.pong(seq, 0, handler_us).await,
+            ModelEvent::I2cReply { seq, status, rx } => self.i2c_reply(seq, status, &rx).await,
             ModelEvent::Dirty => {
                 self.states_dirty = true;
                 self.schedule_ui();
             }
+            ModelEvent::Displays(message) => self.send_displays(message),
             ModelEvent::States(states) => {
                 let map: serde_json::Map<String, serde_json::Value> = states
                     .into_iter()
@@ -1283,6 +1365,29 @@ impl<R: Runtime> Actor<R> {
         }
     }
 
+    /// Panneau environnement : gardé (rechargement à chaud) et transmis aux modèles.
+    fn send_environment(&mut self, env: super::environment::Environment) {
+        self.cfg.environment = env;
+        match serde_json::to_string(&env) {
+            Ok(json) => self.send_model(ModelCmd::Environment(json)),
+            Err(e) => self.warn(0, format!("environnement non transmis : {e}")),
+        }
+    }
+
+    /// Zones modifiées des écrans vers l'interface, en binaire.
+    fn send_displays(&mut self, message: Vec<u8>) {
+        // Tests : le message tel qu'il partirait (pas de WebView, donc pas de canal).
+        #[cfg(test)]
+        let _ = self.app.emit("sim:test-displays", &message);
+        let Some(sink) = self.app.try_state::<DisplaySink>() else {
+            return;
+        };
+        let channel = sink.0.lock().ok().and_then(|c| c.clone());
+        if let Some(channel) = channel {
+            let _ = channel.send(tauri::ipc::InvokeResponseBody::Raw(message));
+        }
+    }
+
     /// Configuration de toutes les broches réglées par le firmware (instantané).
     fn pin_configs(&self) -> BTreeMap<String, PinConfigEvent> {
         let analog = FwPin {
@@ -1373,6 +1478,58 @@ impl<R: Runtime> Actor<R> {
         let frame = protocol::frame(msg_type, self.cfg.board_id, flags, seq, payload);
         // Contre-pression : si le firmware ne lit plus, l'acteur attend (aucune perte).
         let _ = link.writer.send(frame).await;
+    }
+
+    async fn i2c_reply(&mut self, seq: u32, status: u8, rx: &[u8]) {
+        let mut w = Writer::default();
+        w.u8(status).u8(0).u16(rx.len() as u16).bytes(rx);
+        self.send(msg::I2C_REPLY, FLAG_REPLY, seq, &w.buf).await;
+    }
+
+    /// Adresse courante d'un composant I2C (paramètre éventuellement modifié).
+    fn i2c_address(&self, dev: &I2cDevice) -> Option<u8> {
+        match &dev.address {
+            I2cAddress::Fixed(a) => Some(*a),
+            I2cAddress::Param(name) => self
+                .params
+                .get(&dev.id)?
+                .get(name)?
+                .as_u64()
+                .and_then(|a| u8::try_from(a).ok()),
+        }
+    }
+
+    /// true si la broche `pin` du composant est sur le même net qu'une broche
+    /// de la carte portant la capacité `cap` (ex. « i2c1:SDA »).
+    fn wired_to_cap(&self, id: &str, pin: &str, cap: &str) -> bool {
+        let node = Node::Component {
+            id: id.to_string(),
+            pin: pin.to_string(),
+        };
+        self.net.members(&node).iter().any(|m| match m {
+            Node::Board(name) => self
+                .cfg
+                .board
+                .pins
+                .get(name)
+                .is_some_and(|def| def.caps.iter().any(|c| c == cap)),
+            Node::Component { .. } => false,
+        })
+    }
+
+    /// Composant qui répond à `addr` sur le bus I2C `bus` : SDA et SCL câblés
+    /// sur des broches de ce bus. Plusieurs à la même adresse : le premier
+    /// répond (l'onglet ⚠ signale l'adresse en double).
+    fn i2c_target(&self, bus: u8, addr: u8) -> Option<String> {
+        let (sda, scl) = (format!("i2c{bus}:SDA"), format!("i2c{bus}:SCL"));
+        self.i2c_devices
+            .iter()
+            .find(|d| {
+                self.i2c_address(d) == Some(addr)
+                    && self.wired_to_cap(&d.id, &d.sda, &sda)
+                    && self.wired_to_cap(&d.id, &d.scl, &scl)
+            })
+            .map(|d| d.id.clone())
     }
 
     async fn pong(&mut self, seq: u32, status: u8, handler_us: u32) {
@@ -1531,6 +1688,24 @@ impl<R: Runtime> Actor<R> {
                 );
             }
             msg::HEARTBEAT => self.on_heartbeat(),
+            msg::I2C_CONFIG => {} // fréquence du bus : sans effet sur la simulation
+            msg::I2C_XFER => {
+                let (bus, addr) = (r.u8(), r.u8());
+                let (tx_len, rx_len) = (r.u16() as usize, r.u16() as usize);
+                let _ = r.u16();
+                let tx = r.bytes(tx_len.min(4096));
+                match self.i2c_target(bus, addr) {
+                    // Chemin synchrone, comme PING : envoyé sans regroupement.
+                    Some(id) => self.send_model(ModelCmd::I2c {
+                        id,
+                        seq: h.seq,
+                        address: addr,
+                        tx,
+                        rx_len: rx_len.min(4096),
+                    }),
+                    None => self.i2c_reply(h.seq, 1, &[]).await,
+                }
+            }
             msg::PING => {
                 let target = r.u8();
                 match (target, &self.echo) {
@@ -1753,25 +1928,45 @@ impl<R: Runtime> Actor<R> {
             }
         });
 
-        // Lecture : trames du firmware vers l'acteur.
+        // Lecture : trames du firmware vers l'acteur. Lecture tamponnée (un
+        // lot du firmware arrive en un seul appel système), et toutes les
+        // trames déjà reçues partent à l'acteur en un seul message, dans
+        // l'ordre : un réveil par lot plutôt qu'un par trame. Une trame SYNC
+        // termine le message, pour que sa réponse ne dépende pas des suivantes.
         let tx = self.tx_self.clone();
         let board_id = self.cfg.board_id;
         let reader = tauri::async_runtime::spawn(async move {
+            let mut reader = BufReader::with_capacity(READ_BUFFER, &*recv);
             let mut raw = [0u8; HEADER_SIZE];
-            let mut reader = &*recv;
-            loop {
-                if reader.read_exact(&mut raw).await.is_err() {
-                    break;
+            'read: loop {
+                let mut frames = Vec::new();
+                loop {
+                    if reader.read_exact(&mut raw).await.is_err() {
+                        if !frames.is_empty() {
+                            let _ = tx.send(SimMsg::Frames(frames)).await;
+                        }
+                        break 'read;
+                    }
+                    let header = match Header::decode(&raw) {
+                        Ok(h) if h.board_id == board_id => h,
+                        // Erreur de protocole : fermeture, le firmware s'arrête (code 70).
+                        _ => break 'read,
+                    };
+                    let mut payload = vec![0u8; header.length as usize];
+                    if reader.read_exact(&mut payload).await.is_err() {
+                        break 'read;
+                    }
+                    let sync = header.flags & protocol::FLAG_SYNC != 0;
+                    frames.push((header, payload));
+                    // Plus de trame complète en tampon, ou requête synchrone : envoi.
+                    if sync
+                        || reader.buffer().len() < HEADER_SIZE
+                        || frames.len() >= MAX_FRAMES_PER_MSG
+                    {
+                        break;
+                    }
                 }
-                let header = match Header::decode(&raw) {
-                    Ok(h) if h.board_id == board_id => h,
-                    _ => break, // erreur de protocole : fermeture, le firmware s'arrête (code 70)
-                };
-                let mut payload = vec![0u8; header.length as usize];
-                if reader.read_exact(&mut payload).await.is_err() {
-                    break;
-                }
-                if tx.send(SimMsg::Frame(header, payload)).await.is_err() {
+                if tx.send(SimMsg::Frames(frames)).await.is_err() {
                     return;
                 }
             }

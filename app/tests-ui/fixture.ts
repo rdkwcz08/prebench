@@ -128,6 +128,23 @@ export function responses(): Record<string, Json> {
     list_templates: [{ id: 'blinky-stm32-hal', suggested_dir: PROJECT_PATH }],
     start_simulation: null,
     set_ui_visible: null,
+    display_channel: null,
+    get_environment: {
+      temperatureC: 22,
+      humidityPercent: 50,
+      illuminanceLux: 300,
+      tiltDeg: { roll: 0, pitch: 0 },
+      accelerationG: { x: 0, y: 0, z: 1 },
+      distanceM: 1,
+    },
+    set_environment: {
+      temperatureC: 22,
+      humidityPercent: 50,
+      illuminanceLux: 300,
+      tiltDeg: { roll: 0, pitch: 0 },
+      accelerationG: { x: 0, y: 0.5, z: 0.866025 },
+      distanceM: 1,
+    },
     stop_simulation: null,
     reset_simulation: null,
     set_power: null,
@@ -159,6 +176,8 @@ export function installTauriMock(json: string): void {
   const listeners = new Map<string, number[]>();
   const calls: { cmd: string; args: unknown }[] = [];
   let nextId = 1;
+  // Canal des écrans (display_channel) : identifiant du rappel et index des messages.
+  let screens = { id: 0, index: 0 };
   const w = window as unknown as Record<string, unknown>;
   w.__pbCalls = calls;
   w.__TAURI_INTERNALS__ = {
@@ -184,6 +203,7 @@ export function installTauriMock(json: string): void {
         return Promise.resolve(a.handler);
       }
       if (cmd === 'plugin:event|unlisten') return Promise.resolve(null);
+      if (cmd === 'display_channel') screens = { id: (args as { channel: { id: number } }).channel.id, index: 0 };
       // Réglages de l'app : conservés d'un chargement de page à l'autre, comme settings.toml.
       if (cmd === 'get_settings' || cmd === 'set_setting') {
         const stored = JSON.parse(sessionStorage.getItem('__pbSettings') ?? '{}') as Record<string, unknown>;
@@ -200,6 +220,10 @@ export function installTauriMock(json: string): void {
     },
   };
   w.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(): void {} };
+  // Message binaire « displays » du cœur, comme Channel::send (InvokeResponseBody::Raw).
+  w.__pbDisplay = (bytes: number[]): void => {
+    callbacks.get(screens.id)?.({ index: screens.index++, message: new Uint8Array(bytes).buffer });
+  };
   w.__pbSetResponse = (cmd: string, json: string): void => {
     data[cmd] = JSON.parse(json);
   };
@@ -219,10 +243,14 @@ export function installTauriMock(json: string): void {
       case 'sim:uart':
         return send('sim:frame', { uart: [payload] });
       case 'sim:pins': {
+        // Comme le cœur : seules les broches dont la configuration a changé.
         const full = payload as Record<string, unknown>;
-        const delta: Record<string, unknown> = { ...full };
+        const delta: Record<string, unknown> = {};
+        for (const [name, cfg] of Object.entries(full))
+          if (JSON.stringify(sentPins[name]) !== JSON.stringify(cfg)) delta[name] = cfg;
         for (const name of Object.keys(sentPins)) if (!(name in full)) delta[name] = null;
         sentPins = full;
+        if (Object.keys(delta).length === 0) return;
         return send('sim:frame', { pins: delta });
       }
       default:
@@ -246,6 +274,8 @@ export interface Bench {
   calls(cmd: string): Promise<unknown[]>;
   /** Change la réponse d'une commande du cœur imité. */
   respond(cmd: string, value: unknown): Promise<void>;
+  /** Envoie un message binaire « displays » (canal des écrans). */
+  display(bytes: number[]): Promise<void>;
   /** Figure d'un composant de la paillasse, par identifiant d'instance. */
   figure(id: string): ReturnType<Page['locator']>;
 }
@@ -299,6 +329,8 @@ export const test = base.extend<{ bench: Bench; errors: string[] }>({
             (window as unknown as { __pbSetResponse: (c: string, j: string) => void }).__pbSetResponse(c, json),
           [cmd, JSON.stringify(value)] as [string, string],
         ),
+      display: (bytes) =>
+        page.evaluate((b) => (window as unknown as { __pbDisplay: (b: number[]) => void }).__pbDisplay(b), bytes),
       figure: (id) => page.locator('figure.component').filter({ has: page.getByText(id, { exact: true }) }),
     });
   },

@@ -5,8 +5,8 @@
  * STM32CubeMX génère pour TIM1 (PWM complémentaire), TIM2 (PWM), ADC1, I2C1,
  * SPI1 et USART2 avec réception DMA. Le test vérifie qu'elles compilent, que
  * les MspInit du projet sont appelés, qu'aucun Init n'échoue, et que les
- * modules non simulés (DMA, I2C, SPI) se comportent comme décrit dans
- * stm32_hal_periph.c. PWM et ADC en détail : test_pwm_adc.c.
+ * modules non simulés (DMA, SPI) se comportent comme décrit dans
+ * stm32_hal_periph.c ; l'I2C est simulé (test_i2c.c). PWM et ADC en détail : test_pwm_adc.c.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -339,7 +339,7 @@ int main(void)
     CHECK(HAL_ADC_GetValue(&hadc1) == 0U);
     CHECK(fake_app_wait(fa, VMCU_MSG_ADC_CONFIG, 1, 0, 1, 1000, &f));
 
-    /* I2C : bus sans composant */
+    /* I2C (simulé, test_i2c.c) : la fausse app n'a pas d'esclave, NACK adresse */
     uint8_t buf[4] = { 1, 2, 3, 4 };
     CHECK(HAL_I2C_Mem_Read(&hi2c1, 0x68 << 1, 0x75, I2C_MEMADD_SIZE_8BIT, buf, 1, 100) == HAL_ERROR);
     CHECK(HAL_I2C_GetError(&hi2c1) == HAL_I2C_ERROR_AF);
@@ -361,8 +361,8 @@ int main(void)
     CHECK(HAL_UART_DMAStop(&huart2) == HAL_OK);
     CHECK(HAL_UART_GetState(&huart2) == HAL_UART_STATE_READY);
 
-    /* Chaque fonction non simulée a averti (DMA, I2C, SPI) */
-    CHECK(fake_app_wait(fa, VMCU_MSG_WARN, -1, -1, 5, 1000, &f));
+    /* Chaque fonction non simulée a averti (DMA, SPI) ; l'I2C est simulé (test_i2c.c) */
+    CHECK(fake_app_wait(fa, VMCU_MSG_WARN, -1, -1, 3, 1000, &f));
 
     vmcu_shutdown();
     fake_app_stop(fa);

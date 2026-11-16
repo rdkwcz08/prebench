@@ -16,6 +16,7 @@
 #include <errno.h>
 #if defined(__APPLE__)
 #include <pthread/qos.h>
+#include <sys/event.h>
 #endif
 #include <pthread.h>
 #include <stdio.h>
@@ -200,8 +201,79 @@ uint64_t vmcu_plat_monotonic_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+#if defined(__APPLE__)
+/*
+ * macOS : le firmware tourne en QoS « utility » (cœurs économes, section 11.2),
+ * et le système regroupe alors les minuteries de ses fils : un nanosleep de
+ * 10 ms y dure environ 34 ms. Une minuterie kqueue marquée NOTE_CRITICAL
+ * échappe à ce regroupement : HAL_Delay garde sa durée sans quitter les cœurs
+ * économes. Un kqueue par fil (les événements d'un kqueue partagé pourraient
+ * réveiller un autre fil), fermé à la fin du fil.
+ */
+static pthread_key_t sleep_key;
+static pthread_once_t sleep_once = PTHREAD_ONCE_INIT;
+
+static void sleep_kq_close(void *value)
+{
+    (void)close((int)(intptr_t)value - 1);
+}
+
+static void sleep_key_init(void)
+{
+    (void)pthread_key_create(&sleep_key, sleep_kq_close);
+}
+
+/* kqueue du fil appelant (créé au premier sommeil), ou -1. */
+static int sleep_kq(void)
+{
+    (void)pthread_once(&sleep_once, sleep_key_init);
+    intptr_t stored = (intptr_t)pthread_getspecific(sleep_key);
+    if (stored != 0) {
+        return (int)stored - 1; /* stocké + 1 : 0 signifie « aucun » */
+    }
+    int kq = kqueue();
+    if (kq >= 0 && pthread_setspecific(sleep_key, (void *)(intptr_t)(kq + 1)) != 0) {
+        (void)close(kq);
+        kq = -1;
+    }
+    return kq;
+}
+
+/* true si le sommeil a eu lieu par kqueue (sinon : nanosleep). */
+static bool sleep_critical(uint64_t ns)
+{
+    int kq = sleep_kq();
+    if (kq < 0) {
+        return false;
+    }
+    uint64_t deadline = vmcu_plat_monotonic_ns() + ns;
+    for (;;) {
+        uint64_t now = vmcu_plat_monotonic_ns();
+        if (now >= deadline) {
+            return true;
+        }
+        struct kevent ev;
+        EV_SET(&ev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS | NOTE_CRITICAL,
+               (intptr_t)(deadline - now), NULL);
+        struct kevent out;
+        int n = kevent(kq, &ev, 1, &out, 1, NULL);
+        if (n < 0 && errno != EINTR) {
+            return false;
+        }
+        if (n > 0 && out.filter == EVFILT_TIMER) {
+            return true;
+        }
+    }
+}
+#endif
+
 void vmcu_plat_sleep_ns(uint64_t ns)
 {
+#if defined(__APPLE__)
+    if (sleep_critical(ns)) {
+        return;
+    }
+#endif
     struct timespec req = {
         .tv_sec = (time_t)(ns / 1000000000ull),
         .tv_nsec = (long)(ns % 1000000000ull),

@@ -1,0 +1,34 @@
+#:schema ../../docs/prebench.schema.json
+# MPU6050 (module GY-521) en I2C1 (D15 = PB8 SCL, D14 = PB9 SDA), adresse 0x68.
+# Le firmware réveille la puce et envoie toutes les 50 ms l'accélération (mg),
+# la rotation (°/s) et la température au traceur. Inclinaison et température :
+# onglet Environnement.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id = "imu1"
+type = "mpu6050"
+pos = [408, 96]
+params = { address = 104 }
+
+[[wires]]
+from = "imu1.VCC"
+to = "board.CN6:4"
+
+[[wires]]
+from = "imu1.GND"
+to = "board.CN6:6"
+
+[[wires]]
+from = "imu1.SCL"
+to = "board.CN5:10"
+
+[[wires]]
+from = "imu1.SDA"
+to = "board.CN5:9"

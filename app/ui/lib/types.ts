@@ -30,8 +30,8 @@ export interface Manifest {
   controls?: { id: string; type: string; label: string; min?: number; max?: number; step?: number; default?: unknown }[];
 }
 
-/** Paramètre déclaré dans un manifeste (manifest.schema.json, $defs.param). */
-export interface ParamDef {
+/** Colonne d'un paramètre « table », ou paramètre scalaire (manifest.schema.json, $defs.scalarParam). */
+export interface ScalarParamDef {
   type: 'integer' | 'number' | 'string' | 'boolean' | 'enum';
   label?: string;
   values?: (string | number)[];
@@ -40,6 +40,20 @@ export interface ParamDef {
   max?: number;
   step?: number;
   unit?: string;
+  /** « hex » : entier affiché et saisi en hexadécimal (0x3C). */
+  display?: 'decimal' | 'hex';
+}
+
+/** Ligne d'un paramètre « table » : une valeur par colonne. */
+export type TableRow = Record<string, string | number | boolean>;
+
+/** Paramètre déclaré dans un manifeste (manifest.schema.json, $defs.param). */
+export interface ParamDef extends Omit<ScalarParamDef, 'type'> {
+  type: ScalarParamDef['type'] | 'table';
+  /** Colonnes d'un paramètre « table ». */
+  columns?: Record<string, ScalarParamDef>;
+  /** Lignes au plus d'un paramètre « table ». */
+  max_rows?: number;
 }
 
 /** Fil de prebench.toml ; extrémité « board.CN5:6 » ou « led1.A ». */

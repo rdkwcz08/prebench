@@ -115,7 +115,7 @@ Le firmware ne voit que son framework habituel ; tout ce qui sort de libvmcu pas
 | Coquille de l'app | Tauri 2 (WKWebView sur macOS, WebView2 sur Windows) | Fenêtre native, IPC, capabilities de sécurité |
 | Cœur | Rust | Gestion des processus firmware, routage des messages, réseau logique, surveillance des ressources, build, projet |
 | Interface | Svelte + SVG (paillasse) + Canvas (écrans) | Canevas, panneaux, inspecteur |
-| Modèles de composants | TypeScript compilé par `oxc` et exécuté par QuickJS (`rquickjs`) dans le cœur Rust : un fil « modèles » par carte, un runtime par instance (16 Mo, pile 256 Ko, 5 ms de temps CPU par appel, 50 ms au chargement) | Comportement des composants, isolé |
+| Modèles de composants | TypeScript compilé par `oxc` et exécuté par QuickJS (`rquickjs`) dans le cœur Rust : un fil « modèles » par carte, un runtime par instance (16 Mo, pile 256 Ko, 50 ms au chargement ; par appel, budget de 5 ms de temps CPU et plafond dur de 50 ms, section 8.1) | Comportement des composants, isolé |
 | Visuels de composants | wokwi-elements (web components) si la licence le permet, sinon SVG maison | LED, boutons, écrans, potentiomètres |
 | Vues de composants | `view.svelte` compilé à l'exécution dans la WebView par le compilateur Svelte embarqué ; vue de repli si la compilation échoue | Rendu des composants fournis et du projet |
 | Côté firmware | libvmcu (C) + shims (STM32 HAL, ESP-IDF, Arduino) | Remplace le HAL, parle à l'app |
@@ -197,6 +197,7 @@ uint32_t HAL_GetTick(void)      { return vmcu_millis(); }
 | UART | `vmcu_uart_config(id, baud)`, `vmcu_uart_write(id, buf, len)`, `vmcu_uart_read(id, buf, max, timeout_ms)`, `vmcu_uart_on_rx(id, cb, user)` |
 | I2C | `vmcu_i2c_config(bus, freq_hz)`, `vmcu_i2c_xfer(bus, addr, tx, txlen, rx, rxlen, timeout_ms)` → ACK/NACK |
 | SPI | `vmcu_spi_config(bus, mode, freq_hz, lsb_first)`, `vmcu_spi_xfer(bus, cs_port, cs_pin, tx, rx, len, timeout_ms)` |
+| LED adressables | `vmcu_led_strip_show(port, pin, data, len)`, `vmcu_led_strip_show_pwm(unit, channel, data, len)` : trame entière d'un ruban WS2812 (API 1.2, protocole 1.2, section 5.4) |
 | Flux | `vmcu_stream_open(kind, params, &stream)` (audio, framebuffer, caméra) → tampon en mémoire partagée |
 | Diagnostic | `vmcu_warn_unsimulated("HAL_xxx")`, `vmcu_log()`, `vmcu_ping(target, &rtt_us)` : aller-retour synchrone firmware ↔ cœur (`VMCU_PING_CORE`) ou firmware ↔ cœur ↔ modèle d'un composant d'écho (`VMCU_PING_WORKER`), section 8.1 |
 
@@ -214,6 +215,8 @@ L'API v1 est figée en phase 0 dans `libvmcu/include/vmcu.h`, qui fait foi ; ce 
 
 Les protocoles qui dépendent du timing (WS2812, DHT11/22, HC-SR04, 1-Wire, IR) ne peuvent pas être simulés au niveau du signal. Ils sont simulés **au niveau de la bibliothèque** : `Adafruit_NeoPixel`, FastLED, `led_strip` / RMT, bibliothèques DHT, etc. Le dépôt prévoit `libvmcu/shims/libs/` pour ces remplacements dès la V1.
 
+WS2812 sous STM32 HAL (phase 3) : pas de bibliothèque standard, le ruban est piloté par `HAL_TIM_PWM_Start_DMA`. Le shim TIM décode le tampon DMA (impulsion longue = 1, courte = 0) en octets GRB et envoie la trame entière par `vmcu_led_strip_show_pwm` (message `LED_STRIP`, protocole 1.2) : le firmware tourne tel quel sur la vraie carte. Les shims NeoPixel et `led_strip` (phase 4) passent par la même API.
+
 ### 5.5 Garde-fous intégrés à libvmcu
 
 - Les délais (`HAL_Delay`, `delay`, `vTaskDelay`) sont de vrais sommeils.
@@ -221,7 +224,8 @@ Les protocoles qui dépendent du timing (WS2812, DHT11/22, HC-SR04, 1-Wire, IR) 
 - Limiteur pour les `while(1)` sans délai : micro-pause tous les N appels à libvmcu.
 - La tâche idle de FreeRTOS dort.
 - libvmcu quitte immédiatement si le socket vers l'app se ferme (aucun processus orphelin).
-- Sous Windows, délais par timers haute résolution (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), sinon `Sleep(1)`dure environ 15 ms.
+- Sous Windows, délais par timers haute résolution (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), sinon `Sleep(1)`dure environ 15 ms ; EcoQoS est appliqué sans ignorer les demandes de résolution des minuteries (`PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION` désactivé).
+- Sous macOS, le firmware tourne en QoS « utility » (cœurs économes), où le système regroupe les minuteries : un `nanosleep` de 10 ms y dure environ 34 ms. Les délais passent donc par une minuterie kqueue marquée `NOTE_CRITICAL`, qui échappe à ce regroupement sans quitter les cœurs économes. Test `delay_accuracy_at_low_priority` (`tests/delay-accuracy`) : 100 `HAL_Delay(10)` en environ 1 s, firmware lancé comme dans l'app (Mac : 1 002 ms, contre 3 466 à 3 604 ms avant correction).
 
 ## 6. Protocole firmware ↔ app
 
@@ -236,7 +240,7 @@ Deux canaux : un socket local pour les messages courts, binaires et groupés, et
 
 | Sens | Types de messages |
 | --- | --- |
-| Firmware → app | `hello` (carte, framework, version), `gpio_config`, `gpio_write`, `pwm_config`, `pwm_duty`, `uart_tx`, `i2c_xfer`(requête), `spi_xfer` (requête), `stream_open`, `warn`, `log` |
+| Firmware → app | `hello` (carte, framework, version), `gpio_config`, `gpio_write`, `pwm_config`, `pwm_duty`, `uart_tx`, `i2c_xfer`(requête), `spi_xfer` (requête), `led_strip`, `stream_open`, `warn`, `log` |
 | App → firmware | `gpio_input` (changement d'état d'une entrée), `adc_value`, `uart_rx`, `i2c_reply` (données + ACK/NACK), `spi_reply`, `reset`, `pause`, `resume`, `shutdown` |
 
 Les transactions I2C et SPI sont **synchrones** : le firmware attend la réponse du composant modélisé, comme sur un vrai bus.
@@ -341,9 +345,12 @@ components/ssd1306/
 ```
 
 - **manifest.json** : identifiant, nom, catégorie, broches et leur rôle, interface(s) et paramètres (adresse I2C, résolution, nombre de LED…), contrôles exposés à l'utilisateur (curseurs, boutons), version de l'API composant.
-- **model.ts** : implémente l'interface TypeScript v1 (`components/component-api.d.ts`) : `onPinChange`, `onI2C(addr, tx) → rx`, `onSPI(tx) → rx`, `onUART(bytes)`, `onTick(dt)`, `onControl`, `onPing`, `getState()`. Compilé par le cœur (`oxc`, types retirés fichier par fichier) et exécuté dans QuickJS, un runtime par instance, sur le fil « modèles » de la carte : sans accès au disque, au réseau ni au système. Limites : 16 Mo de mémoire, 256 Ko de pile, 50 ms pour charger et initialiser le module, 5 ms par appel (bus, `onPinChange`, `onControl`, `onTick`) ; au-delà, le composant passe en défaut avec un avertissement ⚠, les autres continuent. Ces durées sont du temps CPU consommé par le fil « modèles », pas du temps écoulé : une machine chargée qui fait attendre ce fil n'arrête pas un composant à tort (même principe que le garde-fou CPU du firmware, section 11.2). Mesure : `CLOCK_THREAD_CPUTIME_ID` sous macOS et Linux ; sous Windows, cycles du fil (`QueryThreadCycleTime`) convertis en temps, car `GetThreadTimes` n'avance que par pas d'environ 15,6 ms.
+- **model.ts** : implémente l'interface TypeScript v1 (`components/component-api.d.ts`) : `onPinChange`, `onI2C(addr, tx) → rx`, `onSPI(tx) → rx`, `onUART(bytes)`, `onTick(dt)`, `onControl`, `onPing`, `getState()`. Compilé par le cœur (`oxc`, types retirés fichier par fichier) et exécuté dans QuickJS, un runtime par instance, sur le fil « modèles » de la carte : sans accès au disque, au réseau ni au système. Limites : 16 Mo de mémoire, 256 Ko de pile, 50 ms pour charger et initialiser le module ; par appel (bus, `onPinChange`, `onControl`, `onTick`, `getState`), un budget de 5 ms et un plafond dur de 50 ms. Un dépassement isolé du budget (ramasse-miettes, pic de charge) est seulement écrit au Journal ; trois dépassements consécutifs, ou un appel interrompu au plafond dur (boucle infinie, arrêt immédiat), mettent le composant en défaut avec un avertissement ⚠, les autres continuent (règle du 15 novembre 2026). Ces durées sont du temps CPU consommé par le fil « modèles », pas du temps écoulé : une machine chargée qui fait attendre ce fil n'arrête pas un composant à tort (même principe que le garde-fou CPU du firmware, section 11.2). Mesure : `CLOCK_THREAD_CPUTIME_ID` sous macOS et Linux ; sous Windows, cycles du fil (`QueryThreadCycleTime`) convertis en temps, car `GetThreadTimes` n'avance que par pas d'environ 15,6 ms.
 - **view.svelte** : dessine l'état, compilé à l'exécution dans la WebView ; reçoit l'état une fois par image (« sim:states »), seulement si `invalidate()` a été appelé, et renvoie les actions de l'utilisateur au modèle (`component_control`). Vue de repli (nom, broches, état brut, contrôles) si la vue manque ou ne compile pas.
 - Rechargement à chaud des composants pendant le développement.
+- **Écrans** (phase 3) : l'image vit dans le cœur, hors de QuickJS. Le modèle la crée (`ctx.createDisplay` : largeur, hauteur, format `mono1-vertical`, `mono1` ou `rgb565`), décode les commandes de l'écran et copie les pixels par `blit`, appel natif sans boucle JavaScript sur l'image. La vue attache un canvas (`display.attach`) où l'hôte dessine lui-même la zone modifiée (section 11.3).
+- **Rubans de LED adressables** (phase 3) : interface `led-strip` du manifeste, trame entière remise à `onLedStrip`.
+- **Paramètre « table »** (phase 3) : lignes dont les colonnes sont déclarées dans le manifeste (`columns`, `max_rows`), enregistrées dans `prebench.toml` comme tableau de tables ; utilisé par la table de registres du joker I2C.
 
 **Latence mesurée en phase 1.** Les transactions I2C et SPI sont synchrones (section 6.1) : le firmware attend la réponse du modèle. Avec les modèles dans des Web Workers (firmware → cœur → WebView → Worker → firmware), la mesure dans l'app (Mac, debug) donnait une médiane de 326 µs, un 99e centile de 1,2 ms et des pics à 9 ms, dus à la WebView. Les modèles s'exécutent donc dans le cœur Rust (D5) : le chemin devient firmware → cœur → fil « modèles » → firmware, et la simulation ne dépend plus de l'état de la fenêtre (section 11.3).
 
@@ -386,7 +393,7 @@ Le 99e centile passe sous 0,3 ms ; le maximum reste au-dessus de 1 ms, probablem
 
 Configurables depuis l'interface, sans écrire de code :
 
-1. **Périphérique I2C générique** : adresse au choix + table de registres éditable (valeurs fixes, curseurs, scripts).
+1. **Périphérique I2C générique** : adresse au choix + table de registres éditable (valeurs fixes et curseurs en phase 3 ; scripts en phase 5).
 2. **Périphérique SPI générique** : même principe, avec trace des trames.
 3. **Périphérique UART générique** : écho, réponses scriptées (`AT` → `OK`), fichier de rejeu.
 4. **Source analogique** : constante, curseur, sinus, bruit, fichier CSV.
@@ -410,6 +417,10 @@ Ces dix composants valident l'architecture, car ils couvrent toutes les familles
 ### 8.5 Environnement
 
 Un panneau « environnement » permet de régler les grandeurs physiques lues par les capteurs : température, humidité, luminosité, inclinaison et accélération de l'IMU, distance.
+
+Les valeurs sont gardées pendant la session et au rechargement à chaud du firmware (section 10.2), pas dans `prebench.toml`. Sauvegarde par projet (utile aux scénarios de test, section 10.5) : Plus tard.
+
+Onglet « Environnement » du panneau du bas (phase 3, étape 4), une ligne par grandeur, bornée par le cœur (`core/environment.rs`) : température de −40 à 85 °C (défaut 22), humidité de 0 à 100 % (50), luminosité de 0 à 100 000 lx sur une échelle logarithmique (300), inclinaison en roulis de −180 à 180° et en tangage de −90 à 90° (0), distance de 0,02 à 4 m (1). L'accélération n'est pas réglée : c'est la gravité vue par un capteur incliné (x = −sin tangage, y = sin roulis · cos tangage, z = cos roulis · cos tangage, en g), calculée par le cœur. Les modèles reçoivent toutes les valeurs au démarrage puis à chaque changement (`onEnvironment`), au plus une fois par image.
 
 ## 9. Réseau électrique logique et validations
 
@@ -557,11 +568,32 @@ CPU en % d'un cœur, total de l'app, de sa WebView (contenu, GPU, réseau) et du
 
 | Situation | CPU | RAM |
 | --- | --- | --- |
-| App ouverte, pas de simulation | < 1 % | < 150 Mo |
+| App ouverte, pas de simulation | < 1 % | < 150 Mo ; Windows : < 175 Mo (coût de base de WebView2) |
 | 1 Nucleo + 5 composants simples (`tests/budget`), fenêtre réduite ou paillasse immobile | < 10 % d'un cœur | < 350 Mo, stable dans le temps |
 | Même paillasse, scène animée, cadence par défaut (15 images/s) | < 25 % d'un cœur | < 350 Mo, stable dans le temps |
 | ESP32 + TFT + audio I2S | < 25 % d'un cœur | < 400 Mo |
 | Plafond dur par carte | Pause automatique au-delà de 80 % d'un cœur pendant 5 s | 256 Mo par firmware |
+
+Mesures de l'app 0.2.3 installée (projet `tests/budget`, mesures de l'utilisateur) :
+
+| Situation | macOS (Apple Silicon) | Windows |
+| --- | --- | --- |
+| App ouverte, pas de simulation | — | 0,05 %, 158,9 Mo |
+| Simulation, fenêtre visible | 22,7 %, 308 Mo | 22,9 %, 224,6 Mo |
+| Simulation, fenêtre réduite | 2,2 %, 218 Mo | 0,34 %, 192,5 Mo |
+
+Budgets tenus sur les deux systèmes ; la détection de fenêtre réduite fonctionne aussi sur une vraie machine Windows.
+
+Mesures du 16 novembre 2026 (Mac, phase 3, firmware à pleine cadence depuis la correction des délais, `tests/budget` avec l'OLED, scène animée à 15 images/s) :
+
+| Part | CPU (% d'un cœur) | Mémoire |
+| --- | --- | --- |
+| Rendu, banc WKWebView (banc, GPU, WebContent) | 16,9 à 18,1 (3,3 à 3,7 + 4,7 à 5,1 + 8,8 à 9,2) | WebContent 155 à 160 Mo |
+| Cœur (`budget_core_profile`, temps CPU par fil) | 4,3 à 5,3 | — |
+| Firmware | 1,2 | — |
+| **Total** | **≈ 22,5 à 24,5** | |
+
+Budget de la scène animée (25 %) tenu, **avec une marge faible** : le TFT (phase 3, étape 7) devra être mesuré de près. Avant ces mesures, le total montait à environ 31 % : moniteur série qui gardait toutes ses lignes dans le DOM et une zone défilante de la hauteur de l'historique (WebContent jusqu'à 430 Mo), réseau logique recalculé en entier à chaque écriture de broche. À confirmer sur la v0.2.4 installée (`mesure.sh`, simulation visible, essai de 10 minutes pour la stabilité de la mémoire).
 
 Taille de l'app visée : de l'ordre de 10 à 20 Mo, hors toolchains.
 
@@ -582,7 +614,7 @@ Taille de l'app visée : de l'ordre de 10 à 20 Mo, hors toolchains.
 - **Coalescence** : le cœur envoie à l'interface un seul événement par image (`sim:frame` : états des composants modifiés, niveaux, octets série, broches dont la configuration a changé), jamais chaque événement ; l'interface l'applique en une seule mise à jour (`requestAnimationFrame`), donc une seule recomposition de la fenêtre par image.
 - **Coût d'une image** : chaque image qui change quelque chose à l'écran coûte une recomposition de la fenêtre (WebContent et GPU) ; aucune animation n'est entretenue quand l'état ne bouge pas (halo d'une LED seulement à l'allumage, pas de transition sur une variation de luminosité, aucun filtre SVG ou CSS), le moniteur série n'ajoute que ses nouvelles lignes, le traceur ne se redessine qu'à l'arrivée de données. Les éléments qui changent à chaque image (couche des pastilles, vue de chaque composant) ont leur propre couche de composition, et les niveaux et broches sont mis à jour clé par clé, seulement s'ils changent. Mesure manuelle du rendu : `app/tests-ui/perf.spec.ts` (flux du cœur enregistré par le test `budget_core_profile`, rejoué dans l'interface, Chromium) et `app/tests-ui/wk/banc.sh` (même rejeu dans le vrai WKWebView de macOS, CPU et mémoire des processus WebKit).
 - Luminosité d'une LED en PWM = rapport cyclique mesuré sur l'image.
-- Écrans : redessinés uniquement si le framebuffer est marqué « modifié ».
+- Écrans : redessinés uniquement si le framebuffer est marqué « modifié ». Un blit qui réécrit des pixels identiques ne compte pas : le cœur accumule la zone réellement modifiée de chaque écran (rectangle englobant) et n'envoie que cette zone, en binaire par un canal Tauri (jamais en JSON), au plus une fois par `sim:frame` et seulement fenêtre visible ; l'hôte de la vue l'applique au canvas (`putImageData`) sans repasser par Svelte. La mémoire partagée sert entre le firmware et le cœur (flux bulk du SPI, framebuffer d'un firmware) ; Tauri n'en offre pas avec la WebView.
 - Fenêtre masquée ou réduite : le cœur n'envoie plus d'images (`sim:frame`), la simulation continue ; au retour, une image regroupe tout ce qui a changé. Deux signaux : la page masquée (`document.visibilityState`, commande `set_ui_visible` ; WKWebView et WebKitGTK la passent à « hidden » fenêtre réduite) et la fenêtre réduite selon Tauri (`is_minimized` à chaque redimensionnement), car wry ne signale pas la réduction à WebView2.
 - Sur batterie : 30 images/s au lieu de 60.
 - Mode temps virtuel (plus tard) : plafonné à ×1 par défaut, accélération sur demande.
@@ -641,7 +673,7 @@ Prebench est open source et téléchargeable librement ; le dépôt public ne re
 | --- | --- |
 | Dépôt privé | `prebench-dev` : tout le travail quotidien, historique complet |
 | Dépôt public | `prebench` : un commit « Release vX.Y.Z » par version, README, CHANGELOG, licences, issues, GitHub Releases |
-| Publication | `release.sh vX.Y.Z` : `git archive` du tag, exclusions `.gitattributes export-ignore`, commit unique + tag dans le clone public, push en HTTPS par défaut (`https://github.com/rdkwcz08/prebench.git`), SSH possible via la variable `PREBENCH_PUBLIC_REMOTE` |
+| Publication | `release.sh vX.Y.Z` : `git archive` du tag, exclusions `.gitattributes export-ignore`, commit unique + tag dans le clone public, push en HTTPS par défaut (`https://github.com/rdkwcz08/prebench.git`), SSH possible via la variable `PREBENCH_PUBLIC_REMOTE` ; `--oui` publie sans question de confirmation (session non interactive, règle d'usage dans `CLAUDE.md`). `release.yml` ne s'exécute que dans le dépôt public (`if: github.repository == 'rdkwcz08/prebench'`) : le tag poussé dans le dépôt privé, sans clé de signature, ne le déclenche plus en échec |
 | Build de release | GitHub Actions du dépôt public : `.dmg` macOS arm64 et `.msi` Windows x64, publiés en GitHub Release **normale** (jamais en pré-release) |
 | Vérification avant publication | Dans `release.yml`, l'app est testée telle qu'installée : `.msi` installé en silencieux dans `C:\Program Files\Prebench`, `Prebench.app` copiée depuis le `.dmg` dans `/Applications` en lecture seule. Lancée avec `--verifier-installation`, sans fenêtre, elle crée un projet depuis le modèle blinky, le compile avec le sdk installé en trouvant CMake et le compilateur hors du PATH, et attend que LD2 clignote ; sous Windows, rien ne doit être écrit dans le dossier d'installation. Un échec bloque la release |
 | Mises à jour | Plugin updater de Tauri : lit `latest.json` à l'adresse `releases/latest/download/latest.json` du dépôt public (dernière release normale) et vérifie chaque mise à jour avec la clé de signature du projet |
@@ -715,6 +747,7 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
 
 - [x] Un blinky STM32 HAL non modifié fait clignoter la LED, et le bouton déclenche `HAL_GPIO_EXTI_Callback`, sur Mac et Windows (test `blinky_led_and_button` en local sur Mac et en CI Windows et Linux ; app installée vérifiée par `release.yml` sur macOS et Windows).
 - [x] Le projet `tests/cubemx-nucleo-f401re/` généré par STM32CubeMX (6.18.1, FW_F4 V1.28.3, chaîne CMake) compile tel quel pour la cible « sim » et s'exécute sans `Error_Handler`, sur Mac et Windows : `CMakeLists.txt` généré reconnu, `system_stm32f4xx.c`, `syscalls.c` et `sysmem.c` exclus, startup et `.ld` ignorés (tests `test_cubemx` et `cubemx_generated_project`, en local sur Mac et en CI Windows et Linux).
+  - Depuis le 15 novembre 2026 (phase 3, étape 2), le projet de référence est « configuration par défaut + I2C1 » : régénéré avec CubeMX en ajoutant I2C1 sur PB8 et PB9 et son interruption event, sans autre changement (horloge, paquet et autres périphériques identiques), puis complété dans les seules sections USER CODE de `main.c` par une lecture `HAL_I2C_Mem_Read_IT` affichée sur USART2, et d'un `prebench.toml` qui place un joker I2C en 0x50. Le critère de la phase 1 reste valide : le code généré compile tel quel et s'exécute sans `Error_Handler` (tests `test_cubemx` et `cubemx_generated_project`).
 - [x] Les deux latences d'aller-retour (cœur seul, puis cœur + modèle via le composant d'écho) sont mesurées sur Mac et Windows et rapportées (médiane, 99e centile), et la question de la section 8.1 est tranchée (D5 : modèles dans QuickJS).
 - [x] La chaîne de publication est validée de bout en bout par deux releases GitHub normales : v0.1.0 (`release.sh --dry-run` propre, commit et tag dans le dépôt public `prebench`, `release.yml` vert, `.dmg` et `.msi` installés et lancés sur Mac et Windows), puis v0.1.1 avec un changement minime, que l'app v0.1.0 installée propose et applique par son updater, sur Mac et Windows.
 
@@ -740,21 +773,32 @@ Six phases séquentielles ; chacune se termine par un critère de passage vérif
   - macOS, app 0.2.0 installée (14 novembre 2026, MacBook Air Apple Silicon, mesures de l'utilisateur) : à vide 0 % et 67 Mo ; en simulation 60 % d'un cœur et 301 Mo (app 10 %, WebContent 27 %, GPU 23 %) : **budget dépassé**. Causes trouvées par rejeu du flux du cœur dans l'interface (`perf.spec.ts`, Chromium, 24,5 images/s) : transition du halo des LED relancée à chaque variation de luminosité (animation permanente), quatre événements par image au lieu d'un, moniteur série reconstruit à chaque octet. Corrigé en 0.2.1 : navigateur de 43 % à 21 % d'un cœur dans ce banc. App 0.2.1 : à mesurer.
   - Le script `mesure.sh` de la 0.2.0 comptait des processus WebKit d'autres apps et manquait le firmware : corrigé en 0.2.1 (processus responsable = Prebench).
   - macOS, app 0.2.2 installée (14 novembre 2026, mesures de l'utilisateur) : à vide 0,1 % et 84 Mo ; simulation visible 23,4 % et 332 Mo (app 5,6 %, GPU 7,4 %, WebContent 10,0 %, firmware 0,4 %) ; après 10 min 24,4 % et 314 Mo (stable) ; fenêtre réduite 12,1 % (le moteur web dessinait encore : corrigé en 0.2.3).
-  - macOS, 0.2.3 (14 novembre 2026, banc WKWebView `app/tests-ui/wk/banc.sh` à 15 images/s et test `budget_core_profile`) : fenêtre réduite 2,4 % pour la WebView (`BANC_REDUIRE=1`, page « hidden ») + 1,4 % pour le cœur et 0,3 % pour le firmware sans images (`PREBENCH_BUDGET_HIDDEN=1`), soit environ 4 % ; paillasse immobile 1,4 % pour la WebView (`PREBENCH_PERF_SKIP=sim:states,sim:pins,sim:nets,sim:uart`), 5,2 % si la sortie série défile ; scène animée 20,9 % pour la WebView. Budgets tenus ; mesure de la 0.2.3 installée avec `mesure.sh` : à faire par l'utilisateur.
-  - Windows : à mesurer (`mesure.ps1`).
+  - macOS, 0.2.3 (14 novembre 2026, banc WKWebView `app/tests-ui/wk/banc.sh` à 15 images/s et test `budget_core_profile`) : fenêtre réduite 2,4 % pour la WebView (`BANC_REDUIRE=1`, page « hidden ») + 1,4 % pour le cœur et 0,3 % pour le firmware sans images (`PREBENCH_BUDGET_HIDDEN=1`), soit environ 4 % ; paillasse immobile 1,4 % pour la WebView (`PREBENCH_PERF_SKIP=sim:states,sim:pins,sim:nets,sim:uart`), 5,2 % si la sortie série défile ; scène animée 20,9 % pour la WebView. Budgets tenus.
+  - App 0.2.3 installée, `mesure.sh` et `mesure.ps1` (mesures de l'utilisateur, détail en section 11.1) : macOS, simulation visible 22,7 % et 308 Mo, fenêtre réduite 2,2 % et 218 Mo ; Windows, à vide 0,05 % et 158,9 Mo (budget à vide porté à < 175 Mo sous Windows, coût de base de WebView2), simulation visible 22,9 % et 224,6 Mo, fenêtre réduite 0,34 % et 192,5 Mo. Budgets tenus sur Mac et Windows.
   - Taille de l'app : 12,5 Mo (bundle macOS), dans la cible de 10 à 20 Mo.
 - [x] Garde-fous (14 novembre 2026, Mac ; mêmes tests en CI Windows et Linux) : un `while(1)` sans délai est mis en pause après 5,8 s de temps CPU consommé (seuil : 5 s à plus de 80 % d'un cœur), puis suspendu (test `guard_busy_loop_pauses`) ; une fuite mémoire est arrêtée à 270 Mo (plafond 256 Mo, mesure à 4 Hz au-delà de 128 Mo, test `guard_memory_leak_stops`).
 - [x] Latence (14 novembre 2026, outil `tests/latency`, 2000 allers-retours) : Mac, cœur médiane 23 µs et 99e centile 60 µs, modèle 29 µs et 45 µs ; CI Windows, cœur 58 µs et 137 µs, modèle 141 µs et 254 µs (runners partagés : valeurs variables d'une exécution à l'autre, de 99 à 166 µs de médiane pour le cœur sur les CI précédentes). Le vidage différé des lots (délai de moins de 1 ms, protocole 5.1) ne touche pas les transactions synchrones, qui partent aussitôt.
 
-**Bilan de la phase 2** : paillasse éditable et câblage vérifié, réseau logique, moniteur série et traceur, débogage dans VS Code, inspecteur, reset et coupure d'alimentation, PWM et ADC avec quatre nouveaux composants (potentiomètre, servomoteur, buzzer, LED RGB) ; releases v0.1.2, v0.1.3, v0.2.0 à v0.2.3 (budgets tenus sur Mac). Reportés en phase 3 : palette de commandes et panneau environnement.
+**Bilan de la phase 2** : paillasse éditable et câblage vérifié, réseau logique, moniteur série et traceur, débogage dans VS Code, inspecteur, reset et coupure d'alimentation, PWM et ADC avec quatre nouveaux composants (potentiomètre, servomoteur, buzzer, LED RGB) ; releases v0.1.2, v0.1.3, v0.2.0 à v0.2.3 (budgets tenus sur Mac et Windows). Phase 2 entièrement validée. Reportés en phase 3 : palette de commandes et panneau environnement.
 
 ### Phase 3 — Bus et écrans
 
-- I2C + OLED SSD1306 + MPU6050 + joker I2C
-- SPI + TFT ILI9341 via mémoire partagée
-- WS2812 via shim de bibliothèque
-- Jauge mémoire de la vraie cible ; export de la liste de câblage
-- Palette de commandes `Cmd/Ctrl+K` (section 10.6) et panneau environnement (section 8.5), reportés de la phase 2
+Étapes livrables, dans l'ordre (plan validé le 15 novembre 2026), même règle qu'en phase 2 : chacune est testée, committée et passe la CI avant la suivante ; toute étape qui touche l'interface applique la charte. À chaque écran ajouté, le rendu est mesuré sur le banc WKWebView (`app/tests-ui/wk/banc.sh`) : la scène animée est à 22,7 % d'un cœur pour une limite de 25 % (section 11.1).
+
+1. **Contrats** (ajouts compatibles) : écrans (`ctx.createDisplay`, `blit`, `display.attach` côté vue), `onLedStrip` et interface `led-strip`, paramètre « table » (manifeste et `prebench.toml`), API libvmcu 1.2 (`vmcu_led_strip_show`, `vmcu_led_strip_show_pwm`), protocole 1.2 (`LED_STRIP`, implémenté à l'étape 8).
+2. **Bus I2C et joker I2C** : shim `HAL_I2C_Master_*`, `HAL_I2C_Mem_*`, `HAL_I2C_IsDeviceReady` ; variantes IT et DMA réellement simulées (transaction immédiate, puis callback de fin depuis le fil des interruptions, comme l'UART) ; routage par adresse dans le cœur, NACK sans composant ; joker I2C (valeurs fixes et curseurs) ; validations « adresse I2C en double » (report de la phase 2) et broche sans I2C. Exemples `tests/i2c-scan` et un projet CubeMX en `HAL_I2C_Mem_Read_IT`. Faite le 15 novembre 2026 (CI Linux et Windows) ; joker limité à quatre curseurs. `HAL_I2C_Mem_Read_IT` est aussi vérifié dans le vrai projet CubeMX `tests/cubemx-nucleo-f401re` (configuration par défaut + I2C1), `tests/i2c-scan` garde le balayage et les cas d'erreur.
+3. **OLED SSD1306 et chaîne d'affichage** : modèle (adressage page et horizontal, 128×64 et 128×32, contraste, inversion, extinction), image dans le cœur, zone modifiée en binaire, vue canvas ; OLED ajouté à `tests/budget` ; banc WKWebView adapté et mesuré. Exemple `tests/oled-hello`.
+   - Mesures (15 novembre 2026, Mac, banc WKWebView à 15 images/s, flux de `tests/budget` avec l'OLED réécrit en entier par le firmware) : 17,6 à 18,5 % d'un cœur pour la WebView, comme sans écran (18,0 et 18,8 %), car seuls les pixels réellement modifiés partent (281 octets/s). Pire cas, un écran complet redessiné à chaque image : 21,1 et 21,5 % (option `PREBENCH_PERF_SCREEN_EVERY_FRAME=1` du banc). Cœur et firmware : environ 3 %.
+   - Constat (antérieur à l'étape 3), corrigé le 15 novembre 2026 : sous macOS, la QoS « utility » du firmware allongeait chaque `HAL_Delay(10)` à environ 34 ms, et la boucle de `tests/budget` ne faisait qu'environ 18 tours par seconde au lieu de 100. Délais désormais exacts (section 5.5). À pleine cadence, le total montait à environ 31 % d'un cœur ; ramené à 22,5 à 24,5 % le 16 novembre 2026 (moniteur série en « suivi de la fin », réseau logique indexé) : budget tenu, marge faible avant le TFT (section 11.1).
+4. **Panneau environnement** (report de la phase 2, section 8.5) : curseurs, `onEnvironment`, valeurs gardées au rechargement à chaud. Faite le 15 novembre 2026 (commandes `get_environment` et `set_environment`, tests `environment_reaches_models`, `bounds_and_gravity_from_tilt` et `environment.spec.ts`).
+5. **MPU6050** : registres (WHO_AM_I, PWR_MGMT_1, plages, température, lecture groupée depuis 0x3B) alimentés par l'environnement. Exemple `tests/mpu-tilt` vers le traceur. Faite le 16 novembre 2026 : gyroscope = vitesse de rotation pendant un changement d'inclinaison (0 au repos, 100 ms de maintien) ; filtres, FIFO, interruptions et DMP non simulés (tests `mpu_tilt_follows_environment`, `mpu6050_gyro_follows_tilt_change`). → **release v0.2.4**
+6. **Bus SPI et mémoire partagée** : shim `HAL_SPI_*` avec variantes IT et DMA simulées comme l'I2C, CS par GPIO, flux bulk (`shared_memory`, code propre au système : CI Windows) ; validation « broche CS SPI partagée » ; composant d'écho étendu à `onSPI` pour les tests. Exemple `tests/spi-loop`.
+7. **TFT ILI9341** : CASET, PASET, RAMWR, MADCTL, broches DC et RST, RGB565, zone modifiée seulement ; banc et mesure. Exemple `tests/tft-demo` animé.
+8. **Ruban WS2812** : décodage du DMA dans le shim TIM (section 5.4), protocole 1.2, composant ruban avec un paramètre d'ordre des couleurs (GRB, RGB, GRBW), la trame `LED_STRIP` restant brute. Exemple `tests/ws2812-chase`. → **release v0.2.5**
+9. **Palette de commandes `Cmd/Ctrl+K`** (report de la phase 2, section 10.6).
+10. **Export de la liste de câblage** (section 10.5).
+11. **Jauge mémoire de la vraie cible** (E3) : build ARM en arrière-plan après le build « sim », `arm-none-eabi-size`, jauge RAM et flash rapportée à `ram_kb` et `flash_kb`. Un projet CubeMX réutilise sa propre chaîne (`CMakePresets.json`, `gcc-arm-none-eabi.cmake`). Chaîne ARM facultative : si elle manque, la commande d'installation et sa taille sont indiquées, sans bloquer la simulation.
+12. **Critère de passage** : paillasse `tests/catalogue` avec les dix composants, budgets remesurés sur Mac et Windows. → **release v0.3.0**
 
 **Critère de passage** : les dix composants du catalogue initial (8.4) fonctionnent.
 

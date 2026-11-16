@@ -26,6 +26,18 @@ const STATES: Record<string, [unknown, unknown]> = {
     { sounding: false, freq_hz: null },
     { sounding: true, freq_hz: 2300 },
   ],
+  'joker-i2c': [
+    { address: 0x50, sliders: [{ reg: 0x20, value: 0 }], pointer: 0 },
+    { address: 0x50, sliders: [{ reg: 0x20, value: 200 }], pointer: 0x21 },
+  ],
+  mpu6050: [
+    { awake: false, accel_range_g: 2, gyro_range_dps: 250 },
+    { awake: true, accel_range_g: 2, gyro_range_dps: 250 },
+  ],
+  ssd1306: [
+    { lit: false, contrast: 127, inverted: false, allOn: false, height: 64 },
+    { lit: true, contrast: 255, inverted: false, allOn: false, height: 64 },
+  ],
   potentiometer: [
     { position: 0.5, volts: 1.65 },
     { position: 1, volts: 3.3 },

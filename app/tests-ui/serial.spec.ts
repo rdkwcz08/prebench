@@ -66,3 +66,28 @@ test('traceur : courbes depuis « temp:21.4,hum:55 », légende et dernière val
   await expect(legend).toContainText('hum');
   await expect(legend).toContainText('51');
 });
+
+test('moniteur série : suivi de la fin borné, remonter puis revenir en bas', async ({ bench }) => {
+  const { page } = bench;
+  await bench.emit('sim:status', { state: 'running', message: 'En cours' });
+  // 12 000 lignes : le DOM ne garde que les lignes visibles.
+  const text = Array.from({ length: 12000 }, (_, i) => `ligne ${i}`).join('\n') + '\n';
+  await bench.emit('sim:uart', { id: 2, data: Array.from(new TextEncoder().encode(text)) });
+  const log = page.getByRole('region', { name: 'Sortie série' });
+  await expect(log.getByText('ligne 11999', { exact: true })).toBeVisible();
+  await expect(log).toHaveClass(/follow/);
+  expect(await log.locator('.line').count()).toBeLessThan(40);
+
+  // Molette vers le haut : liste complète défilante, toujours virtualisée.
+  await log.hover();
+  await page.mouse.wheel(0, -400);
+  await expect(log).not.toHaveClass(/follow/);
+  expect(await log.locator('.line').count()).toBeLessThan(80);
+  await expect(log.getByText('ligne 11999', { exact: true })).toBeHidden();
+
+  // Retour en bas : suivi repris, nouvelles lignes visibles.
+  await log.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
+  await expect(log).toHaveClass(/follow/);
+  await bench.emit('sim:uart', { id: 2, data: Array.from(new TextEncoder().encode('fin\n')) });
+  await expect(log.getByText('fin', { exact: true })).toBeVisible();
+});

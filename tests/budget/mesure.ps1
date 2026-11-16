@@ -41,6 +41,17 @@ Get-Process -Name 'firmware*' -ErrorAction SilentlyContinue | ForEach-Object {
     if (-not ($ids -contains $_.Id)) { $ids += $_.Id }
 }
 
+# Processus manquants : avertissement, total marqué « incomplet ».
+$names = @($ids | ForEach-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName })
+$incomplet = ""
+if (-not ($names -like 'msedgewebview2*')) {
+    Write-Warning "Aucun processus WebView2 de Prebench trouvé : l'interface n'est pas comptée."
+    $incomplet = " (incomplet : sans WebView2)"
+}
+if (-not ($names -like 'firmware*')) {
+    Write-Warning "Aucun firmware en cours : mesure « app ouverte, pas de simulation » seulement."
+}
+
 $t0 = @{}
 foreach ($id in $ids) {
     $p = Get-Process -Id $id -ErrorAction SilentlyContinue
@@ -60,5 +71,5 @@ foreach ($id in $ids) {
     $totalMem += $mem
     "{0,-8} {1,-28} {2,8:N2} {3,10:N1}" -f $id, $p.ProcessName, $cpu, $mem
 }
-"{0,-37} {1,8:N2} {2,10:N1}" -f "Total", $totalCpu, $totalMem
+"{0,-37} {1,8:N2} {2,10:N1}" -f "Total$incomplet", $totalCpu, $totalMem
 "Mesure sur $Duree s ; CPU en % d'un cœur."

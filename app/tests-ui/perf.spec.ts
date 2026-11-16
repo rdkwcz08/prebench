@@ -82,6 +82,14 @@ for (const tab of TABS) {
     await expect(page.locator('[data-component="servo1"]')).toHaveCount(1);
     await page.getByRole('tab', { name: tab }).click();
     await bench.emit('sim:status', { state: 'running', message: 'En cours' });
+    // PREBENCH_PERF_PREFILL=<n> : moniteur série déjà rempli de n lignes
+    // (régime établi d'une longue simulation), avant la mesure.
+    const prefill = Number(process.env.PREBENCH_PERF_PREFILL ?? 0);
+    if (prefill > 0) {
+      const text = Array.from({ length: prefill }, (_, i) => `pot:${i % 4096},ld2:${i % 1000}\r\n`).join('');
+      await bench.emit('sim:uart', { id: 2, data: Array.from(new TextEncoder().encode(text)) });
+      await page.waitForTimeout(1000);
+    }
 
     if (process.env.PREBENCH_PERF_CSS) await page.addStyleTag({ content: process.env.PREBENCH_PERF_CSS });
     let list = (JSON.parse(readFileSync(EVENTS, 'utf8')) as { t: number; name: string }[]).filter(
@@ -127,10 +135,12 @@ for (const tab of TABS) {
       const start = performance.now();
       // Aucun événement gardé : mesure à vide sur 20 s (référence).
       if (list.length === 0) await new Promise((r) => setTimeout(r, 20_000));
+      const display = (window as unknown as { __pbDisplay: (b: unknown) => void }).__pbDisplay;
       for (const e of list) {
         const wait = e.t - (performance.now() - start);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-        emit(e.name, e.payload);
+        if (e.name === 'sim:display') display(e.payload);
+        else emit(e.name, e.payload);
       }
     }, events);
     const seconds = (Date.now() - t0) / 1000;
@@ -214,6 +224,18 @@ test('export du banc WKWebView', () => {
     const scale = frames.length / (span / 1000) / rate;
     list = list.map((e) => ({ ...e, t: e.t * scale })).filter((e) => e.t <= 20_000);
   }
+  // PREBENCH_PERF_SCREEN_EVERY_FRAME=1 : pire cas des écrans, un message
+  // d'écran complet (le dernier reçu) à chaque image (sim:states).
+  if (process.env.PREBENCH_PERF_SCREEN_EVERY_FRAME === '1') {
+    let last: unknown = null;
+    const out: { t: number; name: string; payload?: unknown }[] = [];
+    for (const e of list as { t: number; name: string; payload?: unknown }[]) {
+      if (e.name === 'sim:display') last = e.payload;
+      else out.push(e);
+      if (e.name === 'sim:states' && last !== null) out.push({ t: e.t, name: 'sim:display', payload: last });
+    }
+    list = out;
+  }
   // Durée du flux complet, gardée même si PREBENCH_PERF_SKIP retire tout
   // (paillasse immobile : simulation en cours, rien ne change à l'écran).
   const duration = list.at(-1)?.t ?? 0;
@@ -237,9 +259,12 @@ test('export du banc WKWebView', () => {
         flush(end);
         end += step;
       }
-      const key = e.name === 'sim:uart' ? `uart${String(e.payload.id)}` : e.name;
+      // Écrans : zones cumulées par le cœur, déjà une par image ; gardées toutes.
+      const key =
+        e.name === 'sim:uart' ? `uart${String(e.payload.id)}` : e.name === 'sim:display' ? `display${out.length}-${e.t}` : e.name;
       const prev = bucket.get(key);
-      if (!prev || e.name === 'sim:pins') bucket.set(key, { ...e, payload: { ...e.payload } });
+      if (e.name === 'sim:display') bucket.set(key, e);
+      else if (!prev || e.name === 'sim:pins') bucket.set(key, { ...e, payload: { ...e.payload } });
       else if (e.name === 'sim:uart')
         prev.payload.data = [...(prev.payload.data as number[]), ...(e.payload.data as number[])];
       else Object.assign(prev.payload, e.payload);
@@ -259,7 +284,10 @@ test('export du banc WKWebView', () => {
       const wait = e.t - (performance.now() - start);
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       // Comme le cœur (set_ui_visible) : rien n'est envoyé page masquée.
-      if (document.visibilityState !== 'hidden') emit(e.name, e.payload);
+      if (document.visibilityState !== 'hidden') {
+        if (e.name === 'sim:display') window.__pbDisplay(e.payload);
+        else emit(e.name, e.payload);
+      }
     }
     const rest = ${duration} - (performance.now() - start);
     if (rest > 0) await new Promise((r) => setTimeout(r, rest));

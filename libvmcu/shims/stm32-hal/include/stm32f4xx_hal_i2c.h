@@ -1,9 +1,8 @@
 /*
  * libvmcu/shims/stm32-hal/include/stm32f4xx_hal_i2c.h — Module I2C du shim.
  *
- * Phase 1 : non simulé. Init appelle HAL_I2C_MspInit ; tout transfert se
- * comporte comme sur un bus sans composant : HAL_ERROR et ErrorCode =
- * HAL_I2C_ERROR_AF (adresse non acquittée). Simulation en phase 3.
+ * Maître simulé (phase 3) : voir src/stm32_hal_i2c.c. Mode esclave et
+ * adressage 10 bits : non simulés.
  */
 #ifndef PREBENCH_STM32F4XX_HAL_I2C_H
 #define PREBENCH_STM32F4XX_HAL_I2C_H

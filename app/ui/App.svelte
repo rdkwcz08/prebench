@@ -15,6 +15,7 @@
   import AddComponentMenu from './lib/AddComponentMenu.svelte';
   import Workbench from './lib/Workbench.svelte';
   import BuildPanel from './lib/BuildPanel.svelte';
+  import EnvironmentPanel from './lib/EnvironmentPanel.svelte';
   import SelectionInspector from './lib/SelectionInspector.svelte';
   import WarningsPanel from './lib/WarningsPanel.svelte';
   import PlotPanel from './lib/PlotPanel.svelte';
@@ -385,6 +386,7 @@
       tabs={[
         { id: 'serial', label: 'Série' },
         { id: 'plot', label: 'Traceur' },
+        { id: 'env', label: 'Environnement' },
         { id: 'log', label: 'Journal' },
         {
           id: 'build',
@@ -423,6 +425,8 @@
         <SerialPanel />
       {:else if tab === 'plot'}
         <PlotPanel />
+      {:else if tab === 'env'}
+        <EnvironmentPanel />
       {:else if tab === 'build'}
         <BuildPanel />
       {:else if tab === 'log'}

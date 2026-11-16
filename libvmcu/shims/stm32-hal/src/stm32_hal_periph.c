@@ -1,14 +1,14 @@
 /*
  * libvmcu/shims/stm32-hal/src/stm32_hal_periph.c — Instances des périphériques et
- * modules DMA, I2C, SPI pas encore simulés (règle 16.2.10). UART, TIM (PWM) et
- * ADC sont simulés dans stm32_hal_uart.c, stm32_hal_tim.c et stm32_hal_adc.c.
+ * modules DMA et SPI pas encore simulés (règle 16.2.10). UART, TIM (PWM), ADC et
+ * I2C sont simulés dans stm32_hal_uart.c, stm32_hal_tim.c, stm32_hal_adc.c et
+ * stm32_hal_i2c.c.
  *
  * Comportement commun :
  * - *_Init : appelle le MspInit du module si le handle est neuf (comme le HAL de
  *   ST : CubeMX y configure les broches), passe à l'état READY, renvoie HAL_OK ;
  * - émissions : acceptées sans effet ;
  * - réceptions bloquantes : attente bornée à 10 ms puis HAL_TIMEOUT ;
- * - I2C : comme un bus sans composant (HAL_ERROR, HAL_I2C_ERROR_AF) ;
  * - SPI : octets reçus à 0xFF ;
  * - variantes _IT / _DMA : acceptées, aucun callback n'est appelé.
  * Chaque fonction avertit une fois « <fonction> non simulé ».
@@ -74,73 +74,6 @@ HAL_StatusTypeDef HAL_DMA_RegisterCallback(DMA_HandleTypeDef *hdma, HAL_DMA_Call
 HAL_StatusTypeDef HAL_DMA_UnRegisterCallback(DMA_HandleTypeDef *hdma, HAL_DMA_CallbackIDTypeDef CallbackID) { return HAL_OK; }
 HAL_DMA_StateTypeDef HAL_DMA_GetState(DMA_HandleTypeDef *hdma) { return hdma->State; }
 uint32_t HAL_DMA_GetError(DMA_HandleTypeDef *hdma) { return hdma->ErrorCode; }
-
-/* --- I2C (simulation en phase 3) : bus sans composant ------------------------------------ */
-
-HAL_StatusTypeDef HAL_I2C_Init(I2C_HandleTypeDef *hi2c)
-{
-    if (hi2c == NULL) {
-        return HAL_ERROR;
-    }
-    PREBENCH_UNSIMULATED();
-    if (hi2c->State == HAL_I2C_STATE_RESET) {
-        hi2c->Lock = HAL_UNLOCKED;
-        HAL_I2C_MspInit(hi2c);
-    }
-    hi2c->ErrorCode = HAL_I2C_ERROR_NONE;
-    hi2c->State = HAL_I2C_STATE_READY;
-    hi2c->Mode = HAL_I2C_MODE_NONE;
-    return HAL_OK;
-}
-
-HAL_StatusTypeDef HAL_I2C_DeInit(I2C_HandleTypeDef *hi2c)
-{
-    if (hi2c == NULL) {
-        return HAL_ERROR;
-    }
-    HAL_I2C_MspDeInit(hi2c);
-    hi2c->State = HAL_I2C_STATE_RESET;
-    return HAL_OK;
-}
-
-static HAL_StatusTypeDef i2c_nack(I2C_HandleTypeDef *hi2c, const char *name)
-{
-    vmcu_warn_unsimulated(name);
-    hi2c->ErrorCode = HAL_I2C_ERROR_AF;
-    return HAL_ERROR;
-}
-
-#define I2C_NACK() return i2c_nack(hi2c, __func__)
-
-HAL_StatusTypeDef HAL_I2C_Master_Transmit(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint8_t *pData, uint16_t Size, uint32_t Timeout) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Master_Receive(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint8_t *pData, uint16_t Size, uint32_t Timeout) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Slave_Transmit(I2C_HandleTypeDef *hi2c, uint8_t *pData, uint16_t Size, uint32_t Timeout) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Slave_Receive(I2C_HandleTypeDef *hi2c, uint8_t *pData, uint16_t Size, uint32_t Timeout) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Mem_Write(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size, uint32_t Timeout) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Mem_Read(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size, uint32_t Timeout) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_IsDeviceReady(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint32_t Trials, uint32_t Timeout) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Master_Transmit_IT(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Master_Receive_IT(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Slave_Transmit_IT(I2C_HandleTypeDef *hi2c, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Slave_Receive_IT(I2C_HandleTypeDef *hi2c, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Mem_Write_IT(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Mem_Read_IT(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Master_Transmit_DMA(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Master_Receive_DMA(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Slave_Transmit_DMA(I2C_HandleTypeDef *hi2c, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Slave_Receive_DMA(I2C_HandleTypeDef *hi2c, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Mem_Write_DMA(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_Mem_Read_DMA(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size) { I2C_NACK(); }
-HAL_StatusTypeDef HAL_I2C_EnableListen_IT(I2C_HandleTypeDef *hi2c) { STUB_OK(); }
-HAL_StatusTypeDef HAL_I2C_DisableListen_IT(I2C_HandleTypeDef *hi2c) { return HAL_OK; }
-HAL_StatusTypeDef HAL_I2C_Master_Abort_IT(I2C_HandleTypeDef *hi2c, uint16_t DevAddress) { return HAL_OK; }
-void HAL_I2C_EV_IRQHandler(I2C_HandleTypeDef *hi2c) {}
-void HAL_I2C_ER_IRQHandler(I2C_HandleTypeDef *hi2c) {}
-HAL_I2C_StateTypeDef HAL_I2C_GetState(const I2C_HandleTypeDef *hi2c) { return hi2c->State; }
-HAL_I2C_ModeTypeDef HAL_I2C_GetMode(const I2C_HandleTypeDef *hi2c) { return hi2c->Mode; }
-uint32_t HAL_I2C_GetError(const I2C_HandleTypeDef *hi2c) { return hi2c->ErrorCode; }
-HAL_StatusTypeDef HAL_I2CEx_ConfigAnalogFilter(I2C_HandleTypeDef *hi2c, uint32_t AnalogFilter) { return HAL_OK; }
-HAL_StatusTypeDef HAL_I2CEx_ConfigDigitalFilter(I2C_HandleTypeDef *hi2c, uint32_t DigitalFilter) { return HAL_OK; }
 
 /* --- SPI (simulation en phase 3) : MISO sans esclave = 0xFF ------------------------------- */
 

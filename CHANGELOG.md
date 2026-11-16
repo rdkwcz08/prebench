@@ -6,6 +6,34 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.2.4] - 2026-11-16
+
+**Aperçu technique** : bus I2C, écran OLED, accéléromètre MPU6050, onglet Environnement, et délais du firmware exacts sur Mac.
+
+### Modifié
+
+- Moniteur série : il suit la fin sans barre de défilement verticale ; la molette ou les touches Haut, Page précédente et Début remontent dans l'historique, revenir en bas reprend le suivi. Une ligne plus large que le panneau défile horizontalement au lieu de passer à la ligne. Mémoire de l'interface divisée par deux à trois sur une longue simulation.
+- Simulation plus légère : une écriture de broche ne recalcule plus que son net (cœur environ 30 % moins gourmand avec un firmware actif).
+
+### Corrigé
+
+- macOS : `HAL_Delay` et les autres délais duraient environ trois fois trop longtemps (10 ms devenaient 34 ms), car le système regroupait les minuteries du firmware placé sur les cœurs économes. Les délais sont désormais exacts, sans quitter les cœurs économes.
+- Windows : les demandes de résolution des minuteries du firmware restent honorées en mode économie d'énergie (EcoQoS).
+- Un composant n'est plus arrêté pour un seul appel un peu long (ramasse-miettes, machine chargée) : il l'est après trois dépassements de suite du budget de 5 ms, ou aussitôt au-delà de 50 ms (boucle infinie).
+- `tests/budget/mesure.sh` et `mesure.ps1` avertissent quand l'interface (WebKit, WebView2) ou le firmware manquent, au lieu d'afficher un total incomplet ; `mesure.sh` retrouve les processus WebKit d'une app lancée depuis un terminal.
+
+### Ajouté
+
+- Bus I2C (STM32 HAL) : transferts maître bloquants, `Mem_Read` et `Mem_Write`, `IsDeviceReady`, et variantes `_IT` et `_DMA` avec leurs callbacks de fin (`HAL_I2C_MemRxCpltCallback`…) ou d'erreur. Une adresse sans composant répond NACK, comme un vrai bus.
+- Périphérique I2C générique (joker) : adresse au choix et table de registres éditable dans l'inspecteur ; jusqu'à quatre registres réglables par curseur pendant la simulation.
+- Onglet Avertissements : deux composants I2C à la même adresse sur le même bus sont signalés.
+- Inspecteur : adresses I2C et registres affichés et saisis en hexadécimal (`0x3C`).
+- Exemple `tests/i2c-scan` : balayage du bus, lecture et écriture de registres, lecture par interruption vers le traceur.
+- Écran OLED SSD1306 (I2C, 128 × 64 ou 128 × 32, blanc, bleu ou jaune et bleu) : commandes d'allumage, pompe de charge, contraste, inversion, modes d'adressage, sens des segments et des lignes. Seuls les pixels qui changent sont envoyés à l'interface, en binaire. Exemple `tests/oled-hello`.
+- Onglet Environnement : température, humidité, luminosité, inclinaison et distance, réglées par curseurs et lues par les capteurs simulés ; l'accélération suit l'inclinaison (gravité). Valeurs gardées pendant toute la session, rechargements et redémarrages compris.
+- Accéléromètre et gyroscope MPU6050 (I2C, module GY-521) : accélération selon l'inclinaison et température du panneau Environnement, rotation pendant un changement d'inclinaison, veille au démarrage comme la vraie puce, plages réglables. Exemple `tests/mpu-tilt` vers le traceur.
+- Projet de référence STM32CubeMX (`tests/cubemx-nucleo-f401re`) : I2C1 ajouté, lecture par interruption d'un composant I2C.
+
 ## [0.2.3] - 2026-11-14
 
 **Aperçu technique** : fenêtre réduite presque gratuite, et plus de relance inattendue de la simulation. Budgets de la section 11.1 tenus sur Mac.

@@ -25,6 +25,7 @@ pub fn run() {
         // aucune permission de dialogue n'est donnée à l'interface.
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::default())
+        .manage(crate::core::sim::DisplaySink::default())
         .setup(|app| {
             // Vérification de l'app installée : sans fenêtre (install_check.rs).
             if let Some(request) = install_check::request_from_args() {
@@ -68,6 +69,9 @@ pub fn run() {
             commands::reset_simulation,
             commands::set_power,
             commands::set_ui_visible,
+            commands::display_channel,
+            commands::get_environment,
+            commands::set_environment,
             commands::pause_simulation,
             commands::resume_simulation,
             commands::component_control,

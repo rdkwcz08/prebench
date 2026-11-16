@@ -1,0 +1,45 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "ssd1306",
+  "version": "1.0.0",
+  "name": "Écran OLED SSD1306",
+  "description": "Module OLED monochrome I2C, 128 × 64 ou 128 × 32 pixels, contrôleur SSD1306. Commandes simulées : allumage, pompe de charge, contraste, inversion, écran entier allumé, modes d'adressage horizontal, vertical et page, fenêtres de colonnes et de pages, sens des segments et des lignes (A0/A1, C0/C8). Défilement matériel et décalage de ligne : non simulés (avertissement). Comme un vrai module, l'écran reste noir tant que la pompe de charge (0x8D 0x14) et l'allumage (0xAF) n'ont pas été envoyés.",
+  "category": "display",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 152, "height": 112 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "GND", "label": "Masse", "role": "ground", "x": 40, "y": 0 },
+    { "name": "VCC", "label": "Alimentation", "role": "power", "x": 64, "y": 0 },
+    { "name": "SCL", "label": "Horloge I2C", "role": "open-drain", "x": 88, "y": 0 },
+    { "name": "SDA", "label": "Données I2C", "role": "open-drain", "x": 112, "y": 0 }
+  ],
+  "interfaces": [
+    { "type": "i2c", "sda": "SDA", "scl": "SCL", "address": { "param": "address" } }
+  ],
+  "params": {
+    "address": {
+      "type": "integer",
+      "label": "Adresse I2C",
+      "default": 60,
+      "min": 60,
+      "max": 61,
+      "display": "hex"
+    },
+    "size": {
+      "type": "enum",
+      "label": "Résolution",
+      "values": ["128x64", "128x32"],
+      "default": "128x64"
+    },
+    "color": {
+      "type": "enum",
+      "label": "Couleur",
+      "values": ["white", "blue", "yellow-blue"],
+      "default": "white"
+    }
+  },
+  "controls": []
+}

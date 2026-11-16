@@ -1,0 +1,36 @@
+#:schema ../../docs/prebench.schema.json
+# Bus I2C1 (D15 = PB8 SCL, D14 = PB9 SDA, AF4), configuré comme dans STM32CubeMX.
+# joker1 : périphérique I2C générique à l'adresse 0x50 ; registre 0x00 fixe
+# (0x2A), registre 0x20 réglable par curseur pendant la simulation.
+# Le firmware balaie le bus, lit et écrit des registres (Mem_Read, Mem_Write),
+# puis lit 0x20 toutes les 200 ms par HAL_I2C_Mem_Read_IT : USART2 affiche
+# « curseur:<valeur> » au traceur. Bougez le curseur de joker1.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id = "joker1"
+type = "joker-i2c"
+pos = [408, 96]
+params = { address = 80, registers = [{ reg = 0, value = 42, mode = "fixed" }, { reg = 32, value = 128, mode = "slider" }] }
+
+[[wires]]
+from = "joker1.VCC"
+to = "board.CN6:4"
+
+[[wires]]
+from = "joker1.GND"
+to = "board.CN6:6"
+
+[[wires]]
+from = "joker1.SCL"
+to = "board.CN5:10"
+
+[[wires]]
+from = "joker1.SDA"
+to = "board.CN5:9"

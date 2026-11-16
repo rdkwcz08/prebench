@@ -193,6 +193,7 @@ fn start_project_full(
         "sim:uart-config",
         "sim:test-gpio",
         "sim:test-pwm",
+        "sim:test-displays",
     ] {
         let tx = tx.clone();
         app.handle().listen_any(name, move |event| {
@@ -218,6 +219,7 @@ fn start_project_full(
                     .unwrap_or(60)
             })),
             ui_visible: true,
+            environment: Default::default(),
         },
     );
     (
@@ -544,6 +546,231 @@ fn uart_echo_and_plotter_lines() {
         }
         echoed.contains("Bonjour")
     });
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Phase 3, étape 2 : bus I2C1 face au joker I2C (tests/i2c-scan). Balayage
+/// (IsDeviceReady), Mem_Read et Mem_Write bloquants, NACK sur une adresse
+/// absente, puis Mem_Read_IT dont le callback de fin arrive par le fil IRQ ;
+/// le curseur du joker change la valeur lue.
+#[test]
+fn i2c_scan_mem_and_interrupt_read() {
+    let dir = repo_root().join("tests").join("i2c-scan");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let text = |v: &Value| -> String {
+        v["data"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|b| b.as_u64().map(|x| x as u8))
+                    .collect::<Vec<u8>>()
+            })
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default()
+    };
+    let mut out = String::new();
+    rec.wait(|name, v| {
+        if name == "sim:uart" && v["id"] == 2 {
+            out.push_str(&text(v));
+        }
+        out.contains("curseur:128")
+    });
+    for expected in [
+        "I2C trouvé : 0x50",
+        "Balayage fini : 1 composant(s)",
+        "reg 0x00 = 0x2A",
+        "reg 0x10 = 0xA5",
+        "0x51 : NACK (AF)",
+    ] {
+        assert!(out.contains(expected), "« {expected} » absent de :\n{out}");
+    }
+    assert!(!out.contains("erreur I2C"), "{out}");
+
+    sim.tx
+        .try_send(SimMsg::Control {
+            component: "joker1".into(),
+            control: "reg:20".into(),
+            value_json: "200".into(),
+        })
+        .expect("contrôle");
+    let mut after = String::new();
+    rec.wait(|name, v| {
+        if name == "sim:uart" && v["id"] == 2 {
+            after.push_str(&text(v));
+        }
+        after.contains("curseur:200")
+    });
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Message « displays » (components/display.rs) appliqué à une image
+/// mono1-vertical de 128 × 64 : (identifiant, écran neuf, zone).
+fn apply_displays(msg: &[u8], image: &mut [u8], seen: &mut Vec<(String, bool, [u16; 4])>) {
+    let u16_at = |o: usize| u16::from_le_bytes([msg[o], msg[o + 1]]);
+    let count = u16_at(0);
+    let mut o = 2;
+    for _ in 0..count {
+        let id_len = u16_at(o) as usize;
+        let id = String::from_utf8_lossy(&msg[o + 2..o + 2 + id_len]).into_owned();
+        o += 2 + id_len;
+        let (format, reset) = (msg[o], msg[o + 1] & 1 == 1);
+        assert_eq!(format, 0, "mono1-vertical attendu");
+        let r = [u16_at(o + 6), u16_at(o + 8), u16_at(o + 10), u16_at(o + 12)];
+        let len = u32::from_le_bytes([msg[o + 14], msg[o + 15], msg[o + 16], msg[o + 17]]) as usize;
+        let data = &msg[o + 18..o + 18 + len];
+        o += 18 + len;
+        let (x, y, w, h) = (r[0] as usize, r[1] as usize, r[2] as usize, r[3] as usize);
+        for page in 0..h / 8 {
+            for col in 0..w {
+                image[(y / 8 + page) * 128 + x + col] = data[page * w + col];
+            }
+        }
+        seen.push((id, reset, r));
+    }
+}
+
+/// Phase 3, étape 3 : écran SSD1306 (tests/oled-hello). Le firmware attend que
+/// l'écran réponde, l'initialise et envoie une image toutes les 100 ms ; le
+/// cœur transmet la zone modifiée en binaire, l'écran se déclare allumé, et
+/// l'image reconstituée porte « Prebench » à l'endroit (A1 + C8).
+#[test]
+fn oled_hello_frames() {
+    let dir = repo_root().join("tests").join("oled-hello");
+    let (_app, sim, rec) = start_project(&dir);
+    let mut image = vec![0u8; 128 * 8];
+    let mut seen = Vec::new();
+    let mut out = String::new();
+    let mut lit = false;
+    rec.wait(|name, v| {
+        match name {
+            "sim:uart" if v["id"] == 2 => {
+                if let Some(a) = v["data"].as_array() {
+                    out.extend(a.iter().filter_map(|b| b.as_u64().map(|x| x as u8 as char)));
+                }
+            }
+            "sim:test-displays" => {
+                let msg: Vec<u8> = serde_json::from_value(v.clone()).expect("octets");
+                apply_displays(&msg, &mut image, &mut seen);
+            }
+            "sim:states" => lit |= v["oled1"]["lit"] == true,
+            _ => {}
+        }
+        out.contains("image:10") && lit
+    });
+    assert!(out.contains("oled pret"), "{out}");
+    // Premier envoi : écran neuf, tout l'écran.
+    let first = seen.first().expect("au moins un envoi");
+    assert_eq!(
+        (first.0.as_str(), first.1, first.2),
+        ("oled1", true, [0, 0, 128, 64])
+    );
+    // « P » de « Prebench » en x = 40, page 0 : colonne 0x7F (lignes 0 à 6).
+    assert_eq!(image[40], 0x7F, "colonne du P : {:#04X}", image[40]);
+    assert_eq!(image[41], 0x09);
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Exactitude des délais (section 5.5), firmware lancé comme dans l'app, en
+/// priorité basse : 100 HAL_Delay(10) durent environ 1 s. Sur macOS, la QoS
+/// « utility » regroupait les minuteries (≈ 3,4 s) ; libvmcu dort désormais
+/// sur une minuterie kqueue NOTE_CRITICAL. Le firmware en priorité basse peut
+/// attendre le processeur quand toute la suite de tests tourne en parallèle
+/// (une série jusqu'à 2 s) : la meilleure des trois séries juge l'exactitude
+/// des minuteries (au plus 1,25 s), chacune reste sous 2,5 s ; le défaut
+/// corrigé donnait au moins 3,4 s par série.
+#[test]
+fn delay_accuracy_at_low_priority() {
+    let dir = repo_root().join("tests").join("delay-accuracy");
+    let (_app, sim, rec) = start_project(&dir);
+    let mut out = String::new();
+    rec.wait(|name, v| {
+        if name == "sim:uart" && v["id"] == 2 {
+            if let Some(a) = v["data"].as_array() {
+                out.extend(a.iter().filter_map(|b| b.as_u64().map(|x| x as u8 as char)));
+            }
+        }
+        out.matches("delai:").count() >= 3 && out.ends_with('\n')
+    });
+    let series: Vec<u64> = out
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("delai:")?.parse().ok())
+        .collect();
+    println!("100 × HAL_Delay(10) : {series:?} ms");
+    assert_eq!(series.len(), 3, "{out}");
+    let best = series.iter().copied().min().unwrap_or(0);
+    assert!(
+        (990..=1250).contains(&best),
+        "meilleure série de 100 × HAL_Delay(10) en {best} ms (≈ 1 000 attendu) : {series:?}"
+    );
+    assert!(
+        series.iter().all(|&ms| ms < 2500),
+        "série trop longue (minuteries regroupées ?) : {series:?}"
+    );
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Phase 3, étape 5 : MPU6050 (tests/mpu-tilt). WHO_AM_I, réveil, lecture
+/// groupée depuis 0x3B : à plat, 1 g sur z et 22 °C (environnement par
+/// défaut) ; roulis de 90° dans le panneau Environnement : la gravité passe
+/// sur y.
+#[test]
+fn mpu_tilt_follows_environment() {
+    let dir = repo_root().join("tests").join("mpu-tilt");
+    let (_app, sim, rec) = start_project(&dir);
+    let out = std::cell::RefCell::new(String::new());
+    let collect = |name: &str, v: &Value| {
+        if name == "sim:uart" && v["id"] == 2 {
+            if let Some(a) = v["data"].as_array() {
+                out.borrow_mut()
+                    .extend(a.iter().filter_map(|b| b.as_u64().map(|x| x as u8 as char)));
+            }
+        }
+    };
+    // Dernière ligne complète du traceur, en (clé, valeur).
+    let last = |text: &str| -> Option<std::collections::HashMap<String, f64>> {
+        let line = text.lines().rev().skip(1).find(|l| l.starts_with("ax:"))?;
+        Some(
+            line.trim()
+                .split(',')
+                .filter_map(|kv| {
+                    let (k, v) = kv.split_once(':')?;
+                    Some((k.to_string(), v.parse().ok()?))
+                })
+                .collect(),
+        )
+    };
+    rec.wait(|name, v| {
+        collect(name, v);
+        out.borrow().matches("ax:").count() >= 3
+    });
+    assert!(out.borrow().contains("WHO_AM_I = 0x68"), "{}", out.borrow());
+    let flat = last(&out.borrow()).expect("ligne de mesure");
+    assert!((flat["az"] - 1000.0).abs() <= 2.0, "à plat : {flat:?}");
+    assert!(
+        flat["ay"].abs() <= 2.0 && flat["ax"].abs() <= 2.0,
+        "{flat:?}"
+    );
+    assert!((flat["temp"] - 22.0).abs() <= 0.2, "{flat:?}");
+
+    let tilted = crate::core::environment::Environment {
+        tilt_deg: crate::core::environment::Tilt {
+            roll: 90.0,
+            pitch: 0.0,
+        },
+        ..Default::default()
+    }
+    .settle();
+    sim.tx
+        .try_send(SimMsg::Environment(tilted))
+        .expect("environnement");
+    out.borrow_mut().clear();
+    rec.wait(|name, v| {
+        collect(name, v);
+        last(&out.borrow()).is_some_and(|m| m["ay"] >= 998.0)
+    });
+    let m = last(&out.borrow()).expect("ligne de mesure");
+    assert!(m["az"].abs() <= 2.0, "roulis 90° : {m:?}");
     let _ = sim.tx.try_send(SimMsg::Stop);
 }
 
@@ -1010,10 +1237,12 @@ fn object_names(dir: &Path, out: &mut Vec<String>) {
     }
 }
 
-/// Critère de passage : le projet STM32CubeMX généré (chaîne CMake), non
-/// modifié, est reconnu par son CMakeLists.txt et compilé via libvmcu/sim ;
+/// Critère de passage : le projet STM32CubeMX de référence (chaîne CMake,
+/// configuration par défaut + I2C1, code ajouté dans les sections USER CODE)
+/// est reconnu par son CMakeLists.txt et compilé via libvmcu/sim ;
 /// system_stm32f4xx.c, syscalls.c et sysmem.c sont exclus, le startup .s et le
-/// .ld ignorés ; l'initialisation va jusqu'à USART2, simulée (115 200 bauds).
+/// .ld ignorés ; l'initialisation va jusqu'à USART2, simulée (115 200 bauds),
+/// et la lecture Mem_Read_IT du joker de prebench.toml s'affiche sur USART2.
 #[test]
 fn cubemx_generated_project() {
     let dir = repo_root().join("tests").join("cubemx-nucleo-f401re");
@@ -1061,10 +1290,26 @@ fn cubemx_generated_project() {
         );
     }
 
-    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    // Sortie de USART2 relevée dans toutes les attentes : chaque attente
+    // consomme les événements qu'elle ignore, et la ligne I2C peut arriver
+    // avant l'un des événements attendus ci-dessous.
+    let out = std::cell::RefCell::new(String::new());
+    let uart2 = |name: &str, v: &Value| {
+        if name == "sim:uart" && v["id"] == 2 {
+            if let Some(a) = v["data"].as_array() {
+                out.borrow_mut()
+                    .extend(a.iter().filter_map(|b| b.as_u64().map(|x| x as u8 as char)));
+            }
+        }
+    };
+    rec.wait(|name, v| {
+        uart2(name, v);
+        name == "sim:status" && v["state"] == "running"
+    });
     // USART2 simulée (étape 6) : débit annoncé, aucun « HAL_UART_Init non simulé ».
     let mut warned = false;
     rec.wait(|name, v| {
+        uart2(name, v);
         if name == "sim:warn"
             && v["text"]
                 .as_str()
@@ -1076,9 +1321,20 @@ fn cubemx_generated_project() {
     });
     assert!(!warned, "HAL_UART_Init encore signalé non simulé");
     // Inspecteur : PA2 en fonction alternative AF7, nommée par la carte.
-    let (_, pins) = rec.wait(|name, v| name == "sim:pins" && v["PA2"].is_object());
+    let (_, pins) = rec.wait(|name, v| {
+        uart2(name, v);
+        name == "sim:pins" && v["PA2"].is_object()
+    });
     assert_eq!(pins["PA2"]["mode"], 3, "{pins}");
     assert_eq!(pins["PA2"]["function"], "uart2:TX", "{pins}");
+    // I2C1 simulé : Mem_Read_IT du registre 0x00 du joker, callback, USART2.
+    const LINE: &str = "I2C 0x50 reg 0x00 = 0x2A";
+    if !out.borrow().contains(LINE) {
+        rec.wait(|name, v| {
+            uart2(name, v);
+            out.borrow().contains(LINE)
+        });
+    }
     let _ = sim.tx.try_send(SimMsg::Stop);
 }
 
@@ -1108,7 +1364,17 @@ fn budget_core_profile() {
         value_json: "0.6".into(),
     });
     let warm = Instant::now() + Duration::from_secs(3);
-    rec.wait(|_, _| Instant::now() >= warm);
+    // États reçus pendant la mise en route : le flux enregistré commence par
+    // eux, sinon un état émis une seule fois (écran allumé) manquerait au rejeu.
+    let mut initial = serde_json::Map::new();
+    rec.wait(|name, v| {
+        if name == "sim:states" {
+            if let Some(o) = v.as_object() {
+                initial.extend(o.clone());
+            }
+        }
+        Instant::now() >= warm
+    });
     // PREBENCH_BUDGET_HIDDEN=1 : fenêtre réduite (aucune image), flux non enregistré.
     let hidden = std::env::var("PREBENCH_BUDGET_HIDDEN").is_ok_and(|v| v == "1");
     if hidden {
@@ -1122,8 +1388,19 @@ fn budget_core_profile() {
     let t0 = Instant::now();
     let end = t0 + Duration::from_secs(SECONDS);
     let mut stats: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
-    let mut log = Vec::new();
+    let mut log = vec![serde_json::json!({ "t": 0, "name": "sim:states", "payload": initial })];
+    // PREBENCH_BUDGET_LIGHT=1 : ni statistiques ni enregistrement, pour
+    // mesurer le cœur sans le travail du faux client (sérialisation du flux).
+    let light = std::env::var("PREBENCH_BUDGET_LIGHT").is_ok_and(|v| v == "1");
     rec.wait(|name, v| {
+        if light {
+            if name == "sim:usage" {
+                let ms = v["cpu_time_ms"].as_u64().unwrap_or(0);
+                fw0.get_or_insert(ms);
+                fw1 = ms;
+            }
+            return Instant::now() >= end;
+        }
         let text = v.to_string();
         let s = stats.entry(name.to_string()).or_default();
         s.0 += 1;
@@ -1133,8 +1410,14 @@ fn budget_core_profile() {
             fw0.get_or_insert(ms);
             fw1 = ms;
         }
-        if !name.starts_with("sim:test-") && name != "sim:usage" {
-            log.push(serde_json::json!({ "t": t0.elapsed().as_millis() as u64, "name": name, "payload": v }));
+        // Écrans : message binaire (canal display_channel), rejoué tel quel.
+        let logged = match name {
+            "sim:test-displays" => Some("sim:display"),
+            n if n.starts_with("sim:test-") || n == "sim:usage" => None,
+            n => Some(n),
+        };
+        if let Some(n) = logged {
+            log.push(serde_json::json!({ "t": t0.elapsed().as_millis() as u64, "name": n, "payload": v }));
         }
         Instant::now() >= end
     });
@@ -1150,7 +1433,7 @@ fn budget_core_profile() {
             *bytes as f64 / wall
         );
     }
-    if hidden {
+    if hidden || light {
         let _ = sim.tx.try_send(SimMsg::Stop);
         return;
     }

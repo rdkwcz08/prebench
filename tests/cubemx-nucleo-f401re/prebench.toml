@@ -1,0 +1,32 @@
+#:schema ../../docs/prebench.schema.json
+# Projet STM32CubeMX de référence (configuration par défaut + I2C1), compilé
+# tel quel par la cible « sim ». Le code ajouté est dans les sections USER CODE
+# de Core/Src/main.c : lecture du registre 0x00 du composant en 0x50 par
+# HAL_I2C_Mem_Read_IT, affichée sur USART2 (« I2C 0x50 reg 0x00 = 0x2A »).
+# joker1 : périphérique I2C générique sur I2C1 (D15 = PB8 SCL, D14 = PB9 SDA).
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[[components]]
+id = "joker1"
+type = "joker-i2c"
+pos = [408, 96]
+params = { address = 80, registers = [{ reg = 0, value = 42, mode = "fixed" }] }
+
+[[wires]]
+from = "joker1.VCC"
+to = "board.CN6:4"
+
+[[wires]]
+from = "joker1.GND"
+to = "board.CN6:6"
+
+[[wires]]
+from = "joker1.SCL"
+to = "board.CN5:10"
+
+[[wires]]
+from = "joker1.SDA"
+to = "board.CN5:9"

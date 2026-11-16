@@ -14,7 +14,11 @@
 # compilé à la volée (cc, fourni par les outils en ligne de commande Xcode,
 # prérequis de Prebench). Le firmware est un enfant de l'app
 # (run/firmware-<horodatage>) ; un firmware lancé par le débogueur est
-# reconnu par son nom. Fonctionne avec l'app installée comme avec un build local.
+# reconnu par son nom. App lancée depuis un terminal (build de dev) : le
+# responsable de ses processus WebKit est le terminal ; on garde alors ceux
+# du même responsable que l'app, lancés après elle (comme app/tests-ui/wk/banc.sh).
+# Si les processus WebKit ou le firmware manquent, le script le dit et marque
+# le total « incomplet » au lieu d'afficher un total trompeur.
 # CPU : temps CPU consommé pendant la mesure ÷ durée, en % d'un cœur
 # (indépendant de la fréquence d'échantillonnage). RAM : empreinte physique
 # (footprint, comme le Moniteur d'activité), relevée à la fin.
@@ -49,18 +53,44 @@ if ! cc -o "$work/resp" "$work/resp.c" 2>/dev/null; then
     exit 1
 fi
 
+# Heure de lancement d'un processus, en secondes depuis l'époque.
+started() { date -j -f "%a %b %d %T %Y" "$(ps -o lstart= -p "$1" | xargs)" +%s 2>/dev/null || echo 0; }
+
 pids="$app"
+n_webkit=0
+n_firmware=0
 webkit=$(pgrep -f 'com.apple.WebKit' || true)
 if [ -n "$webkit" ]; then
     # shellcheck disable=SC2086
     for p in $("$work/resp" $webkit | awk -v app="$app" '$2 == app { print $1 }'); do
         pids="$pids $p"
+        n_webkit=$((n_webkit + 1))
     done
+    if [ "$n_webkit" -eq 0 ]; then
+        # App lancée depuis un terminal : même responsable que l'app, lancés après elle.
+        resp_app=$("$work/resp" "$app" | awk '{ print $2 }')
+        app_start=$(started "$app")
+        # shellcheck disable=SC2086
+        for p in $("$work/resp" $webkit | awk -v r="$resp_app" '$2 == r { print $1 }'); do
+            if [ "$(started "$p")" -ge "$app_start" ]; then
+                pids="$pids $p"
+                n_webkit=$((n_webkit + 1))
+            fi
+        done
+    fi
 fi
 for p in $(pgrep -P "$app" || true) $(pgrep '^firmware' || true); do
     case " $pids " in *" $p "*) continue ;; esac
-    case "$(ps -o comm= -p "$p" | sed 's|.*/||')" in firmware*) pids="$pids $p" ;; esac
+    case "$(ps -o comm= -p "$p" | sed 's|.*/||')" in firmware*) pids="$pids $p"; n_firmware=$((n_firmware + 1)) ;; esac
 done
+incomplete=""
+if [ "$n_webkit" -eq 0 ]; then
+    echo "Avertissement : aucun processus WebKit de Prebench trouvé ; l'interface (contenu, GPU) n'est pas comptée." >&2
+    incomplete=" (incomplet : sans WebKit)"
+fi
+if [ "$n_firmware" -eq 0 ]; then
+    echo "Avertissement : aucun firmware en cours ; mesure « app ouverte, pas de simulation » seulement." >&2
+fi
 
 # Temps CPU cumulé d'un processus, en centièmes de seconde (ps : [[h:]m:]s.cc).
 cputime() {
@@ -92,5 +122,5 @@ for p in $pids; do
     total_cpu=$(echo "$total_cpu ${cpu:-0}" | awk '{ print $1 + $2 }')
     total_mem=$(echo "$total_mem ${mem:-0}" | awk '{ print $1 + $2 }')
 done
-printf "%-45s %8s %10s\n" "Total" "$total_cpu" "$total_mem"
+printf "%-45s %8s %10s\n" "Total$incomplete" "$total_cpu" "$total_mem"
 echo "Mesure sur ${DURATION} s ; CPU en % d'un cœur."

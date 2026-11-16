@@ -42,6 +42,9 @@ test('mode Édition / Simulation : contrôle segmenté et touche E', async ({ be
 test('ajout, déplacement aimanté au pas de 24, annuler et rétablir', async ({ bench }) => {
   const { page } = bench;
   await addLed(bench);
+  // Zoom 100 %, une fois le projet chargé et cadré : le cadrage dépend du
+  // nombre de composants fournis, et le glissé ci-dessous se mesure en pixels.
+  await page.keyboard.press('ControlOrMeta+1');
   await expect(page.getByRole('button', { name: 'Édition' })).toHaveAttribute('aria-pressed', 'true');
   let saved = await lastSave(bench);
   const led = saved.components.find((c) => c.id === 'led1');

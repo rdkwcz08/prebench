@@ -104,10 +104,24 @@ pub struct Network {
     states: HashMap<Node, NetState>, // par racine de net
     /// Tension logique de la carte : seuils de lecture d'une tension (70 % et 30 %).
     logic_volts: Option<f64>,
+    /// Racine du net de chaque nœud, et membres de chaque net (par racine) :
+    /// reconstruits quand le câblage change (nœud nouveau, liaison), pour que
+    /// chaque écriture de broche ne recalcule que son net (section 11.1).
+    root_of: HashMap<Node, Node>,
+    members_of: HashMap<Node, Vec<Node>>,
 }
 
 impl Network {
+    /// Racine du net d'un nœud (lui-même s'il est inconnu).
     fn find(&self, node: &Node) -> Node {
+        self.root_of
+            .get(node)
+            .cloned()
+            .unwrap_or_else(|| node.clone())
+    }
+
+    /// Racine en suivant les liaisons (reconstruction des index seulement).
+    fn walk(&self, node: &Node) -> Node {
         let mut cur = node.clone();
         while let Some(p) = self.parent.get(&cur) {
             if *p == cur {
@@ -126,7 +140,30 @@ impl Network {
     }
 
     pub fn add_node(&mut self, node: Node) {
-        self.parent.entry(node.clone()).or_insert(node);
+        if !self.parent.contains_key(&node) {
+            self.parent.insert(node.clone(), node.clone());
+            self.root_of.insert(node.clone(), node.clone());
+            self.members_of.insert(node.clone(), vec![node]);
+        }
+    }
+
+    /// Index des racines et des membres, après un changement de câblage.
+    fn reindex(&mut self) {
+        self.root_of = self
+            .parent
+            .keys()
+            .map(|n| (n.clone(), self.walk(n)))
+            .collect();
+        self.members_of.clear();
+        for (node, root) in &self.root_of {
+            self.members_of
+                .entry(root.clone())
+                .or_default()
+                .push(node.clone());
+        }
+        for members in self.members_of.values_mut() {
+            members.sort();
+        }
     }
 
     /// Relie deux nœuds (câble).
@@ -137,17 +174,19 @@ impl Network {
         let rb = self.find(&b);
         if ra != rb {
             self.parent.insert(ra, rb);
+            self.reindex();
         }
     }
 
     /// Nœuds du même net.
     pub fn members(&self, node: &Node) -> Vec<Node> {
-        let root = self.find(node);
-        self.parent
-            .keys()
-            .filter(|n| self.find(n) == root)
+        if !self.parent.contains_key(node) {
+            return Vec::new();
+        }
+        self.members_of
+            .get(&self.find(node))
             .cloned()
-            .collect()
+            .unwrap_or_default()
     }
 
     pub fn level(&self, node: &Node) -> Level {
@@ -243,12 +282,7 @@ impl Network {
     }
 
     fn compute(&self, root: &Node) -> NetState {
-        let members: Vec<Node> = self
-            .parent
-            .keys()
-            .filter(|n| self.find(n) == *root)
-            .cloned()
-            .collect();
+        let members: &[Node] = self.members_of.get(root).map_or(&[], Vec::as_slice);
         let (mut high, mut low, mut up, mut down) = (false, false, false, false);
         let mut pwm = None;
         for ((node, _), drive) in &self.drives {
@@ -276,8 +310,8 @@ impl Network {
         }
         let level = match (high, low, up, down) {
             // Tension imposée par un composant, sans sortie numérique : seuils logiques.
-            (false, false, _, _) if self.component_volts(&members).is_some() => {
-                let v = self.component_volts(&members).unwrap_or(0.0);
+            (false, false, _, _) if self.component_volts(members).is_some() => {
+                let v = self.component_volts(members).unwrap_or(0.0);
                 match self.logic_volts {
                     Some(l) if v >= 0.7 * l => Level::High,
                     Some(l) if v <= 0.3 * l => Level::Low,

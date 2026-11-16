@@ -1,5 +1,6 @@
 /*
- * libvmcu/include/vmcu.h — API publique de libvmcu, contrat v1.0
+ * libvmcu/include/vmcu.h — API publique de libvmcu, contrat v1 (mineure : voir
+ * VMCU_API_VERSION_MINOR)
  *
  * libvmcu est la bibliothèque C liée au firmware compilé pour l'ordinateur
  * (build « sim »). Les shims (STM32 HAL, ESP-IDF, Arduino, bibliothèques
@@ -45,9 +46,13 @@ extern "C" {
 
 /** Version de cette API C. Majeure : rupture ; mineure : ajouts compatibles. */
 #define VMCU_API_VERSION_MAJOR 1
-#define VMCU_API_VERSION_MINOR 1
+#define VMCU_API_VERSION_MINOR 2
 
-/** Version du protocole firmware <-> app implémentée (docs/protocol.md). */
+/**
+ * Version du protocole firmware <-> app implémentée (docs/protocol.md). La
+ * version 1.2 (LED_STRIP) est figée mais pas encore implémentée : elle passera
+ * ici avec vmcu_led_strip_show (phase 3, étape 8).
+ */
 #define VMCU_PROTOCOL_VERSION_MAJOR 1
 #define VMCU_PROTOCOL_VERSION_MINOR 1
 
@@ -369,6 +374,39 @@ vmcu_status_t vmcu_spi_config(uint8_t bus, vmcu_spi_mode_t mode, uint32_t freq_h
 vmcu_status_t vmcu_spi_xfer(uint8_t bus, uint8_t cs_port, uint8_t cs_pin,
                             const uint8_t *tx, uint8_t *rx, size_t len,
                             uint32_t timeout_ms);
+
+/* ------------------------------------------------------------------------- */
+/* LED adressables (WS2812, SK6812) — API 1.2, protocole 1.2                 */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Le signal d'un ruban dépend d'un timing de l'ordre de 0,4 µs : il n'est pas
+ * simulé (section 5.4). Le shim qui pilote le ruban (décodage du tampon DMA de
+ * HAL_TIM_PWM_Start_DMA, puis NeoPixel et led_strip en phase 4) envoie les
+ * octets d'une trame entière, dans l'ordre d'émission sur le fil (GRB pour un
+ * WS2812, GRBW pour un SK6812) : c'est le composant qui connaît l'ordre de ses
+ * couleurs. Le cœur remet les octets aux composants dont l'entrée de données
+ * (interface « led-strip » du manifeste) est sur le net de la broche.
+ *
+ * Message asynchrone, groupé dans le lot courant. Tant qu'une trame de la même
+ * ligne attend dans le lot, la nouvelle la remplace ; une trame identique à la
+ * précédente n'est pas renvoyée. Si l'app ne connaît que le protocole 1.1 :
+ * VMCU_ERR_UNSUPPORTED et un avertissement.
+ */
+
+/** Octets max par trame (1365 LED RGB, 1024 LED RGBW). */
+#define VMCU_LED_STRIP_MAX_BYTES 4096u
+
+/** Trame émise sur une broche désignée (ESP32, bibliothèques). */
+vmcu_status_t vmcu_led_strip_show(uint8_t port, uint8_t pin,
+                                  const uint8_t *data, size_t len);
+
+/**
+ * Trame émise par une sortie PWM (STM32 : unité = timer, canal = 1..4) ; le
+ * cœur retrouve la broche comme pour la PWM (caps et fonction alternative).
+ */
+vmcu_status_t vmcu_led_strip_show_pwm(uint8_t unit, uint8_t channel,
+                                      const uint8_t *data, size_t len);
 
 /* ------------------------------------------------------------------------- */
 /* Canal flux — mémoire partagée (D12, section 6.2)                          */

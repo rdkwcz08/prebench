@@ -38,6 +38,10 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.platform }}
+    # Le fichier vit aussi dans prebench-dev (privé), où le tag déclenche ce
+    # workflow sans la clé de signature de l'updater : il ne tourne que dans
+    # le dépôt public.
+    if: github.repository == 'rdkwcz08/prebench'
     strategy:
       fail-fast: true
       matrix:
@@ -260,6 +264,7 @@ jobs:
   publish:
     name: GitHub Release
     needs: build
+    if: github.repository == 'rdkwcz08/prebench'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

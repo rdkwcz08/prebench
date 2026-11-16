@@ -5,7 +5,7 @@
 // contrôles (component_control). Fenêtre masquée : la simulation continue,
 // seul le rendu est suspendu (requestAnimationFrame, section 11.3).
 
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type {
   BuildResultEvent,
@@ -26,10 +26,11 @@ import type {
   UsageEvent,
   WarnEvent,
 } from './types';
+import { displays } from './displays.svelte';
 import { BOARD_ORIGIN } from './geometry';
 import { serial } from './serial.svelte';
 import { settings } from './settings.svelte';
-import type { Check, Level, Note, PinConfig, PlacedComponent, SaveView, Wire } from './types';
+import type { Check, Level, Note, PinConfig, PlacedComponent, SaveView, TableRow, Wire } from './types';
 
 /** États d'une session de simulation : le cœur envoie états, nets et broches. */
 const SESSION: SimState[] = ['starting', 'running', 'paused', 'breakpoint', 'off'];
@@ -173,6 +174,10 @@ export class Bench {
     });
     // Une image du cœur (section 11.3) : états, niveaux, broches modifiées ;
     // les octets UART sont pris par le moniteur série (serial.svelte.ts).
+    // Images des écrans (OLED, TFT) : canal binaire, jamais d'événement JSON.
+    const screens = new Channel<ArrayBuffer>();
+    screens.onmessage = (buffer) => displays.receive(buffer);
+    await invoke('display_channel', { channel: screens });
     await listen<FrameEvent>('sim:frame', (e) => {
       const f = e.payload;
       if (f.states) Object.assign(this.frameStates, f.states);
@@ -435,7 +440,7 @@ export class Bench {
   }
 
   /** Modifie un paramètre d'un composant placé ; transmis au modèle en cours (onParamsChange). */
-  async setParam(id: string, key: string, value: string | number | boolean): Promise<void> {
+  async setParam(id: string, key: string, value: string | number | boolean | TableRow[]): Promise<void> {
     const inst = this.instances.find((i) => i.id === id);
     if (inst === undefined || inst.onboard || inst.params[key] === value) return;
     const before = this.snapshot();

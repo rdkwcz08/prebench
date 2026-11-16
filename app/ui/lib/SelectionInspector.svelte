@@ -16,9 +16,10 @@
 <script lang="ts">
   import { bench } from './bench.svelte';
   import { boardPads, defaultColor, LEVEL_TONE, LEVEL_WORD, WIRE_HEX, WIRE_LABEL } from './geometry';
-  import { adcRaw, frequency, fr, millis, percent, volts } from './format';
+  import { adcRaw, frequency, fr, hex, millis, parseInteger, percent, volts } from './format';
   import { memberLabel, Netlist, netKey } from './netlist';
-  import type { Level, ParamDef, WireColor } from './types';
+  import ParamTable from './ParamTable.svelte';
+  import type { Level, ParamDef, TableRow, WireColor } from './types';
   import Button from './ui/Button.svelte';
   import PropList, { type Prop } from './ui/PropList.svelte';
 
@@ -60,6 +61,12 @@
     r: 'Rouge',
     g: 'Vert',
     b: 'Bleu',
+    address: 'Adresse I2C',
+    pointer: 'Registre pointé',
+    sliders: 'Curseurs',
+    awake: 'En marche',
+    accel_range_g: "Plage de l'accéléromètre",
+    gyro_range_dps: 'Plage du gyroscope',
   };
   /** Valeurs de mots (paramètres enum, statut d'un modèle) en français. */
   const VALUE_WORD: Record<string, string> = {
@@ -78,12 +85,22 @@
     'out-of-range': 'Hors plage',
     'no-signal': 'Sans signal PWM',
     unpowered: 'Non alimenté',
+    fixed: 'Valeur fixe',
+    slider: 'Curseur',
   };
 
   /** Valeur d'état d'un modèle, en texte, selon sa clé. */
   function modelValue(key: string, v: unknown): string {
     if (v === null) return key === 'volts' ? 'Sans tension' : 'Aucun';
+    if (key === 'sliders' && Array.isArray(v)) {
+      // Joker I2C : « 0x3B = 0x80, 0x3C = 0x10 ».
+      const list = (v as { reg: number; value: number }[]).map((s) => `${hex(s.reg)} = ${hex(s.value)}`);
+      return list.join(', ') || 'Aucun';
+    }
     if (typeof v === 'number') {
+      if (key === 'address' || key === 'pointer') return hex(v);
+      if (key === 'accel_range_g') return `±${fr(v)} g`;
+      if (key === 'gyro_range_dps') return `±${fr(v)} °/s`;
       if (['brightness', 'position', 'r', 'g', 'b'].includes(key)) return percent(v);
       if (key === 'angle') return `${fr(v, 1)}°`;
       if (key === 'pulse_ms') return millis(v);
@@ -296,9 +313,11 @@
       ...Object.entries(inst.params).map(([k, v]) => {
         const def = manifest?.params?.[k];
         const word = typeof v === 'string' ? VALUE_WORD[v] : undefined;
+        if (Array.isArray(v)) return { label: def?.label ?? k, value: v.length > 1 ? `${v.length} lignes` : `${v.length} ligne` };
+        const text = typeof v === 'number' && def?.display === 'hex' ? hex(v) : stateValue(v);
         return {
           label: def?.label ?? k,
-          value: word ?? `${stateValue(v)}${def?.unit ? ` ${def.unit}` : ''}`,
+          value: word ?? `${text}${def?.unit ? ` ${def.unit}` : ''}`,
           data: word === undefined,
         };
       }),
@@ -427,6 +446,17 @@
       <div class="params">
         {#each paramDefs as [key, def] (key)}
           {@const value = comp.params[key] ?? def.default}
+          {#if def.type === 'table'}
+            <div class="field">
+              <span>{def.label ?? key}</span>
+              <ParamTable
+                {def}
+                rows={Array.isArray(value) ? (value as TableRow[]) : []}
+                words={VALUE_WORD}
+                onchange={(rows) => void bench.setParam(id, key, rows)}
+              />
+            </div>
+          {:else}
           <label class="field">
             <span>{def.label ?? key}{def.unit ? ` (${def.unit})` : ''}</span>
             {#if def.type === 'enum'}
@@ -449,6 +479,19 @@
                 class="check"
                 checked={value === true}
                 onchange={(e) => void bench.setParam(id, key, e.currentTarget.checked)}
+              />
+            {:else if def.type === 'integer' && def.display === 'hex'}
+              <input
+                class="data"
+                inputmode="text"
+                value={hex(Number(value))}
+                onkeydown={(e) => commitOnKey(e, () => ((e.currentTarget as HTMLInputElement).value = hex(Number(value))))}
+                onchange={(e) => {
+                  const n = parseInteger(e.currentTarget.value, true);
+                  const ok = Number.isFinite(n) && (def.min === undefined || n >= def.min) && (def.max === undefined || n <= def.max);
+                  if (ok) void bench.setParam(id, key, n);
+                  else e.currentTarget.value = hex(Number(value));
+                }}
               />
             {:else if def.type === 'integer' || def.type === 'number'}
               <input
@@ -474,6 +517,7 @@
               />
             {/if}
           </label>
+          {/if}
         {/each}
       </div>
     </section>

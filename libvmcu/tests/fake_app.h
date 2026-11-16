@@ -36,6 +36,10 @@ void fake_app_run(fake_app_t *fa);
 /** Présence d'un composant d'écho (PING cible Worker). */
 void fake_app_set_echo(fake_app_t *fa, bool present);
 
+/** Esclave I2C à registres à l'adresse 7 bits addr7 (0 : aucun, tout est NACK). */
+void fake_app_set_i2c_device(fake_app_t *fa, uint8_t addr7);
+void fake_app_set_i2c_reg(fake_app_t *fa, uint8_t reg, uint8_t value);
+
 void fake_app_send_gpio_input(fake_app_t *fa, uint8_t port, uint8_t pin, uint8_t level);
 void fake_app_send_empty(fake_app_t *fa, uint16_t type); /* PAUSE, RESUME… */
 /** Valeur brute d'un canal ADC (ADC_VALUE). */

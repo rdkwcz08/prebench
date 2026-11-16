@@ -1,0 +1,33 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "mpu6050",
+  "version": "1.0.0",
+  "name": "Accéléromètre et gyroscope MPU6050",
+  "description": "Centrale inertielle I2C 6 axes (module GY-521). L'accélération (gravité selon l'inclinaison) et la température viennent du panneau Environnement ; le gyroscope lit la vitesse de rotation pendant qu'on change l'inclinaison, 0 au repos. Registres simulés : WHO_AM_I (0x68), PWR_MGMT_1 (veille au reset, réveil, reset), ACCEL_CONFIG et GYRO_CONFIG (plages ±2 à ±16 g, ±250 à ±2000 °/s), mesures de 0x3B à 0x48, INT_STATUS. Filtres, FIFO, interruptions et DMP : non simulés.",
+  "category": "sensor",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 96, "height": 72 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "VCC", "label": "Alimentation", "role": "power", "x": 12, "y": 72 },
+    { "name": "GND", "label": "Masse", "role": "ground", "x": 36, "y": 72 },
+    { "name": "SCL", "label": "Horloge I2C", "role": "open-drain", "x": 60, "y": 72 },
+    { "name": "SDA", "label": "Données I2C", "role": "open-drain", "x": 84, "y": 72 }
+  ],
+  "interfaces": [
+    { "type": "i2c", "sda": "SDA", "scl": "SCL", "address": { "param": "address" } }
+  ],
+  "params": {
+    "address": {
+      "type": "integer",
+      "label": "Adresse I2C (AD0)",
+      "default": 104,
+      "min": 104,
+      "max": 105,
+      "display": "hex"
+    }
+  },
+  "controls": []
+}

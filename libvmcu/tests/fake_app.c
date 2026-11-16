@@ -29,6 +29,9 @@ struct fake_app {
     uint8_t               initial_adc[MAX_INITIAL][4]; /* unité, canal, valeur LE */
     unsigned              initial_adc_count;
     bool                  echo;
+    uint8_t               i2c_addr;     /* esclave I2C simulé ; 0 : aucun */
+    uint8_t               i2c_mem[256]; /* registres de l'esclave */
+    uint8_t               i2c_ptr;      /* pointeur de registre */
     uint32_t              seq;
     char                  hello_board[64];
     char                  hello_framework[64];
@@ -103,6 +106,38 @@ static void handle_hello(fake_app_t *fa, const vmcu_frame_header_t *h, const uin
     send_frame(fa, VMCU_MSG_WELCOME, VMCU_FLAG_REPLY, h->seq, welcome, sizeof welcome);
 }
 
+/*
+ * I2C_XFER : esclave à registres, comme le joker I2C (écriture [reg, données…],
+ * lecture à partir du pointeur, auto-incrément). Autre adresse : NACK.
+ */
+static void handle_i2c(fake_app_t *fa, const vmcu_frame_header_t *h, const uint8_t *p)
+{
+    uint8_t addr = p[1];
+    uint16_t tx_len = vmcu_wire_get_u16(p + 2);
+    uint16_t rx_len = vmcu_wire_get_u16(p + 4);
+    const uint8_t *tx = p + 8;
+    static uint8_t reply[4 + 4096];
+    size_t n = 4;
+    vmcu_plat_mutex_lock(fa->mx);
+    bool ack = fa->i2c_addr != 0 && addr == fa->i2c_addr;
+    if (ack) {
+        if (tx_len > 0) {
+            fa->i2c_ptr = tx[0];
+            for (uint16_t i = 1; i < tx_len; ++i) {
+                fa->i2c_mem[fa->i2c_ptr++] = tx[i];
+            }
+        }
+        for (uint16_t i = 0; i < rx_len && i < 4096; ++i) {
+            reply[n++] = fa->i2c_mem[fa->i2c_ptr++];
+        }
+    }
+    vmcu_plat_mutex_unlock(fa->mx);
+    reply[0] = ack ? 0 : 1;
+    reply[1] = 0;
+    vmcu_wire_put_u16(reply + 2, (uint16_t)(n - 4));
+    send_frame(fa, VMCU_MSG_I2C_REPLY, VMCU_FLAG_REPLY, h->seq, reply, n);
+}
+
 static void server_main(void *arg)
 {
     fake_app_t *fa = arg;
@@ -140,6 +175,8 @@ static void server_main(void *arg)
 
         if (h.type == VMCU_MSG_HELLO) {
             handle_hello(fa, &h, payload);
+        } else if (h.type == VMCU_MSG_I2C_XFER) {
+            handle_i2c(fa, &h, payload);
         } else if (h.type == VMCU_MSG_PING) {
             uint8_t target = (h.length > 0) ? payload[0] : 0;
             uint8_t pong[8] = { target, (target == 1 && !echo) ? 1 : 0, 0, 0, 0, 0, 0, 0 };
@@ -200,6 +237,20 @@ void fake_app_set_echo(fake_app_t *fa, bool present)
 {
     vmcu_plat_mutex_lock(fa->mx);
     fa->echo = present;
+    vmcu_plat_mutex_unlock(fa->mx);
+}
+
+void fake_app_set_i2c_device(fake_app_t *fa, uint8_t addr7)
+{
+    vmcu_plat_mutex_lock(fa->mx);
+    fa->i2c_addr = addr7;
+    vmcu_plat_mutex_unlock(fa->mx);
+}
+
+void fake_app_set_i2c_reg(fake_app_t *fa, uint8_t reg, uint8_t value)
+{
+    vmcu_plat_mutex_lock(fa->mx);
+    fa->i2c_mem[reg] = value;
     vmcu_plat_mutex_unlock(fa->mx);
 }
 

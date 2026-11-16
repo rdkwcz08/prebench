@@ -6,12 +6,15 @@
 // système (règle 16.2.8). Interface model.ts inchangée (D5).
 //
 // Limites par instance : mémoire 16 Mo, pile 256 Ko, 50 ms pour charger et
-// initialiser le module, 5 ms par appel (onPinChange, onControl, onTick,
-// onPing, getState…). Ces durées sont du temps CPU consommé par le fil
-// « modèles » (platform::thread_cpu_ns), pas du temps écoulé : une machine
-// chargée qui fait attendre le fil n'arrête pas un composant à tort.
-// Dépassement ou exception : le composant passe en défaut, un avertissement ⚠
-// est émis, les autres continuent.
+// initialiser le module ; par appel (onPinChange, onControl, onTick, onI2C,
+// getState…), budget de 5 ms et plafond dur de 50 ms. Ces durées sont du
+// temps CPU consommé par le fil « modèles » (platform::thread_cpu_ns), pas du
+// temps écoulé : une machine chargée qui fait attendre le fil n'arrête pas un
+// composant à tort.
+// Un dépassement isolé du budget (ramasse-miettes, pic de charge) n'est
+// qu'écrit au Journal ; trois dépassements consécutifs, une exception, ou un
+// appel interrompu au plafond dur (boucle infinie) mettent le composant en
+// défaut : un avertissement ⚠ est émis, les autres continuent.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,8 +26,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use rquickjs::loader::{Loader, Resolver};
-use rquickjs::{Context, Ctx, Function, Module, Object, Persistent, Runtime};
+use rquickjs::{
+    Context, Ctx, Exception, Function, Module, Object, Persistent, Runtime, TypedArray,
+};
 
+use super::display::{self, DisplayFormat, Framebuffer};
+use super::js_bytes::{self, Bytes};
 use super::transpile::strip_types;
 use super::ComponentSource;
 use crate::core::net::{Drive, Level, NetState, Pull};
@@ -32,6 +39,10 @@ use crate::core::net::{Drive, Level, NetState, Pull};
 pub const MEMORY_LIMIT: usize = 16 * 1024 * 1024;
 pub const STACK_LIMIT: usize = 256 * 1024;
 pub const CALL_BUDGET: Duration = Duration::from_millis(5);
+/// Plafond dur d'un appel : interruption immédiate (boucle infinie).
+pub const CALL_HARD_LIMIT: Duration = Duration::from_millis(50);
+/// Dépassements consécutifs du budget qui mettent un composant en défaut.
+pub const MAX_OVERRUNS: u32 = 3;
 pub const INIT_BUDGET: Duration = Duration::from_millis(50);
 const COMMAND_QUEUE: usize = 4096;
 
@@ -56,8 +67,19 @@ pub enum ModelCmd {
         id: String,
         seq: u32,
     },
+    /// Transaction I2C adressée au composant `id` (onI2C), réponse I2cReply.
+    I2c {
+        id: String,
+        seq: u32,
+        address: u8,
+        tx: Vec<u8>,
+        rx_len: usize,
+    },
     /// Interrupteur d'alimentation de la paillasse (phase 2, section 10.4).
     Power(bool),
+    /// Grandeurs du panneau environnement (JSON d'Environment), à tous les
+    /// modèles : au démarrage, puis à chaque changement (onEnvironment).
+    Environment(String),
     FlushStates,
     Stop,
 }
@@ -85,8 +107,18 @@ pub enum ModelEvent {
         seq: u32,
         handler_us: u32,
     },
+    /// Réponse à ModelCmd::I2c : statut I2C_REPLY (0 ACK, 1 NACK adresse,
+    /// 2 NACK donnée) et exactement rx_len octets si ACK.
+    I2cReply {
+        seq: u32,
+        status: u8,
+        rx: Vec<u8>,
+    },
     /// Au moins une instance a appelé invalidate() depuis le dernier FlushStates.
     Dirty,
+    /// Zones modifiées des écrans (message « displays », display.rs), juste
+    /// avant States, au plus une fois par image.
+    Displays(Vec<u8>),
     /// (identifiant, état JSON) des instances modifiées.
     States(Vec<(String, String)>),
     Warn(String),
@@ -118,17 +150,33 @@ impl Drop for Models {
     }
 }
 
-/// Démarre le fil « modèles » d'une carte.
+/// Démarre le fil « modèles » d'une carte. Les événements partent au cœur par
+/// lots, dans l'ordre (`emit` reçoit un lot non vide) : un réveil du cœur par
+/// lot plutôt qu'un par événement.
 pub fn spawn(
     specs: Vec<InstanceSpec>,
-    emit: Box<dyn Fn(ModelEvent) + Send>,
+    emit: Box<dyn Fn(Vec<ModelEvent>) + Send>,
 ) -> std::io::Result<Models> {
     let (tx, rx) = mpsc::sync_channel(COMMAND_QUEUE);
     std::thread::Builder::new()
         .name("prebench-modeles".into())
-        .spawn(move || run(specs, &rx, emit.as_ref()))?;
+        .spawn(move || {
+            let batch = RefCell::new(Vec::new());
+            let push = |e: ModelEvent| batch.borrow_mut().push(e);
+            let send = || {
+                let events = std::mem::take(&mut *batch.borrow_mut());
+                if !events.is_empty() {
+                    emit(events);
+                }
+            };
+            run(specs, &rx, &push, &send);
+            send();
+        })?;
     Ok(Models { tx })
 }
+
+/// Commandes traitées au plus avant d'envoyer le lot d'événements (latence bornée).
+const BATCH_COMMANDS: u32 = 64;
 
 // --- Horloges ----------------------------------------------------------------------
 
@@ -150,7 +198,13 @@ fn cpu_ns() -> u64 {
 struct HostState {
     pins: HashMap<String, NetState>,
     out: Vec<ModelEvent>,
+    /// getState à rappeler (invalidate).
     dirty: bool,
+    /// Écran du composant (ctx.createDisplay), hors de la mémoire de QuickJS.
+    display: Option<Framebuffer>,
+    /// Pixels modifiés depuis la dernière image (blit) : image à envoyer,
+    /// sans rappeler getState.
+    display_dirty: bool,
 }
 
 struct Instance {
@@ -162,9 +216,14 @@ struct Instance {
     // Ordre de libération : fonctions, puis contexte, puis runtime.
     dispatch: Persistent<Function<'static>>,
     state_fn: Persistent<Function<'static>>,
+    i2c_fn: Persistent<Function<'static>>,
     context: Context,
     _runtime: Runtime,
     faulted: bool,
+    /// Dépassements consécutifs du budget d'appel (CALL_BUDGET).
+    overruns: u32,
+    /// Réponse I2C de mauvaise longueur déjà signalée (une fois par instance).
+    rx_len_warned: bool,
 }
 
 /// Résout les imports relatifs d'un modèle (fichiers .ts / .js du composant).
@@ -251,6 +310,14 @@ const ctx = Object.freeze({{
   setVoltage: (pin, volts) => h.volts(String(pin), Number(volts)),
   uartWrite: () => h.warn("émission UART d'un composant pas encore simulée"),
   invalidate: () => h.invalidate(),
+  createDisplay: (o) => {{
+    const width = Number(o.width), height = Number(o.height), format = String(o.format);
+    h.createDisplay(width, height, format);
+    return Object.freeze({{
+      width, height, format,
+      blit: (x, y, w, hh, data) => h.blit(Number(x), Number(y), Number(w), Number(hh), data),
+    }});
+  }},
   warn: (m) => h.warn(String(m)),
   log: (m) => h.log(String(m)),
   now: () => h.now(),
@@ -264,9 +331,20 @@ export function dispatch(kind, a, b) {{
     case "tick": model.onTick?.(Number(a)); break;
     case "ping": model.onPing?.(); break;
     case "power": model.onPower?.(a === "1"); break;
+    case "env": model.onEnvironment?.(Object.freeze(JSON.parse(a))); break;
   }}
 }}
 export function state() {{ return JSON.stringify(model.getState()); }}
+export function i2c(address, tx, rxLength) {{
+  if (typeof model.onI2C !== "function") return {{ s: 1 }};
+  const r = model.onI2C(Object.freeze({{ address, tx, rxLength }}));
+  if (r && r.ack === true) {{
+    const rx = r.rx === undefined ? new Uint8Array(0)
+      : r.rx instanceof Uint8Array ? r.rx : Uint8Array.from(r.rx);
+    return {{ s: 0, rx }};
+  }}
+  return {{ s: r && r.nack === "data" ? 2 : 1 }};
+}}
 "#,
         volts = spec.logic_voltage
     )
@@ -281,7 +359,7 @@ fn describe(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
     if let Some(exception) = value.as_exception() {
         let message = exception.message().unwrap_or_default();
         if message.contains("interrupted") {
-            return "temps d'exécution dépassé".into();
+            return "temps d'exécution dépassé (plafond de 50 ms par appel)".into();
         }
         return message;
     }
@@ -359,6 +437,53 @@ fn install_host(
         Function::new(ctx.clone(), move || h.borrow_mut().dirty = true)?,
     )?;
 
+    let h = Rc::clone(host);
+    obj.set(
+        "createDisplay",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>, width: f64, height: f64, format: String| -> rquickjs::Result<()> {
+                let fb = DisplayFormat::parse(&format)
+                    .ok_or(display::DisplayError::UnknownFormat(format))
+                    .and_then(|f| Framebuffer::new(side(width), side(height), f))
+                    .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
+                let mut host = h.borrow_mut();
+                host.display = Some(fb);
+                host.display_dirty = true;
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let h = Rc::clone(host);
+    obj.set(
+        "blit",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>,
+                  x: f64,
+                  y: f64,
+                  w: f64,
+                  hh: f64,
+                  data: TypedArray<'_, u8>|
+                  -> rquickjs::Result<()> {
+                let throw = |m: String| Exception::throw_message(&ctx, &m);
+                let mut host = h.borrow_mut();
+                let fb = host
+                    .display
+                    .as_mut()
+                    .ok_or_else(|| throw("blit avant ctx.createDisplay".into()))?;
+                let (x, y, w, hh) = (x.trunc() as i64, y.trunc() as i64, side(w), side(hh));
+                let need = fb.blit_len(y, w, hh).map_err(|e| throw(e.to_string()))?;
+                let bytes = js_bytes::copy(&data, need).map_err(|e| throw(e.to_string()))?;
+                fb.blit(x, y, w, hh, &bytes.data)
+                    .map_err(|e| throw(e.to_string()))?;
+                host.display_dirty = true;
+                Ok(())
+            },
+        )?,
+    )?;
+
     let (h, owner) = (Rc::clone(host), id.to_string());
     obj.set(
         "warn",
@@ -388,6 +513,16 @@ fn install_host(
         Function::new(ctx.clone(), move || params_json.clone())?,
     )?;
     ctx.globals().set("__host", obj)
+}
+
+/// Côté d'écran ou de rectangle venu de JavaScript : entier positif (NaN,
+/// négatif ou trop grand : 0 ou u32::MAX, refusés ensuite par display.rs).
+fn side(v: f64) -> u32 {
+    if v.is_finite() && v > 0.0 {
+        v.min(f64::from(u32::MAX)) as u32
+    } else {
+        0
+    }
 }
 
 /// PinState de component-api.d.ts, en JSON : niveau, PWM et tension connue.
@@ -441,13 +576,15 @@ impl Instance {
             promise.finish::<()>().map_err(|e| describe(&ctx, e))?;
             let dispatch: Function = module.get("dispatch").map_err(|e| describe(&ctx, e))?;
             let state: Function = module.get("state").map_err(|e| describe(&ctx, e))?;
+            let i2c: Function = module.get("i2c").map_err(|e| describe(&ctx, e))?;
             Ok::<_, String>((
                 Persistent::save(&ctx, dispatch),
                 Persistent::save(&ctx, state),
+                Persistent::save(&ctx, i2c),
             ))
         });
         deadline.store(u64::MAX, Ordering::Relaxed);
-        let (dispatch, state_fn) = loaded?;
+        let (dispatch, state_fn, i2c_fn) = loaded?;
 
         let tick = match spec.source.tick_hz() {
             hz if hz > 0.0 => Some(Duration::from_secs_f64(1.0 / hz.min(60.0))),
@@ -461,10 +598,43 @@ impl Instance {
             deadline,
             dispatch,
             state_fn,
+            i2c_fn,
             context,
             _runtime: runtime,
             faulted: false,
+            overruns: 0,
+            rx_len_warned: false,
         })
+    }
+
+    /// Début d'un appel : échéance au plafond dur ; renvoie le temps CPU de départ.
+    fn begin(&self) -> u64 {
+        let t0 = cpu_ns();
+        self.deadline
+            .store(t0 + CALL_HARD_LIMIT.as_nanos() as u64, Ordering::Relaxed);
+        t0
+    }
+
+    /// Fin d'un appel terminé : compte les dépassements consécutifs du budget.
+    fn end(&mut self, t0: u64, what: &str) -> Result<(), String> {
+        self.deadline.store(u64::MAX, Ordering::Relaxed);
+        let spent = Duration::from_nanos(cpu_ns().saturating_sub(t0));
+        if spent <= CALL_BUDGET {
+            self.overruns = 0;
+            return Ok(());
+        }
+        self.overruns += 1;
+        let ms = spent.as_secs_f64() * 1000.0;
+        if self.overruns >= MAX_OVERRUNS {
+            return Err(self.fault(format!(
+                "{MAX_OVERRUNS} appels de suite au-delà de 5 ms (dernier : {what}, {ms:.1} ms)"
+            )));
+        }
+        self.host.borrow_mut().out.push(ModelEvent::Log(format!(
+            "{} : {what} a pris {ms:.1} ms (budget 5 ms, dépassement {}/{MAX_OVERRUNS})",
+            self.id, self.overruns
+        )));
+        Ok(())
     }
 
     /// Appelle dispatch(kind, a, b) dans le budget de temps.
@@ -472,8 +642,7 @@ impl Instance {
         if self.faulted {
             return Ok(());
         }
-        self.deadline
-            .store(cpu_ns() + CALL_BUDGET.as_nanos() as u64, Ordering::Relaxed);
+        let t0 = self.begin();
         let result = self.context.with(|ctx| {
             let f = self
                 .dispatch
@@ -483,12 +652,22 @@ impl Instance {
             f.call::<_, ()>((kind, a, b)).map_err(|e| describe(&ctx, e))
         });
         self.deadline.store(u64::MAX, Ordering::Relaxed);
-        result.map_err(|e| self.fault(e))
+        result.map_err(|e| self.fault(e))?;
+        let what = match kind {
+            "pin" => "onPinChange",
+            "params" => "onParamsChange",
+            "control" => "onControl",
+            "tick" => "onTick",
+            "ping" => "onPing",
+            "power" => "onPower",
+            "env" => "onEnvironment",
+            other => other,
+        };
+        self.end(t0, what)
     }
 
     fn state(&mut self) -> Result<String, String> {
-        self.deadline
-            .store(cpu_ns() + CALL_BUDGET.as_nanos() as u64, Ordering::Relaxed);
+        let t0 = self.begin();
         let result = self.context.with(|ctx| {
             let f = self
                 .state_fn
@@ -498,7 +677,48 @@ impl Instance {
             f.call::<_, String>(()).map_err(|e| describe(&ctx, e))
         });
         self.deadline.store(u64::MAX, Ordering::Relaxed);
-        result.map_err(|e| self.fault(e))
+        let json = result.map_err(|e| self.fault(e))?;
+        self.end(t0, "getState")?;
+        Ok(json)
+    }
+
+    /// Transaction I2C : (statut, octets lus, au plus rx_len, et longueur
+    /// rendue par le modèle). Un composant en défaut ne répond plus, comme une
+    /// puce absente (NACK adresse).
+    fn i2c(&mut self, address: u8, tx: &[u8], rx_len: usize) -> Result<(u8, Bytes), String> {
+        let none = || Bytes {
+            data: Vec::new(),
+            total: 0,
+        };
+        if self.faulted {
+            return Ok((1, none()));
+        }
+        let t0 = self.begin();
+        let result = self.context.with(|ctx| {
+            let run = || -> rquickjs::Result<(u8, Option<TypedArray<u8>>)> {
+                let f = self.i2c_fn.clone().restore(&ctx)?;
+                let tx = TypedArray::<u8>::new(ctx.clone(), tx.to_vec())?;
+                let r: Object = f.call((address, tx, rx_len as u32))?;
+                let status: u8 = r.get("s")?;
+                let rx = if status == 0 {
+                    Some(r.get("rx")?)
+                } else {
+                    None
+                };
+                Ok((status, rx))
+            };
+            let (status, rx) = run().map_err(|e| describe(&ctx, e))?;
+            match rx {
+                Some(array) => js_bytes::copy(&array, rx_len)
+                    .map(|b| (status, b))
+                    .map_err(|e| e.to_string()),
+                None => Ok((status, none())),
+            }
+        });
+        self.deadline.store(u64::MAX, Ordering::Relaxed);
+        let reply = result.map_err(|e| self.fault(e))?;
+        self.end(t0, "onI2C")?;
+        Ok(reply)
     }
 
     fn fault(&mut self, error: String) -> String {
@@ -507,9 +727,34 @@ impl Instance {
     }
 }
 
+/// Réponse I2C à exactement `rx_len` octets : complétée par 0xFF ou tronquée,
+/// avec un avertissement la première fois (component-api.d.ts, I2CResponse).
+fn fit_rx(inst: &mut Instance, rx: Bytes, rx_len: usize, emit: &dyn Fn(ModelEvent)) -> Vec<u8> {
+    if rx.total != rx_len && !inst.rx_len_warned {
+        inst.rx_len_warned = true;
+        emit(ModelEvent::Warn(format!(
+            "{} : réponse I2C de {} octets pour {rx_len} demandés (complétée par 0xFF ou tronquée)",
+            inst.id, rx.total
+        )));
+    }
+    let mut data = rx.data;
+    data.resize(rx_len, 0xFF);
+    data
+}
+
 // --- Boucle du fil « modèles » ------------------------------------------------------------
 
-fn run(specs: Vec<InstanceSpec>, rx: &mpsc::Receiver<ModelCmd>, emit: &dyn Fn(ModelEvent)) {
+/// Boucle du fil : `emit` range un événement dans le lot, `send` l'envoie.
+/// Les événements de chaque commande sont rangés juste après elle (ordre
+/// conservé) ; le lot part quand la file est vide, après une réponse
+/// synchrone (ping, I2C) ou une image (FlushStates), ou toutes les
+/// BATCH_COMMANDS commandes.
+fn run(
+    specs: Vec<InstanceSpec>,
+    rx: &mpsc::Receiver<ModelCmd>,
+    emit: &dyn Fn(ModelEvent),
+    send: &dyn Fn(),
+) {
     let _ = cpu_ns(); // Windows : étalonnage du compteur de cycles, hors de tout budget
     let mut instances: Vec<Instance> = Vec::new();
     for spec in &specs {
@@ -527,24 +772,39 @@ fn run(specs: Vec<InstanceSpec>, rx: &mpsc::Receiver<ModelCmd>, emit: &dyn Fn(Mo
         inst.host.borrow_mut().dirty = true;
     }
     flush_events(&mut instances, &mut dirty_notified, emit);
+    send();
 
+    let mut pending: Option<ModelCmd> = None;
+    let mut since_send = 0u32;
     loop {
-        let next_tick = instances
-            .iter()
-            .filter(|i| i.tick.is_some() && !i.faulted)
-            .map(|i| i.next_tick)
-            .min();
-        let cmd = match next_tick {
-            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
-                Ok(cmd) => Some(cmd),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return,
-            },
-            None => match rx.recv() {
-                Ok(cmd) => Some(cmd),
-                Err(_) => return,
-            },
+        let cmd = match pending.take() {
+            Some(cmd) => Some(cmd),
+            None => {
+                let next_tick = instances
+                    .iter()
+                    .filter(|i| i.tick.is_some() && !i.faulted)
+                    .map(|i| i.next_tick)
+                    .min();
+                match next_tick {
+                    Some(at) => {
+                        match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                            Ok(cmd) => Some(cmd),
+                            Err(RecvTimeoutError::Timeout) => None,
+                            Err(RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
+                    None => match rx.recv() {
+                        Ok(cmd) => Some(cmd),
+                        Err(_) => return,
+                    },
+                }
+            }
         };
+        // Réponse attendue aussitôt : le lot part juste après cette commande.
+        let urgent = matches!(
+            cmd,
+            Some(ModelCmd::Ping { .. } | ModelCmd::I2c { .. } | ModelCmd::FlushStates)
+        );
         match cmd {
             None => run_ticks(&mut instances, emit),
             Some(ModelCmd::Stop) => return,
@@ -576,6 +836,31 @@ fn run(specs: Vec<InstanceSpec>, rx: &mpsc::Receiver<ModelCmd>, emit: &dyn Fn(Mo
                 let handler_us = u32::try_from(t0.elapsed().as_micros()).unwrap_or(u32::MAX);
                 emit(ModelEvent::Pong { seq, handler_us });
             }
+            Some(ModelCmd::I2c {
+                id,
+                seq,
+                address,
+                tx,
+                rx_len,
+            }) => {
+                let (status, rx) = match instances.iter_mut().find(|i| i.id == id) {
+                    Some(inst) => match inst.i2c(address, &tx, rx_len) {
+                        Ok((0, rx)) => (0, fit_rx(inst, rx, rx_len, emit)),
+                        Ok((status, _)) => (status, Vec::new()),
+                        Err(e) => {
+                            emit(ModelEvent::Warn(e));
+                            (1, Vec::new())
+                        }
+                    },
+                    None => (1, Vec::new()),
+                };
+                emit(ModelEvent::I2cReply { seq, status, rx });
+            }
+            Some(ModelCmd::Environment(json)) => {
+                for inst in &mut instances {
+                    report(inst.call("env", &json, ""), emit);
+                }
+            }
             Some(ModelCmd::Power(on)) => {
                 for inst in &mut instances {
                     report(inst.call("power", if on { "1" } else { "0" }, ""), emit);
@@ -583,6 +868,23 @@ fn run(specs: Vec<InstanceSpec>, rx: &mpsc::Receiver<ModelCmd>, emit: &dyn Fn(Mo
             }
             Some(ModelCmd::FlushStates) => {
                 dirty_notified = false;
+                let (mut count, mut records) = (0u16, Vec::new());
+                for inst in &mut instances {
+                    let mut host = inst.host.borrow_mut();
+                    if std::mem::take(&mut host.display_dirty) {
+                        if let Some(fb) = host.display.as_mut() {
+                            if let Some(update) = fb.take_update() {
+                                display::encode_update(&mut records, &inst.id, fb, &update);
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+                if count > 0 {
+                    emit(ModelEvent::Displays(display::finish_message(
+                        count, records,
+                    )));
+                }
                 let mut states = Vec::new();
                 for inst in &mut instances {
                     let was_dirty = std::mem::take(&mut inst.host.borrow_mut().dirty);
@@ -598,6 +900,20 @@ fn run(specs: Vec<InstanceSpec>, rx: &mpsc::Receiver<ModelCmd>, emit: &dyn Fn(Mo
             }
         }
         flush_events(&mut instances, &mut dirty_notified, emit);
+        since_send += 1;
+        if urgent || since_send >= BATCH_COMMANDS {
+            send();
+            since_send = 0;
+            continue;
+        }
+        match rx.try_recv() {
+            Ok(next) => pending = Some(next),
+            Err(mpsc::TryRecvError::Empty) => {
+                send();
+                since_send = 0;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => return,
+        }
     }
 }
 
@@ -629,7 +945,7 @@ fn flush_events(instances: &mut [Instance], dirty_notified: &mut bool, emit: &dy
         for event in host.out.drain(..) {
             emit(event);
         }
-        any_dirty |= host.dirty;
+        any_dirty |= host.dirty || host.display_dirty;
     }
     if any_dirty && !*dirty_notified {
         *dirty_notified = true;
@@ -652,8 +968,10 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let models = spawn(
             specs,
-            Box::new(move |e| {
-                let _ = tx.send(e);
+            Box::new(move |events: Vec<ModelEvent>| {
+                for e in events {
+                    let _ = tx.send(e);
+                }
             }),
         )
         .expect("fil modèles");
@@ -706,6 +1024,131 @@ mod tests {
             states(&models, &rx),
             vec![("LD2".into(), r#"{"brightness":1}"#.into())]
         );
+    }
+
+    /// MPU6050 : en veille au reset (mesures à 0), réveillé par PWR_MGMT_1 = 0 ;
+    /// le gyroscope lit une rotation positive autour de x juste après un roulis.
+    #[test]
+    fn mpu6050_gyro_follows_tilt_change() {
+        let (models, rx) = start(vec![spec("imu", provided("mpu6050"))]);
+        let _ = states(&models, &rx);
+        for (pin, level) in [("GND", Level::Low), ("VCC", Level::High)] {
+            models.send(ModelCmd::Pin {
+                id: "imu".into(),
+                pin: pin.into(),
+                state: NetState {
+                    level,
+                    ..Default::default()
+                },
+            });
+        }
+        let env = |roll: f64| {
+            let e = crate::core::environment::Environment {
+                tilt_deg: crate::core::environment::Tilt { roll, pitch: 0.0 },
+                ..Default::default()
+            }
+            .settle();
+            ModelCmd::Environment(serde_json::to_string(&e).expect("JSON"))
+        };
+        let i2c = |seq: u32, tx: Vec<u8>, rx_len: usize| -> Vec<u8> {
+            models.send(ModelCmd::I2c {
+                id: "imu".into(),
+                seq,
+                address: 0x68,
+                tx,
+                rx_len,
+            });
+            loop {
+                if let ModelEvent::I2cReply {
+                    seq: s,
+                    status,
+                    rx: r,
+                } = rx.recv_timeout(Duration::from_secs(5)).expect("réponse")
+                {
+                    if s == seq {
+                        assert_eq!(status, 0);
+                        return r;
+                    }
+                }
+            }
+        };
+        models.send(env(0.0));
+        // En veille : mesures à 0.
+        assert_eq!(i2c(1, vec![0x3F], 2), vec![0, 0]);
+        i2c(2, vec![0x6B, 0x00], 0); // réveil
+        let az = i2c(3, vec![0x3F], 2);
+        assert_eq!(
+            i16::from_be_bytes([az[0], az[1]]),
+            16384,
+            "1 g sur z à plat"
+        );
+        models.send(env(10.0));
+        let gx = i2c(4, vec![0x43], 2);
+        assert!(
+            i16::from_be_bytes([gx[0], gx[1]]) > 0,
+            "rotation autour de x : {gx:?}"
+        );
+        assert_eq!(i2c(5, vec![0x75], 1), vec![0x68]);
+    }
+
+    /// Écran SSD1306 : image entière (1 024 octets) et reconstruction après
+    /// changement de sens des lignes, 50 fois, sans jamais dépasser le budget
+    /// de 5 ms par appel (le composant serait arrêté) ; chaque réponse ACK.
+    #[test]
+    fn ssd1306_full_frames_within_budget() {
+        let (models, rx) = start(vec![spec("oled1", provided("ssd1306"))]);
+        let _ = states(&models, &rx);
+        for (pin, level) in [("GND", Level::Low), ("VCC", Level::High)] {
+            models.send(ModelCmd::Pin {
+                id: "oled1".into(),
+                pin: pin.into(),
+                state: NetState {
+                    level,
+                    ..Default::default()
+                },
+            });
+        }
+        let mut frame = vec![0x40u8];
+        frame.extend((0..1024).map(|i| (i * 37 % 251) as u8));
+        let mut worst = 0;
+        for n in 0..50u32 {
+            // Commandes (dont C0/C8 : image entière recalculée), puis l'image.
+            let cmds = vec![
+                0x00,
+                0x8D,
+                0x14,
+                0x20,
+                0x00,
+                if n % 2 == 0 { 0xC8 } else { 0xC0 },
+                0xA1,
+                0xAF,
+            ];
+            for (seq, tx) in [(2 * n, cmds), (2 * n + 1, frame.clone())] {
+                models.send(ModelCmd::I2c {
+                    id: "oled1".into(),
+                    seq,
+                    address: 0x3C,
+                    tx,
+                    rx_len: 0,
+                });
+                let t0 = Instant::now();
+                loop {
+                    match rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("réponse I2C")
+                    {
+                        ModelEvent::I2cReply { seq: s, status, .. } if s == seq => {
+                            assert_eq!(status, 0, "NACK à la transaction {seq}");
+                            break;
+                        }
+                        ModelEvent::Warn(w) => panic!("avertissement : {w}"),
+                        _ => {}
+                    }
+                }
+                worst = worst.max(t0.elapsed().as_micros());
+            }
+        }
+        println!("SSD1306 : transaction la plus longue {worst} µs (budget 5 000 µs de CPU)");
     }
 
     #[test]
@@ -809,6 +1252,79 @@ mod tests {
             t0.elapsed() < Duration::from_millis(200),
             "interrompu trop tard : {:?}",
             t0.elapsed()
+        );
+    }
+
+    /// Règle du budget : un appel de 10 ms (au-delà des 5 ms) est toléré et
+    /// écrit au Journal ; un appel rapide remet le compte à zéro ; trois
+    /// appels lents de suite mettent le composant en défaut.
+    #[test]
+    fn isolated_overrun_is_tolerated() {
+        let source = temp_component(
+            "lent",
+            "export default (ctx: unknown) => ({ onControl(_c: string, ms: number): void { const t = Date.now(); while (Date.now() - t < ms) {} }, getState: () => ({}) });",
+        );
+        let (models, rx) = start(vec![spec("x", source)]);
+        let _ = rx.recv_timeout(Duration::from_secs(5));
+        let control = |ms: u32| {
+            models.send(ModelCmd::Control {
+                id: "x".into(),
+                control: "c".into(),
+                value_json: ms.to_string(),
+            });
+        };
+        // Lent, rapide, lent, lent : jamais trois de suite, aucun défaut.
+        for ms in [10, 0, 10, 10] {
+            control(ms);
+        }
+        let mut logs = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while let Ok(e) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            match e {
+                ModelEvent::Log(l) => logs.push(l),
+                ModelEvent::Warn(w) => panic!("défaut inattendu : {w}"),
+                _ => {}
+            }
+        }
+        assert_eq!(logs.len(), 3, "{logs:#?}");
+        assert!(
+            logs[0].contains("onControl") && logs[0].contains("1/3"),
+            "{logs:#?}"
+        );
+        assert!(
+            logs[2].contains("2/3"),
+            "remis à zéro par l'appel rapide : {logs:#?}"
+        );
+        // Troisième lent de suite : défaut.
+        control(10);
+        let warn = loop {
+            if let ModelEvent::Warn(w) = rx.recv_timeout(Duration::from_secs(5)).expect("défaut") {
+                break w;
+            }
+        };
+        assert!(warn.contains("3 appels de suite"), "{warn}");
+    }
+
+    /// Panneau environnement : objet Environment remis à onEnvironment.
+    #[test]
+    fn environment_reaches_models() {
+        let source = temp_component(
+            "env",
+            "export default (ctx: { invalidate(): void }) => { let t = 0, z = 0; return { onEnvironment(e: { temperatureC: number; accelerationG: { z: number } }): void { t = e.temperatureC; z = e.accelerationG.z; ctx.invalidate(); }, getState: () => ({ t, z }) }; };",
+        );
+        let (models, rx) = start(vec![spec("e", source)]);
+        let _ = states(&models, &rx);
+        let env = crate::core::environment::Environment {
+            temperature_c: 31.5,
+            ..Default::default()
+        }
+        .settle();
+        models.send(ModelCmd::Environment(
+            serde_json::to_string(&env).expect("JSON"),
+        ));
+        assert_eq!(
+            states(&models, &rx),
+            vec![("e".into(), r#"{"t":31.5,"z":1}"#.into())]
         );
     }
 

@@ -1,4 +1,4 @@
-# Protocole firmware ↔ app — version 1.1
+# Protocole firmware ↔ app — version 1.2
 
 Ce document est le contrat entre libvmcu (côté firmware) et le cœur Rust (côté app). Il complète la section 6 du cahier des charges et suit les décisions D7, D12 et D15. L'API C correspondante est `libvmcu/include/vmcu.h`.
 
@@ -83,7 +83,7 @@ Délai : si `WELCOME` ou `REJECT` n'arrive pas dans les 5 s, libvmcu se termine 
 
 ### 3.2 Versions
 
-- Version actuelle : **1.1**, notée majeure.mineure.
+- Version actuelle : **1.2**, notée majeure.mineure. La 1.2 est figée ; libvmcu et le cœur l'implémentent à l'étape 8 de la phase 3 et annoncent 1.1 jusque-là.
 - Changer la **majeure** casse la compatibilité : l'app refuse toute majeure différente de la sienne (`REJECT`, raison 1).
 - Changer la **mineure** reste compatible. Seuls ces ajouts sont permis : nouveaux types de messages, nouveaux champs **en fin** de charge utile, nouveaux bits de `flags` qu'on peut ignorer sans risque.
 - La version retenue pour la session est la plus petite des deux mineures ; l'app l'indique dans `WELCOME`. Aucun des deux côtés n'envoie de message plus récent que cette version.
@@ -115,6 +115,7 @@ Les identifiants `0x0001` à `0x7FFF` vont du firmware vers l'app ; `0x8000` à 
 | `0x0080` | `WARN` | — | `u16 code`, `str text` |
 | `0x0081` | `LOG` | — | `u8 level` (0 erreur … 3 debug), `u8 reserved`, `str text` |
 | `0x0090` | `HEARTBEAT` | — | vide. Depuis 1.1, seulement avec `PREBENCH_DEBUG=1` : toutes les 200 ms, et aussitôt après un arrêt du processus (section 5.5) |
+| `0x00A0` | `LED_STRIP` | — | Depuis 1.2. `u8 port`, `u8 pin`, `u8 pwm_unit`, `u8 pwm_channel`, `u16 len` (≤ 4096), `u16 reserved`, `bytes[len]` : trame entière d'un ruban de LED adressables (section 4.4) |
 | `0x00F0` | `PING` | SYNC | `u8 target` (0 cœur, 1 modèle d'écho), `u8 reserved[3]` |
 
 Valeurs de `mode` : 0 entrée, 1 sortie push-pull, 2 sortie drain ouvert, 3 alternative push-pull, 4 alternative drain ouvert, 5 analogique, 6 désactivée.
@@ -171,6 +172,15 @@ Selon les bits, la suite de la charge utile est :
 Une transaction `BULK` est toujours une écriture seule ; `RX` et `BULK` sont exclusifs. Une réception plus grande que 4096 octets est découpée par libvmcu en plusieurs transactions `SYNC` consécutives. La ligne CS reste dans le même état entre elles.
 
 `cs_port` / `cs_pin` = `0xFF` : le cœur cherche le composant dont l'entrée CS est active, d'après l'état des nets. Si aucun composant n'est sélectionné, les données émises sont perdues et la réponse contient des `0xFF`.
+
+### 4.4 Données de `LED_STRIP` (1.2)
+
+Le signal d'un ruban WS2812 dépend d'un timing de l'ordre de 0,4 µs : il n'est pas simulé (cahier des charges, section 5.4). Le shim qui pilote le ruban envoie les octets d'une trame entière, dans l'ordre où ils passent sur le fil (GRB pour un WS2812, GRBW pour un SK6812) ; le composant connaît l'ordre de ses couleurs.
+
+- La ligne de données est désignée soit par une broche (`port`, `pin` ; `pwm_unit` = `pwm_channel` = `0xFF`), soit par une sortie PWM (`pwm_unit`, `pwm_channel` ; `port` = `pin` = `0xFF`). Dans le second cas, le cœur retrouve la broche comme pour `PWM_DUTY` (capacités `pwm:TIMx_CHy` et fonction alternative configurée). STM32 HAL : le shim TIM décode le tampon de `HAL_TIM_PWM_Start_DMA` (impulsion longue = 1, courte = 0) et envoie la trame avec la sortie PWM.
+- Le cœur remet les octets aux composants dont l'entrée de données (interface `led-strip` du manifeste) est sur le net de la broche (`onLedStrip`).
+- Coalescence, comme `PWM_DUTY` : tant qu'une trame de la même ligne attend dans le lot, la nouvelle remplace sa charge utile ; une trame identique à la précédente n'est pas renvoyée.
+- Si la version retenue est 1.1, libvmcu n'envoie rien et `vmcu_led_strip_show` renvoie `VMCU_ERR_UNSUPPORTED`, avec un avertissement.
 
 ## 5. Lots, ordre et transactions synchrones
 
@@ -286,3 +296,4 @@ En-tête de 64 octets, puis la zone de données (alignée sur 64 octets).
 | --- | --- | --- |
 | 1.0 | 2026-11-10 | Version initiale (phase 0) |
 | 1.1 | 2026-11-13 | Débogage (phase 2) : variable `PREBENCH_DEBUG`, message `HEARTBEAT` (`0x0090`), fil de débogage de libvmcu (section 5.5). Ajouts compatibles |
+| 1.2 | 2026-11-15 | LED adressables (phase 3) : message `LED_STRIP` (`0x00A0`), section 4.4. Ajout compatible, implémenté à l'étape 8 de la phase 3 |

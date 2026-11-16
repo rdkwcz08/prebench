@@ -42,6 +42,9 @@ pub struct AppState {
     page_hidden: std::sync::atomic::AtomicBool,
     /// Fenêtre réduite (set_window_visible, appelé par lib.rs).
     window_hidden: std::sync::atomic::AtomicBool,
+    /// Panneau environnement (section 8.5) : gardé pendant la session de
+    /// l'app, pas dans prebench.toml.
+    environment: std::sync::Mutex<crate::core::environment::Environment>,
 }
 
 impl AppState {
@@ -351,8 +354,10 @@ fn initial_states(specs: Vec<InstanceSpec>) -> BTreeMap<String, serde_json::Valu
     let (tx, rx) = std::sync::mpsc::channel();
     let Ok(models) = engine::spawn(
         specs,
-        Box::new(move |e| {
-            let _ = tx.send(e);
+        Box::new(move |events: Vec<ModelEvent>| {
+            for e in events {
+                let _ = tx.send(e);
+            }
         }),
     ) else {
         return BTreeMap::new();
@@ -691,6 +696,11 @@ fn start_sim<R: Runtime>(
             debug,
             frame_interval: sim::frame_interval(frame_rate(app)),
             ui_visible: tauri::Manager::state::<AppState>(app).ui_visible(),
+            environment: tauri::Manager::state::<AppState>(app)
+                .environment
+                .lock()
+                .map(|e| *e)
+                .unwrap_or_default(),
         },
     ))
 }
@@ -1163,6 +1173,43 @@ pub async fn set_power(state: State<'_, AppState>, on: bool) -> CoreResult<()> {
 }
 
 /// Page visible ou non (document.visibilityState) : masquée, le cœur n'envoie
+/// Panneau environnement : valeurs de la session (défauts au lancement de l'app).
+#[tauri::command]
+pub fn get_environment(state: State<'_, AppState>) -> crate::core::environment::Environment {
+    state.environment.lock().map(|e| *e).unwrap_or_default()
+}
+
+/// Panneau environnement modifié : bornes et gravité appliquées, valeurs
+/// gardées pour la session et transmises à la simulation en cours. Renvoie les
+/// valeurs retenues (accélération calculée comprise).
+#[tauri::command]
+pub async fn set_environment(
+    state: State<'_, AppState>,
+    environment: crate::core::environment::Environment,
+) -> CoreResult<crate::core::environment::Environment> {
+    let env = environment.settle();
+    if let Ok(mut current) = state.environment.lock() {
+        *current = env;
+    }
+    let sim = state.sim.lock().await;
+    if let Some(sim) = sim.as_ref().filter(|s| s.is_alive()) {
+        sim.send(SimMsg::Environment(env)).await?;
+    }
+    Ok(env)
+}
+
+/// Canal binaire des images d'écrans (section 11.3) : l'interface le crée au
+/// démarrage et le remplace à chaque rechargement de la page.
+#[tauri::command]
+pub fn display_channel(
+    sink: State<'_, crate::core::sim::DisplaySink>,
+    channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) {
+    if let Ok(mut current) = sink.0.lock() {
+        *current = Some(channel);
+    }
+}
+
 /// plus d'images (« sim:frame ») ; la simulation continue, et tout ce qui a
 /// changé part dans une image au retour (section 11.3).
 #[tauri::command]

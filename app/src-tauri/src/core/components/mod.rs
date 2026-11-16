@@ -6,7 +6,9 @@
 // Un composant du projet portant l'identifiant d'un composant fourni le
 // remplace, avec un avertissement ⚠.
 
+pub mod display;
 pub mod engine;
+mod js_bytes;
 pub mod transpile;
 
 use std::collections::BTreeMap;

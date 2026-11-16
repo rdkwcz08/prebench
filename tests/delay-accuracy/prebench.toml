@@ -1,0 +1,11 @@
+#:schema ../../docs/prebench.schema.json
+# Exactitude des délais : trois séries de 100 HAL_Delay(10), durée de chacune
+# sur USART2 (« delai:<ms> », environ 1 000 attendu), en priorité basse comme
+# dans l'app. Test sim_tests.rs : delay_accuracy_at_low_priority.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"

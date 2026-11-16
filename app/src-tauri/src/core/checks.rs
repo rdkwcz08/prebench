@@ -9,6 +9,7 @@
 //   - deux alimentations différentes sur le même net (court-circuit) ;
 //   - composant posé directement entre deux alimentations (court-circuit possible) ;
 //   - broche CS partagée par deux composants SPI ;
+//   - deux composants I2C à la même adresse sur le même bus (même net SDA) ;
 //   - broches à contrainte (entrée seule, strapping, flash).
 // Les validations de la simulation (conflit, entrée flottante) viennent du
 // réseau logique, pendant la simulation (sim.rs).
@@ -151,12 +152,33 @@ pub fn check(board: &Board, project: &Project, manifests: &BTreeMap<String, Valu
 
     // Bus déclarés par les manifestes : la broche de la carte doit porter la fonction.
     let mut cs_users: BTreeMap<Node, Vec<String>> = BTreeMap::new();
+    let mut i2c_users: BTreeMap<(Node, u64), Vec<(String, String)>> = BTreeMap::new();
     for comp in &project.components {
         let Some(manifest) = manifests.get(&comp.kind) else {
             continue;
         };
         for iface in manifest["interfaces"].as_array().into_iter().flatten() {
             let kind = iface["type"].as_str().unwrap_or_default();
+            if kind == "i2c" {
+                if let (Some(sda), Some(addr)) = (
+                    iface["sda"].as_str(),
+                    i2c_address(comp, manifest, &iface["address"]),
+                ) {
+                    let node = Node::Component {
+                        id: comp.id.clone(),
+                        pin: sda.into(),
+                    };
+                    let mut members = net.members(&node);
+                    members.sort();
+                    // Non câblée : la broche n'est sur aucun bus.
+                    if members.len() > 1 {
+                        i2c_users
+                            .entry((members[0].clone(), addr))
+                            .or_default()
+                            .push((comp.id.clone(), format!("{}.{sda}", comp.id)));
+                    }
+                }
+            }
             for (key, role) in [
                 ("sda", "SDA"),
                 ("scl", "SCL"),
@@ -295,6 +317,30 @@ pub fn check(board: &Board, project: &Project, manifests: &BTreeMap<String, Valu
             });
         }
     }
+    for ((_, addr), users) in i2c_users {
+        if users.len() > 1 {
+            let labels: Vec<String> = users
+                .iter()
+                .map(|(id, _)| {
+                    project
+                        .components
+                        .iter()
+                        .find(|c| &c.id == id)
+                        .map_or_else(|| id.clone(), |c| c.label())
+                })
+                .collect();
+            out.push(Check {
+                severity: Severity::Conflict,
+                text: format!(
+                    "Adresse I2C 0x{addr:02X} en double sur le même bus : {}. Les deux répondraient \
+                     en même temps ; donnez une autre adresse à l'un d'eux (paramètre « Adresse I2C », \
+                     ou cavalier d'adresse du module).",
+                    labels.join(", ")
+                ),
+                endpoints: users.into_iter().map(|(_, end)| end).collect(),
+            });
+        }
+    }
     for (_, users) in cs_users {
         if users.len() > 1 {
             out.push(Check {
@@ -401,6 +447,23 @@ pub fn check(board: &Board, project: &Project, manifests: &BTreeMap<String, Valu
 }
 
 /// Première broche de la carte du net d'un nœud (clé stable d'un net).
+/// Adresse I2C d'un composant : fixe, ou tirée d'un paramètre (valeur du
+/// projet, sinon défaut du manifeste).
+fn i2c_address(
+    comp: &crate::project::ComponentInstance,
+    manifest: &Value,
+    spec: &Value,
+) -> Option<u64> {
+    if let Some(a) = spec.as_u64() {
+        return Some(a);
+    }
+    let name = spec["param"].as_str()?;
+    match comp.params.get(name) {
+        Some(v) => v.as_integer().and_then(|a| u64::try_from(a).ok()),
+        None => manifest["params"][name]["default"].as_u64(),
+    }
+}
+
 fn root_board(net: &Network, node: &Node) -> Option<Node> {
     let mut members = net.members(node);
     members.sort();
@@ -510,6 +573,47 @@ mod tests {
         assert!(has("oled1 fonctionne en 5 V"), "{texts:#?}");
         assert!(has("Broche CS partagée"), "{texts:#?}");
         assert!(has("Court-circuit : 3V3 et 5V"), "{texts:#?}");
+    }
+
+    #[test]
+    fn duplicate_i2c_address_on_same_bus() {
+        let mut m = manifests();
+        m.insert(
+            "joker".to_string(),
+            serde_json::json!({ "pins": [{ "name": "SDA", "role": "open-drain" }, { "name": "SCL", "role": "open-drain" }],
+                "interfaces": [{ "type": "i2c", "sda": "SDA", "scl": "SCL", "address": { "param": "address" } }],
+                "params": { "address": { "type": "integer", "default": 80 } } }),
+        );
+        let wires = [
+            ("board.PB9", "j1.SDA"),
+            ("board.PB9", "j2.SDA"),
+            ("board.PB9", "j3.SDA"),
+            ("board.PB8", "j1.SCL"),
+        ];
+        let mut p = project(
+            vec![
+                ("j1", "joker"),
+                ("j2", "joker"),
+                ("j3", "joker"),
+                ("j4", "joker"),
+            ],
+            &wires,
+        );
+        // j3 à une autre adresse ; j4 non câblé : seuls j1 et j2 entrent en conflit.
+        p.components[2]
+            .params
+            .insert("address".into(), toml::Value::Integer(0x3C));
+        let found: Vec<Check> = check(&board(), &p, &m)
+            .into_iter()
+            .filter(|c| c.text.contains("en double"))
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].text.contains("0x50"), "{}", found[0].text);
+        assert_eq!(
+            found[0].endpoints,
+            vec!["j1.SDA".to_string(), "j2.SDA".to_string()]
+        );
+        assert_eq!(found[0].severity, Severity::Conflict);
     }
 
     #[test]

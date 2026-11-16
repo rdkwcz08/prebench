@@ -49,7 +49,8 @@ La référence unique du projet est [docs/cahier-des-charges.md](docs/cahier-des
 
 - `prebench-dev` (privé) : travail quotidien. `prebench` (public) : un commit « Release vX.Y.Z » par version, publié par `./release.sh vX.Y.Z`.
 - Les fichiers internes sont marqués `export-ignore` dans `.gitattributes`. Aucun secret dans le dépôt : clé de l'updater et tokens vont uniquement dans les secrets GitHub.
-- CI privée (`ci.yml`) : Linux à chaque push ; Windows quand le code propre au système change, sur un tag, ou à la demande (`gh workflow run ci.yml --ref main`, exigé par `release.sh` avant une release ; `PREBENCH_SKIP_WINDOWS_CI=1` est un contournement exceptionnel, conditions dans `release.sh`, à signaler dans le compte rendu). Linux exécute aussi `--verifier-installation` sur l'app compilée. Release publique (`release.yml`) : macOS arm64 + Windows x64.
+- CI privée (`ci.yml`) : Linux à chaque push ; Windows quand le code propre au système change, sur un tag, ou à la demande (`gh workflow run ci.yml --ref main`, exigé par `release.sh` avant une release ; `PREBENCH_SKIP_WINDOWS_CI=1` est un contournement exceptionnel, conditions dans `release.sh`, à signaler dans le compte rendu). Linux exécute aussi `--verifier-installation` sur l'app compilée. Release publique (`release.yml`, exécuté seulement dans `rdkwcz08/prebench`) : macOS arm64 + Windows x64.
+- `./release.sh vX.Y.Z --oui` publie sans la question de confirmation (session non interactive). L'IA ne l'utilise que si l'utilisateur a demandé de publier cette version précise, après un `--dry-run` propre et une CI Windows réussie sur le commit ; elle le signale dans le compte rendu. Sinon, elle lance `--dry-run` et laisse l'utilisateur publier.
 
 ## Vérifications locales
 

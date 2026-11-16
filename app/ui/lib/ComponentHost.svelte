@@ -9,6 +9,7 @@
 -->
 <script lang="ts">
   import type { Instance } from './bench.svelte';
+  import { displays } from './displays.svelte';
   import FallbackView from './FallbackView.svelte';
 
   let {
@@ -73,7 +74,7 @@
 >
   <div class="view">
     {#if View && inst.state !== null}
-      <View state={inst.state} params={inst.params} {mode} {control} />
+      <View state={inst.state} params={inst.params} {mode} {control} display={displays.items[inst.id]} />
     {:else if View || (inst.viewError === '' && inst.info)}
       <div class="placeholder" style:width="{size.width}px" style:height="{size.height}px"></div>
     {:else}

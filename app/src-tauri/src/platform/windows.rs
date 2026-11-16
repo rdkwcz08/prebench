@@ -84,7 +84,8 @@ use windows_sys::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, OpenThread, ProcessPowerThrottling, ResumeThread,
     SetProcessInformation, SuspendThread, BELOW_NORMAL_PRIORITY_CLASS,
     PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-    PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+    PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+    PROCESS_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
 };
 
 /// Pas de fenêtre console pour les processus lancés par l'app.
@@ -123,7 +124,10 @@ impl Drop for FirmwareGuard {
 
 /// EcoQoS (Windows 11) puis Job Object (plafond mémoire, kill on close).
 /// EcoQoS demande à l'ordonnanceur de privilégier l'efficacité énergétique ;
-/// sans effet sur les versions qui l'ignorent.
+/// sans effet sur les versions qui l'ignorent. Les demandes de résolution des
+/// minuteries restent honorées (IGNORE_TIMER_RESOLUTION désactivé) : sans
+/// cela, Windows 11 peut allonger les délais d'un processus en EcoQoS, et
+/// HAL_Delay(10) ne durerait plus 10 ms.
 pub fn after_firmware_spawn(child: &tokio::process::Child, memory_backstop: u64) -> FirmwareGuard {
     let Some(handle) = child.raw_handle() else {
         return FirmwareGuard {
@@ -132,7 +136,8 @@ pub fn after_firmware_spawn(child: &tokio::process::Child, memory_backstop: u64)
     };
     let state = PROCESS_POWER_THROTTLING_STATE {
         Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
         StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
     };
     // SAFETY : `handle` est le handle valide du processus enfant, encore

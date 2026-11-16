@@ -3,6 +3,15 @@
   en texte secondaire, champ d'envoi avec fin de ligne et « Envoyer »).
   Les outils (port, débit, horodatage, hexa, export, effacer) sont dans la barre
   d'onglets (SerialTools.svelte). Alerte de débit : ligne d'avertissement en tête.
+  Liste virtualisée (section 11.3) : lignes de 20 px, seules les lignes visibles
+  (et une marge) sont dans le DOM ; les nouvelles lignes arrivent au plus une
+  fois par image d'affichage. Une ligne plus large que le panneau défile
+  horizontalement, sans retour à la ligne (hauteur fixe).
+  Suivi de la fin (cas courant pendant une simulation) : seules les dernières
+  lignes sont dessinées, sans zone défilante de la hauteur de l'historique
+  (WKWebView garde cette zone composée : ~130 Mo de plus). Remonter (molette,
+  Haut, Page précédente, Début) passe à la liste complète, défilante ;
+  revenir en bas reprend le suivi.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -11,12 +20,21 @@
   import Button from './ui/Button.svelte';
   import Icon from './ui/Icon.svelte';
 
-  /** Lignes affichées au plus (le tampon, lui, garde 1 Mo). */
-  const MAX_SHOWN = 2000;
+  /** Lignes gardées pour l'affichage (le tampon, lui, garde 1 Mo). */
+  const MAX_SHOWN = 5000;
+  /** Hauteur d'une ligne (charte : lignes de 20 px). */
+  const LINE = 20;
+  /** Lignes rendues en plus de part et d'autre de la zone visible. */
+  const OVERSCAN = 10;
+  /** Marge haute du journal (padding). */
+  const PAD = 6;
 
   let log: HTMLDivElement | undefined = $state();
+  let scrollTop = $state(0);
+  let viewHeight = $state(200);
   let text = $state('');
-  let stick = true; // suit la fin tant que l'utilisateur n'est pas remonté
+  /** Suit la fin tant que l'utilisateur n'est pas remonté. */
+  let follow = $state(true);
 
   const port = $derived(serial.active);
   const warning = $derived(serial.mismatch(port));
@@ -67,10 +85,27 @@
     if (lines.length > MAX_SHOWN * 2) lines.splice(0, lines.length - MAX_SHOWN);
   }
 
+  /**
+   * Nombre de morceaux pris en compte, avancé au plus une fois par image
+   * d'affichage : plusieurs trames série dans la même image ne coûtent qu'une
+   * mise à jour.
+   */
+  let seen = $state(0);
+  let scheduled = false;
+  $effect(() => {
+    const n = port?.chunks.length ?? 0;
+    if (n === seen || scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      seen = serial.active?.chunks.length ?? 0;
+    });
+  });
+
   /** Lignes à afficher : horodatage de leur premier octet, texte ou hexadécimal. */
   const lines = $derived.by(() => {
     if (!port) return [];
-    const count = port.chunks.length; // dépendance : nouveaux morceaux
+    const count = Math.min(seen, port.chunks.length); // nouveaux morceaux, une fois par image
     if (cache.key !== port.key || cache.hex !== serial.hex || cache.epoch !== port.epoch || cache.done < port.dropped) {
       cache = { key: port.key, hex: serial.hex, epoch: port.epoch, done: port.dropped, nextId: 0, lines: [], open: false };
     }
@@ -79,17 +114,58 @@
       if (c) append(c);
     }
     cache.done = port.dropped + count;
-    return cache.lines.slice(-MAX_SHOWN);
+    if (cache.lines.length > MAX_SHOWN) cache.lines.splice(0, cache.lines.length - MAX_SHOWN);
+    // Nouveau tableau seulement pour signaler le changement : les lignes ne sont pas copiées une à une.
+    return cache.lines.slice();
   });
 
-  $effect(() => {
-    void lines.length;
-    if (stick) void tick().then(() => log?.scrollTo({ top: log.scrollHeight }));
-  });
+  /** Fenêtre rendue : lignes visibles et marge. */
+  const first = $derived(Math.max(0, Math.floor((scrollTop - PAD) / LINE) - OVERSCAN));
+  const visible = $derived(lines.slice(first, first + Math.ceil(viewHeight / LINE) + 2 * OVERSCAN));
+
+  /** Suivi : les seules lignes qui tiennent dans le panneau, la dernière en bas. */
+  const tail = $derived(lines.slice(-(Math.ceil(viewHeight / LINE) + 1)));
 
   function onscroll(): void {
-    if (log) stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+    if (!log || follow) return;
+    scrollTop = log.scrollTop;
+    viewHeight = log.clientHeight;
+    if (log.scrollTop + log.clientHeight >= log.scrollHeight - 8) follow = true; // revenu en bas
   }
+
+  /** Quitte le suivi : liste complète, positionnée en bas puis remontée de `up` pixels. */
+  async function leaveFollow(up: number): Promise<void> {
+    if (!follow || lines.length * LINE <= viewHeight) return;
+    follow = false;
+    scrollTop = Math.max(0, lines.length * LINE + 2 * PAD - viewHeight - up);
+    await tick();
+    log?.scrollTo({ top: scrollTop });
+  }
+
+  function onwheel(e: WheelEvent): void {
+    if (follow && e.deltaY < 0) void leaveFollow(-e.deltaY);
+  }
+
+  function onkeydown(e: KeyboardEvent): void {
+    const up: Record<string, number> = { ArrowUp: LINE, PageUp: viewHeight, Home: Infinity };
+    const by = up[e.key];
+    if (by === undefined) return;
+    e.stopPropagation(); // les flèches ne déplacent pas la paillasse
+    if (follow) {
+      e.preventDefault();
+      void leaveFollow(by);
+    }
+  }
+
+  $effect(() => {
+    if (!log) return;
+    const el = log;
+    // Hauteur lue à l'image suivante : la changer dans le rappel relancerait
+    // la mise en page dans la même image (boucle ResizeObserver).
+    const observer = new ResizeObserver(() => requestAnimationFrame(() => (viewHeight = el.clientHeight)));
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
 
   async function submit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
@@ -104,15 +180,39 @@
   {/if}
   <!-- Pas de région annoncée (aria-live) : un lecteur d'écran lirait chaque
        octet reçu, et le navigateur recalculerait l'accessibilité à chaque ligne. -->
-  <div class="log data" bind:this={log} {onscroll} aria-label="Sortie série">
+  <!-- Zone défilante nommée, focalisable : se parcourt au clavier comme à la souris. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <div
+    class="log data"
+    class:follow
+    bind:this={log}
+    {onscroll}
+    {onwheel}
+    {onkeydown}
+    tabindex="0"
+    role="region"
+    aria-label="Sortie série"
+  >
     {#if !port}
       <p class="empty">Aucune sortie série. Démarrez la simulation : les octets émis par les UART du firmware et sa sortie standard (printf) s'affichent ici.</p>
     {:else if lines.length === 0}
       <p class="empty">{port.label} : rien reçu pour l'instant.</p>
     {/if}
-    {#each lines as l (l.id)}
-      <div class="line" class:sys={l.sys}>{#if serial.timestamps}<span class="t">{stamp(l.t)}</span>{/if}{l.text}</div>
-    {/each}
+    {#if lines.length > 0 && follow}
+      <div class="tail">
+        {#each tail as l (l.id)}
+          <div class="line" class:sys={l.sys}>{#if serial.timestamps}<span class="t">{stamp(l.t)}</span>{/if}{l.text}</div>
+        {/each}
+      </div>
+    {:else if lines.length > 0}
+      <!-- Espaceur en haut, dans le flux : les lignes visibles gardent leur
+           place dans le document, seule la nouvelle ligne est à peindre. -->
+      <div class="rows" style:height="{lines.length * LINE}px" style:padding-top="{first * LINE}px">
+        {#each visible as l (l.id)}
+          <div class="line" class:sys={l.sys}>{#if serial.timestamps}<span class="t">{stamp(l.t)}</span>{/if}{l.text}</div>
+        {/each}
+      </div>
+    {/if}
   </div>
   {#if port && port.id !== null}
     <form class="send" onsubmit={submit}>
@@ -171,9 +271,27 @@
     font-size: 12px;
     line-height: 20px;
   }
+  .rows {
+    box-sizing: border-box;
+    min-width: max-content;
+  }
+  /* Suivi de la fin : pas de défilement vertical, la dernière ligne en bas. */
+  .log.follow {
+    overflow-y: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+  }
+  .tail {
+    min-width: max-content;
+  }
+  .log:focus-visible {
+    outline: 2px solid var(--pb-accent);
+    outline-offset: -2px;
+  }
   .line {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    height: 20px;
+    white-space: pre;
   }
   .t {
     margin-right: 16px;

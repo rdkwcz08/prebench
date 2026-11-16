@@ -11,7 +11,7 @@ pub const MAX_PAYLOAD: usize = 65536;
 pub const PROTOCOL_MAJOR: u8 = 1;
 pub const PROTOCOL_MINOR: u8 = 1;
 
-#[allow(dead_code)] // posé par le firmware ; le cœur n'émet pas encore de requête SYNC
+/// Requête qui attend une réponse (posé par le firmware).
 pub const FLAG_SYNC: u16 = 0x0001;
 pub const FLAG_REPLY: u16 = 0x0002;
 
@@ -29,6 +29,9 @@ pub mod msg {
     pub const UART_CONFIG: u16 = 0x0040;
     pub const UART_TX: u16 = 0x0041;
     pub const UART_RX: u16 = 0x8041;
+    pub const I2C_CONFIG: u16 = 0x0050;
+    pub const I2C_XFER: u16 = 0x0051;
+    pub const I2C_REPLY: u16 = 0x8051;
     /// Protocole 1.1 : firmware lancé par le débogueur (PREBENCH_DEBUG=1).
     pub const HEARTBEAT: u16 = 0x0090;
     pub const PING: u16 = 0x00F0;

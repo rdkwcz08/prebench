@@ -99,9 +99,21 @@
           "pattern": "^[a-z0-9][a-z0-9-]*$"
         },
         "params": {
-          "description": "Paramètres, validés contre le manifeste du composant.",
+          "description": "Paramètres, validés contre le manifeste du composant. Un paramètre « table » est un tableau de tables (ajout compatible, phase 3).",
           "type": "object",
-          "additionalProperties": { "type": ["number", "string", "boolean"] }
+          "additionalProperties": {
+            "oneOf": [
+              { "type": ["number", "string", "boolean"] },
+              {
+                "type": "array",
+                "maxItems": 1024,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": { "type": ["number", "string", "boolean"] }
+                }
+              }
+            ]
+          }
         },
         "pos": {
           "description": "Position [x, y] sur la paillasse, en unités du canevas.",

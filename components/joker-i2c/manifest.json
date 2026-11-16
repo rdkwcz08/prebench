@@ -1,0 +1,46 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "joker-i2c",
+  "version": "1.0.0",
+  "name": "Périphérique I2C générique",
+  "description": "Esclave I2C configurable sans code : adresse au choix et table de registres (valeur fixe, ou curseur réglable pendant la simulation, quatre au plus). Le firmware écrit le numéro de registre puis les données ; une lecture renvoie les registres à partir du dernier numéro écrit, avec incrément automatique. Registre absent de la table : 0x00.",
+  "category": "generic",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 120, "height": 120 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "VCC", "label": "Alimentation", "role": "power", "x": 24, "y": 120 },
+    { "name": "GND", "label": "Masse", "role": "ground", "x": 48, "y": 120 },
+    { "name": "SCL", "label": "Horloge I2C", "role": "open-drain", "x": 72, "y": 120 },
+    { "name": "SDA", "label": "Données I2C", "role": "open-drain", "x": 96, "y": 120 }
+  ],
+  "interfaces": [
+    { "type": "i2c", "sda": "SDA", "scl": "SCL", "address": { "param": "address" } }
+  ],
+  "params": {
+    "address": {
+      "type": "integer",
+      "label": "Adresse I2C",
+      "default": 80,
+      "min": 8,
+      "max": 119,
+      "display": "hex"
+    },
+    "registers": {
+      "type": "table",
+      "label": "Registres",
+      "max_rows": 256,
+      "default": [
+        { "reg": 0, "value": 42, "mode": "fixed" }
+      ],
+      "columns": {
+        "reg": { "type": "integer", "label": "Registre", "default": 0, "min": 0, "max": 255, "display": "hex" },
+        "value": { "type": "integer", "label": "Valeur", "default": 0, "min": 0, "max": 255, "display": "hex" },
+        "mode": { "type": "enum", "label": "Mode", "values": ["fixed", "slider"], "default": "fixed" }
+      }
+    }
+  },
+  "controls": []
+}

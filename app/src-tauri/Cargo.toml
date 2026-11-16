@@ -1,6 +1,6 @@
 [package]
 name = "prebench"
-version = "0.2.3"
+version = "0.2.4"
 description = "Prebench — simulateur de cartes de développement"
 authors = ["Mathis Rudkiewicz"]
 license = "MIT"
@@ -66,6 +66,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Moteur JavaScript des modèles (QuickJS, code C) optimisé aussi en debug :
+# les budgets de temps des modèles (5 ms par appel, section 8.1) valent pour
+# un interpréteur compilé avec optimisation ; non optimisé, il est plusieurs
+# fois plus lent et les tests dépassaient ces budgets sur les runners de CI.
+[profile.dev.package.rquickjs-sys]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-display-channel"
+description = "Enables the display_channel command without any pre-configured scope."
+commands.allow = ["display_channel"]
+
+[[permission]]
+identifier = "deny-display-channel"
+description = "Denies the display_channel command without any pre-configured scope."
+commands.deny = ["display_channel"]
