@@ -12,6 +12,14 @@
 
 #define MAX_FRAMES  4096u
 #define MAX_INITIAL 32u
+#define MAX_STREAMS 4u
+#define SHM_HEADER  64u
+
+typedef struct {
+    uint16_t         id; /* 0 : libre */
+    uint32_t         capacity;
+    vmcu_plat_shm_t *shm;
+} fake_stream_t;
 
 struct fake_app {
     uint16_t              board_id;
@@ -29,9 +37,16 @@ struct fake_app {
     uint8_t               initial_adc[MAX_INITIAL][4]; /* unité, canal, valeur LE */
     unsigned              initial_adc_count;
     bool                  echo;
+    uint8_t               max_minor;    /* version mineure du protocole de la fausse app */
     uint8_t               i2c_addr;     /* esclave I2C simulé ; 0 : aucun */
     uint8_t               i2c_mem[256]; /* registres de l'esclave */
     uint8_t               i2c_ptr;      /* pointeur de registre */
+    /* SPI : esclave qui répond le complément de chaque octet reçu ; octets
+     * émis (hors NO_TX) comptés et hachés dans l'ordre (FNV-1a). */
+    uint64_t              spi_bytes;
+    uint32_t              spi_hash;
+    unsigned              spi_bulk;     /* transactions passées par le flux bulk */
+    fake_stream_t         streams[MAX_STREAMS];
     uint32_t              seq;
     char                  hello_board[64];
     char                  hello_framework[64];
@@ -40,7 +55,7 @@ struct fake_app {
 static void send_frame(fake_app_t *fa, uint16_t type, uint16_t flags, uint32_t seq,
                        const uint8_t *payload, size_t len)
 {
-    uint8_t buf[VMCU_WIRE_HEADER_SIZE + 64];
+    static uint8_t buf[VMCU_WIRE_HEADER_SIZE + 8 + 4096]; /* sous write_mx */
     vmcu_plat_mutex_lock(fa->write_mx);
     vmcu_frame_header_t h = {
         .type = type,
@@ -76,7 +91,7 @@ static void handle_hello(fake_app_t *fa, const vmcu_frame_header_t *h, const uin
     vmcu_rbuf_t r;
     vmcu_rbuf_init(&r, p, h->length);
     uint8_t major = vmcu_rbuf_u8(&r);
-    (void)vmcu_rbuf_u8(&r);
+    uint8_t minor = vmcu_rbuf_u8(&r);
     (void)vmcu_rbuf_u8(&r);
     (void)vmcu_rbuf_u8(&r);
     (void)vmcu_rbuf_u32(&r);
@@ -101,7 +116,8 @@ static void handle_hello(fake_app_t *fa, const vmcu_frame_header_t *h, const uin
     for (unsigned i = 0; i < fa->initial_adc_count; ++i) {
         send_frame(fa, VMCU_MSG_ADC_VALUE, 0, 0, fa->initial_adc[i], 4);
     }
-    uint8_t welcome[8] = { 1, 0, 12, 0 };
+    /* Mineure retenue : la plus petite des deux, comme le cœur. */
+    uint8_t welcome[8] = { 1, minor < fa->max_minor ? minor : fa->max_minor, 12, 0 };
     vmcu_wire_put_u32(welcome + 4, 1000u);
     send_frame(fa, VMCU_MSG_WELCOME, VMCU_FLAG_REPLY, h->seq, welcome, sizeof welcome);
 }
@@ -136,6 +152,110 @@ static void handle_i2c(fake_app_t *fa, const vmcu_frame_header_t *h, const uint8
     reply[1] = 0;
     vmcu_wire_put_u16(reply + 2, (uint16_t)(n - 4));
     send_frame(fa, VMCU_MSG_I2C_REPLY, VMCU_FLAG_REPLY, h->seq, reply, n);
+}
+
+static void spi_hash(fake_app_t *fa, const uint8_t *data, size_t len)
+{
+    for (size_t i = 0; i < len; ++i) {
+        fa->spi_hash = (fa->spi_hash ^ data[i]) * 16777619u;
+    }
+    fa->spi_bytes += len;
+}
+
+static fake_stream_t *find_stream(fake_app_t *fa, uint16_t id)
+{
+    for (unsigned i = 0; i < MAX_STREAMS; ++i) {
+        if (fa->streams[i].id == id && id != 0) {
+            return &fa->streams[i];
+        }
+    }
+    return NULL;
+}
+
+/* STREAM_OPEN : ouvre le segment, comme le cœur ; STREAM_OPENED avec le statut. */
+static void handle_stream_open(fake_app_t *fa, const vmcu_frame_header_t *h, const uint8_t *p)
+{
+    vmcu_rbuf_t r;
+    vmcu_rbuf_init(&r, p, h->length);
+    uint16_t id = vmcu_rbuf_u16(&r);
+    (void)vmcu_rbuf_u8(&r);
+    (void)vmcu_rbuf_u8(&r);
+    uint32_t capacity = vmcu_rbuf_u32(&r);
+    for (int i = 0; i < 6; ++i) {
+        (void)vmcu_rbuf_u16(&r); /* largeur, hauteur, fréquence (2 × u16), canaux et bits, réservé */
+    }
+    char name[64];
+    vmcu_rbuf_str(&r, name, sizeof name);
+    int16_t status = -7; /* VMCU_ERR_NO_MEMORY */
+    vmcu_plat_mutex_lock(fa->mx);
+    fake_stream_t *slot = find_stream(fa, 0);
+    for (unsigned i = 0; i < MAX_STREAMS && slot == NULL; ++i) {
+        if (fa->streams[i].id == 0) {
+            slot = &fa->streams[i];
+        }
+    }
+    if (slot != NULL && vmcu_plat_shm_open(name, SHM_HEADER + capacity, &slot->shm) == VMCU_PLAT_OK) {
+        const uint8_t *base = vmcu_plat_shm_ptr(slot->shm);
+        if (vmcu_wire_get_u32(base) == 0x4D534250u && vmcu_wire_get_u32(base + 8) == capacity) {
+            slot->id = id;
+            slot->capacity = capacity;
+            status = 0;
+        } else {
+            vmcu_plat_shm_close(slot->shm);
+            slot->shm = NULL;
+            status = -9; /* VMCU_ERR_PROTOCOL */
+        }
+    }
+    vmcu_plat_mutex_unlock(fa->mx);
+    uint8_t reply[4];
+    vmcu_wire_put_u16(reply, id);
+    vmcu_wire_put_u16(reply + 2, (uint16_t)status);
+    send_frame(fa, VMCU_MSG_STREAM_OPENED, VMCU_FLAG_REPLY, h->seq, reply, sizeof reply);
+}
+
+static void handle_stream_close(fake_app_t *fa, const uint8_t *p)
+{
+    vmcu_plat_mutex_lock(fa->mx);
+    fake_stream_t *s = find_stream(fa, vmcu_wire_get_u16(p));
+    if (s != NULL) {
+        vmcu_plat_shm_close(s->shm);
+        memset(s, 0, sizeof *s);
+    }
+    vmcu_plat_mutex_unlock(fa->mx);
+}
+
+/* SPI_XFER (section 4.3) : réponse = complément des octets émis (0x00 pour NO_TX). */
+static void handle_spi(fake_app_t *fa, const vmcu_frame_header_t *h, const uint8_t *p)
+{
+    uint8_t flags = p[3];
+    uint32_t len = vmcu_wire_get_u32(p + 4);
+    static uint8_t reply[8 + 4096];
+    vmcu_plat_mutex_lock(fa->mx);
+    if (flags & 0x02u) {
+        /* BULK : octets lus dans le flux, puis read_pos avancé (store release). */
+        fake_stream_t *s = find_stream(fa, vmcu_wire_get_u16(p + 8));
+        uint64_t pos = vmcu_wire_get_u64(p + 12);
+        if (s != NULL) {
+            uint8_t *base = vmcu_plat_shm_ptr(s->shm);
+            for (uint32_t i = 0; i < len; ++i) {
+                spi_hash(fa, base + SHM_HEADER + (size_t)((pos + i) % s->capacity), 1);
+            }
+            __atomic_store_n((uint64_t *)(void *)(base + 32), pos + len, __ATOMIC_RELEASE);
+            fa->spi_bulk++;
+        }
+    } else if (!(flags & 0x04u)) {
+        spi_hash(fa, p + 8, len);
+    }
+    vmcu_plat_mutex_unlock(fa->mx);
+    if (flags & 0x01u) {
+        reply[0] = 0;
+        reply[1] = reply[2] = reply[3] = 0;
+        vmcu_wire_put_u32(reply + 4, len);
+        for (uint32_t i = 0; i < len && i < 4096; ++i) {
+            reply[8 + i] = (flags & 0x04u) ? 0x00u : (uint8_t)~p[8 + i];
+        }
+        send_frame(fa, VMCU_MSG_SPI_REPLY, VMCU_FLAG_REPLY, h->seq, reply, 8 + (len < 4096 ? len : 4096));
+    }
 }
 
 static void server_main(void *arg)
@@ -177,6 +297,12 @@ static void server_main(void *arg)
             handle_hello(fa, &h, payload);
         } else if (h.type == VMCU_MSG_I2C_XFER) {
             handle_i2c(fa, &h, payload);
+        } else if (h.type == VMCU_MSG_SPI_XFER) {
+            handle_spi(fa, &h, payload);
+        } else if (h.type == VMCU_MSG_STREAM_OPEN) {
+            handle_stream_open(fa, &h, payload);
+        } else if (h.type == VMCU_MSG_STREAM_CLOSE) {
+            handle_stream_close(fa, payload);
         } else if (h.type == VMCU_MSG_PING) {
             uint8_t target = (h.length > 0) ? payload[0] : 0;
             uint8_t pong[8] = { target, (target == 1 && !echo) ? 1 : 0, 0, 0, 0, 0, 0, 0 };
@@ -192,6 +318,8 @@ fake_app_t *fake_app_create(uint16_t board_id)
         exit(1);
     }
     fa->board_id = board_id;
+    fa->spi_hash = 2166136261u;
+    fa->max_minor = 2;
     fa->mx = vmcu_plat_mutex_create(false);
     fa->cv = vmcu_plat_cond_create();
     fa->write_mx = vmcu_plat_mutex_create(false);
@@ -233,6 +361,11 @@ void fake_app_run(fake_app_t *fa)
     fa->thread = vmcu_plat_thread_start(server_main, fa);
 }
 
+void fake_app_set_protocol_minor(fake_app_t *fa, uint8_t minor)
+{
+    fa->max_minor = minor;
+}
+
 void fake_app_set_echo(fake_app_t *fa, bool present)
 {
     vmcu_plat_mutex_lock(fa->mx);
@@ -251,6 +384,15 @@ void fake_app_set_i2c_reg(fake_app_t *fa, uint8_t reg, uint8_t value)
 {
     vmcu_plat_mutex_lock(fa->mx);
     fa->i2c_mem[reg] = value;
+    vmcu_plat_mutex_unlock(fa->mx);
+}
+
+void fake_app_spi_stats(fake_app_t *fa, uint64_t *bytes, uint32_t *hash, unsigned *bulk)
+{
+    vmcu_plat_mutex_lock(fa->mx);
+    *bytes = fa->spi_bytes;
+    *hash = fa->spi_hash;
+    *bulk = fa->spi_bulk;
     vmcu_plat_mutex_unlock(fa->mx);
 }
 

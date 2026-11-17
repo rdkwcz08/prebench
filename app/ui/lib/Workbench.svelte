@@ -37,6 +37,7 @@
     snap,
     WIRE_HEX,
     wirePath,
+    type Pad,
     type Point,
   } from './geometry';
 
@@ -86,6 +87,26 @@
       : [],
   );
   const selectedPin = $derived(bench.selection?.kind === 'pin' ? bench.selection.endpoint : null);
+
+  /** Part remplie d'une jauge (0 à 1), au pourcent : le style ne change que si l'écart se voit. */
+  const part = (v: number): number => Math.round(Math.min(1, Math.max(0, v)) * 100) / 100;
+  /** Broche survolée : seule son infobulle suit la mesure à chaque image. */
+  let hoveredPin = $state<string | null>(null);
+  /** Broche de la carte sous le pointeur (délégation : aucun gestionnaire par pastille). */
+  function onpointerover(e: PointerEvent): void {
+    const el = e.target instanceof Element ? e.target.closest('rect.pin[data-endpoint]') : null;
+    hoveredPin = el?.getAttribute('data-endpoint') ?? null;
+  }
+  /** Infobulle d'une broche : repère, et mesure ou niveau seulement au survol. */
+  function pinTip(p: Pad, live: boolean): string {
+    const base = `${p.label}${p.label !== p.signal ? ` (${p.signal})` : ''}, ${p.header}:${p.index}`;
+    if (!live) return base;
+    const pin = bench.pins[p.signal];
+    if (pin?.pwm) return `${base} : PWM ${frequency(pin.pwm.freq_hz)}, ${percent(pin.pwm.duty)}`;
+    if (pin?.adc) return `${base} : ADC ${volts(pin.adc.volts)}`;
+    const level = bench.nets[p.signal];
+    return level ? `${base} : ${LEVEL_WORD[level].toLowerCase()}` : base;
+  }
 
   /** Une extrémité peut-elle recevoir le fil en cours ? */
   function accepts(endpoint: string): boolean {
@@ -324,10 +345,50 @@
     editingNote = await bench.addNote(pos);
   }
 
-  /** Note au centre de la vue (bouton « Ajouter une note » de la barre d'outils). */
+  /** Encombrement maximal d'une note (charte : 240 px de large, deux lignes), pour la poser sur le tapis libre. */
+  const NOTE_BOX: Point = [GRID * 10, GRID * 2];
+
+  /**
+   * Emplacement libre le plus proche de `start` (pas de la grille, anneaux de
+   * plus en plus larges) : une note posée sous un composant serait cachée et
+   * impossible à saisir, les composants étant dessinés au-dessus des notes.
+   */
+  function freeSpot(start: Point): Point {
+    const boxes: [number, number, number, number][] = [];
+    const size = project?.layout?.size ?? GENERIC_BOARD;
+    boxes.push([BOARD_ORIGIN[0], BOARD_ORIGIN[1], BOARD_ORIGIN[0] + size[0], BOARD_ORIGIN[1] + size[1]]);
+    for (const inst of bench.instances) {
+      const v = inst.info?.manifest.view ?? { width: 40, height: 40 };
+      boxes.push([inst.pos[0], inst.pos[1], inst.pos[0] + v.width, inst.pos[1] + v.height + CAPTION]);
+    }
+    // Un pas de grille de marge : contour de sélection, pastilles et repère des composants.
+    const free = ([x, y]: Point): boolean =>
+      boxes.every(
+        ([x0, y0, x1, y1]) =>
+          x + NOTE_BOX[0] + GRID <= x0 || x >= x1 + GRID || y + NOTE_BOX[1] + GRID <= y0 || y >= y1 + GRID,
+      );
+    // Dans la partie visible de la paillasse : une note hors de la vue serait tout aussi introuvable.
+    const r = viewport?.getBoundingClientRect();
+    const visible = ([x, y]: Point): boolean =>
+      r === undefined ||
+      (x * zoom + pan[0] >= 0 &&
+        y * zoom + pan[1] >= 0 &&
+        (x + NOTE_BOX[0]) * zoom + pan[0] <= r.width &&
+        (y + NOTE_BOX[1]) * zoom + pan[1] <= r.height);
+    for (let ring = 0; ring <= 40; ring += 1)
+      for (let dy = -ring; dy <= ring; dy += 1)
+        for (let dx = -ring; dx <= ring; dx += 1) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue; // bord de l'anneau seulement
+          const p: Point = [start[0] + dx * GRID, start[1] + dy * GRID];
+          if (free(p) && visible(p)) return p;
+        }
+    return start;
+  }
+
+  /** Note au centre de la vue, sur le tapis libre (bouton « Ajouter une note » de la barre d'outils). */
   export function addNoteAtCenter(): void {
     bench.mode = 'edit';
-    void addNote(center());
+    void addNote(freeSpot(center()));
   }
 
   function finishNote(index: number, input: HTMLInputElement): void {
@@ -374,6 +435,7 @@
   {onpointermove}
   {onpointerup}
   {onwheel}
+  {onpointerover}
   {ondblclick}
   {oncontextmenu}
 >
@@ -451,16 +513,23 @@
           {@const adc = bench.pins[p.signal]?.adc}
           {#if adc && p.wireable}
             <!-- Entrée ADC : jauge verticale de la tension, du bas vers le haut -->
-            {@const h = adc.max > 0 ? (9 * adc.raw) / adc.max : 0}
+            <!-- Part remplie : variable --part (transform), une modification par image -->
             <g class="net analog" aria-hidden="true">
               <rect x={p.pos[0] - 4.5} y={p.pos[1] - 4.5} width="9" height="9" rx="1" />
-              <rect x={p.pos[0] - 4.5} y={p.pos[1] + 4.5 - h} width="9" height={h} class="duty" />
+              <rect
+                x={p.pos[0] - 4.5}
+                y={p.pos[1] - 4.5}
+                width="9"
+                height="9"
+                class="duty"
+                style="--part: {part(adc.max > 0 ? adc.raw / adc.max : 0)}"
+              />
             </g>
           {:else if pwm && p.wireable && (level === 'high' || level === 'low')}
             <!-- PWM : jauge du rapport cyclique, part haute à gauche (forme + mot au survol) -->
             <g class="net pwm" aria-hidden="true">
               <rect x={p.pos[0] - 4.5} y={p.pos[1] - 4.5} width="9" height="9" rx="1" />
-              <rect x={p.pos[0] - 4.5} y={p.pos[1] - 4.5} width={9 * Math.min(1, Math.max(0, pwm.duty))} height="9" class="duty" />
+              <rect x={p.pos[0] - 4.5} y={p.pos[1] - 4.5} width="9" height="9" class="duty" style="--part: {part(pwm.duty)}" />
             </g>
           {:else if level && p.wireable}
             <g class="net {level}" aria-hidden="true">
@@ -485,15 +554,7 @@
             class:chosen={selectedPin === p.endpoint || drawing?.from === p.endpoint}
             data-endpoint={p.endpoint}
           >
-            <title
-              >{p.label}{p.label !== p.signal ? ` (${p.signal})` : ''}, {p.header}:{p.index}{bench.pins[p.signal]?.pwm
-                ? ` : PWM ${frequency(bench.pins[p.signal]!.pwm!.freq_hz)}, ${percent(bench.pins[p.signal]!.pwm!.duty)}`
-                : bench.pins[p.signal]?.adc
-                  ? ` : ADC ${volts(bench.pins[p.signal]!.adc!.volts)}`
-                  : bench.nets[p.signal]
-                    ? ` : ${LEVEL_WORD[bench.nets[p.signal]!].toLowerCase()}`
-                    : ''}</title
-            >
+            <title>{pinTip(p, hoveredPin === p.endpoint)}</title>
           </rect>
         {/each}
         {#each compPins as p (p.endpoint)}
@@ -573,6 +634,9 @@
   /* Note sur le tapis (charte, « Note sur la paillasse ») : texte sobre, filet à gauche */
   .note {
     position: absolute;
+    /* Le monde (.world) a une largeur nulle : sans largeur propre, la note se
+       réduirait à sa largeur minimale (une lettre par ligne). */
+    width: max-content;
     max-width: 240px;
     padding: 2px 8px;
     border-left: 2px solid color-mix(in srgb, var(--pb-mat-ink) 50%, transparent);
@@ -734,6 +798,15 @@
   .net.analog .duty {
     fill: var(--pb-high);
     stroke: none;
+    transform-box: fill-box;
+  }
+  .net.pwm .duty {
+    transform-origin: left;
+    transform: scaleX(var(--part));
+  }
+  .net.analog .duty {
+    transform-origin: bottom;
+    transform: scaleY(var(--part));
   }
   .net.conflict rect {
     fill: var(--pb-conflict);

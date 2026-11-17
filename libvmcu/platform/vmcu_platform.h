@@ -89,6 +89,34 @@ bool vmcu_plat_cond_timedwait(vmcu_plat_cond_t *cond, vmcu_plat_mutex_t *mutex, 
 void vmcu_plat_cond_signal(vmcu_plat_cond_t *cond);
 void vmcu_plat_cond_broadcast(vmcu_plat_cond_t *cond);
 
+/* --- Mémoire partagée (canal flux, docs/protocol.md section 6) ---------------- */
+
+/*
+ * POSIX : shm_open + mmap ; le nom est retiré (shm_unlink) dès que l'app a
+ * ouvert le segment, pour qu'un firmware arrêté brutalement ne laisse rien.
+ * Windows : CreateFileMapping (fichier d'échange) ; le segment disparaît avec
+ * la dernière poignée, vmcu_plat_shm_unlink est sans effet.
+ */
+typedef struct vmcu_plat_shm vmcu_plat_shm_t;
+
+/** Nom d'un segment (section 6.1) : /pb<pid>_<carte>_<flux>, Local\prebench_… sous Windows. */
+void vmcu_plat_shm_name(char *out, size_t cap, uint32_t pid, uint16_t board_id, uint16_t stream_id);
+
+/** Crée un segment de `size` octets, mis à zéro. Échoue s'il existe déjà. */
+vmcu_plat_result_t vmcu_plat_shm_create(const char *name, size_t size, vmcu_plat_shm_t **out);
+
+/** Ouvre un segment existant de `size` octets (tests : rôle de l'app). */
+vmcu_plat_result_t vmcu_plat_shm_open(const char *name, size_t size, vmcu_plat_shm_t **out);
+
+/** Début du segment projeté (aligné sur une page). */
+void *vmcu_plat_shm_ptr(vmcu_plat_shm_t *shm);
+
+/** Retire le nom du segment ; les projections existantes restent valides. */
+void vmcu_plat_shm_unlink(vmcu_plat_shm_t *shm);
+
+/** Retire la projection et libère. */
+void vmcu_plat_shm_close(vmcu_plat_shm_t *shm);
+
 /* --- Processus ----------------------------------------------------------------- */
 
 /**

@@ -94,9 +94,19 @@ export function demoProject(): Json {
     { id: 'LD2', type: 'led', params: { ...defaults.led, color: 'green' }, pos: null },
     { id: 'B1', type: 'button', params: { ...defaults.button, color: 'blue' }, pos: null },
   ];
-  ids
-    .filter((id) => id !== 'led' && id !== 'button')
-    .forEach((id, i) => instances.push({ id, type: id, params: defaults[id] ?? {}, pos: [520 + i * 140, 80] }));
+  // À droite de la carte, en rangées de 900 unités au plus, selon la taille
+  // de chaque vue : avec les grands modules (TFT, ruban), une seule rangée
+  // dépasserait la vue ajustée et la carte sortirait de l'écran.
+  let [x, y, rowHeight] = [520, 80, 0];
+  for (const id of ids.filter((t) => t !== 'led' && t !== 'button')) {
+    const view = (components[id] as { manifest: { view: { width: number; height: number } } }).manifest.view;
+    if (x > 520 && x + view.width > 520 + 900) {
+      [x, y, rowHeight] = [520, y + rowHeight + 48, 0];
+    }
+    instances.push({ id, type: id, params: defaults[id] ?? {}, pos: [x, y] });
+    x += view.width + 48;
+    rowHeight = Math.max(rowHeight, view.height);
+  }
   return {
     path: PROJECT_PATH,
     framework: 'stm32-hal',
@@ -154,7 +164,7 @@ export function responses(): Record<string, Json> {
     open_in_editor: null,
     uart_send: null,
     export_serial: '/Users/demo/Documents/Prebench/blinky-stm32-hal/serie.txt',
-    preview_states: { LD2: { brightness: 0 }, B1: { pressed: false }, echo: { pings: 0 }, led1: { brightness: 0 } },
+    preview_states: { LD2: { brightness: 0 }, B1: { pressed: false }, echo: { pings: 0, spiBytes: 0 }, led1: { brightness: 0 } },
     save_bench: { pending: [], checks: [] },
     start_debug: {
       config_name: 'Prebench : déboguer le firmware',
@@ -227,7 +237,10 @@ export function installTauriMock(json: string): void {
   w.__pbSetResponse = (cmd: string, json: string): void => {
     data[cmd] = JSON.parse(json);
   };
+  const sent: Record<string, number> = {};
+  w.__pbSent = sent;
   const send = (event: string, payload: unknown): void => {
+    sent[event] = (sent[event] ?? 0) + 1;
     for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload });
   };
   // Les tests émettent encore « sim:states », « sim:nets », « sim:pins »

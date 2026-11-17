@@ -6,6 +6,29 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/). Ver
 
 ## [Non publié]
 
+## [0.2.5] - 2026-11-17
+
+**Aperçu technique** : bus SPI, écran TFT ILI9341, ruban de LED WS2812, et une interface qui ne redessine la fenêtre qu'une fois par image.
+
+### Ajouté
+
+- Bus SPI (STM32 HAL) : `HAL_SPI_Transmit`, `Receive`, `TransmitReceive` et leurs variantes `_IT` et `_DMA` avec callbacks, trames de 8 ou 16 bits, CS piloté en GPIO. Le composant dont la broche CS est active reçoit la transaction ; sans composant sélectionné, MISO est lu à 0xFF. Les écritures de plus de 4096 octets (trame d'écran) passent par la mémoire partagée.
+- Composant d'écho : broches SPI, il renvoie chaque octet reçu (exemple `tests/spi-loop`).
+- Écran TFT ILI9341 (240 × 320, SPI) : fenêtres d'écriture, orientation MADCTL dans les quatre sens, inversion, veille, rétroéclairage ; seuls les pixels écrits sont redessinés, nets à tous les zooms. Exemple `tests/tft-demo` avec une mire de couleurs.
+- Ruban de LED WS2812 (1 à 48 LED, ordre des couleurs GRB, RGB ou GRBW) piloté comme dans les tutoriels STM32 : `HAL_TIM_PWM_Start_DMA` d'un tampon de rapports cycliques, avec ses callbacks. Le même firmware tourne sur la vraie carte. Exemple `tests/ws2812-chase`.
+
+### Modifié
+
+- Interface : le cœur, le moniteur série et les écrans partagent une seule image d'affichage, à la cadence réglée ; WebKit ne redessine plus la fenêtre deux à trois fois par image.
+- Inspecteur : états des écrans, de l'écho et du ruban en français (« Allumé », « Couleurs inversées », « Octets reçus en SPI », « LED allumées »…).
+- Onglet Avertissements : une broche CS partagée par deux composants SPI est signalée comme un conflit, avec la marche à suivre.
+- `HAL_DMA_Init` n'avertit plus « non simulé » : les variantes `_DMA` des périphériques sont simulées.
+
+### Corrigé
+
+- Une broche écrite avant d'être configurée (CubeMX fixe le niveau de repos avant `HAL_GPIO_Init`) n'est plus signalée « lue flottante ».
+- Notes de la paillasse : elles s'affichent sur une ligne (jusqu'à 240 px) au lieu d'une lettre par ligne, et une note ajoutée par le bouton se pose sur le tapis libre, jamais sous un composant.
+
 ## [0.2.4] - 2026-11-16
 
 **Aperçu technique** : bus I2C, écran OLED, accéléromètre MPU6050, onglet Environnement, et délais du firmware exacts sur Mac.

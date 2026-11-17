@@ -220,6 +220,10 @@ const FIRST_TEMPLATE: &str = "blinky-stm32-hal";
 /// que d'ouvrir le modèle installé, non modifiable.
 #[tauri::command]
 pub fn default_project(app: AppHandle) -> Option<String> {
+    #[cfg(feature = "diag")]
+    if let Some(project) = crate::diag::project() {
+        return Some(project);
+    }
     let copy = projects_parent(&app).join(FIRST_TEMPLATE);
     copy.join("prebench.toml")
         .is_file()
@@ -264,6 +268,21 @@ pub async fn open_project(
 ) -> CoreResult<ProjectView> {
     let root = prebench_root(&app);
     let dir = simplified(Path::new(&path));
+    #[cfg(feature = "diag")]
+    if crate::diag::autostart(&path) {
+        // Version de diagnostic : simulation démarrée une fois l'interface prête.
+        let (app, path) = (app.clone(), path.clone());
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let state = tauri::Manager::state::<AppState>(&app);
+            let mut slot = state.sim.lock().await;
+            if !slot.as_ref().is_some_and(SimHandle::is_alive) {
+                if let Ok(sim) = launch(&app, Path::new(&path)).await {
+                    *slot = Some(sim);
+                }
+            }
+        });
+    }
     let view = project_view(&root, &dir, path)?;
     let mut session = state.session.lock().await;
     if session.as_ref().map(|s| s.dir.as_path()) != Some(dir.as_path()) {
@@ -1319,11 +1338,18 @@ pub async fn export_serial(
 /// Action sur un contrôle déclaré dans le manifeste (bouton, curseur…).
 #[tauri::command]
 pub async fn component_control(
+    #[cfg_attr(not(feature = "diag"), allow(unused_variables))] app: AppHandle,
     state: State<'_, AppState>,
     component: String,
     control: String,
     value: serde_json::Value,
 ) -> CoreResult<()> {
+    // Version de diagnostic : bilan du script injecté dans la page (diag.rs).
+    #[cfg(feature = "diag")]
+    if component == crate::diag::PAGE_COMPONENT {
+        crate::diag::page_report(&app, value.as_str().unwrap_or_default());
+        return Ok(());
+    }
     send(
         &state,
         SimMsg::Control {

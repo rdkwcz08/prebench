@@ -343,10 +343,13 @@ pub fn check(board: &Board, project: &Project, manifests: &BTreeMap<String, Valu
     }
     for (_, users) in cs_users {
         if users.len() > 1 {
+            // Comme une adresse I2C en double : les deux esclaves répondraient en
+            // même temps (la simulation ne sert que le premier).
             out.push(Check {
-                severity: Severity::Warn,
+                severity: Severity::Conflict,
                 text: format!(
-                    "Broche CS partagée par {} : chaque composant SPI doit avoir la sienne.",
+                    "Broche CS partagée par {} : les deux composants SPI seraient sélectionnés ensemble \
+                     et répondraient en même temps. Reliez chaque CS à sa propre broche GPIO (D10, D9…).",
                     users.join(", ")
                 ),
                 endpoints: users,

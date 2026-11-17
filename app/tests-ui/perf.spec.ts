@@ -42,7 +42,7 @@ function budgetProject(): Record<string, unknown> {
     instances: { pos: unknown }[];
     components: Record<string, { manifest: { params?: Record<string, { default?: unknown }> } }>;
   };
-  const toml = parseToml(readFileSync(`${repo}tests/budget/prebench.toml`, 'utf8')) as {
+  const toml = parseToml(readFileSync(`${repo}tests/${process.env.PREBENCH_PERF_PROJECT ?? 'budget'}/prebench.toml`, 'utf8')) as {
     components: { id: string; type: string; pos: [number, number] }[];
     wires: { from: string; to: string }[];
   };
@@ -303,4 +303,43 @@ test('export du banc WKWebView', () => {
     `${repo}app/test-results/wk-init.js`,
     `(${installTauriMock.toString()})(${JSON.stringify(JSON.stringify(data))});\n${replay}\n`,
   );
+
+  // Rejeu natif (banc.swift) : comme Tauri, un script évalué par le processus
+  // natif pour chaque événement ; un seul « sim:frame » par image (états, nets,
+  // broches modifiées, octets série), comme le cœur ; images d'écran à part.
+  type E = { t: number; name: string; payload: Record<string, unknown> };
+  const scripts: { t: number; s: string }[] = [];
+  const sentPins: Record<string, string> = {};
+  let frame: { t: number; payload: Record<string, unknown> } | null = null;
+  const flushFrame = (): void => {
+    if (frame && Object.keys(frame.payload).length > 0)
+      scripts.push({ t: frame.t, s: `window.__pbEmit("sim:frame", ${JSON.stringify(frame.payload)})` });
+    frame = null;
+  };
+  for (const e of list as E[]) {
+    if (e.name === 'sim:display') {
+      flushFrame();
+      scripts.push({ t: e.t, s: `window.__pbDisplay(${JSON.stringify(e.payload)})` });
+      continue;
+    }
+    if (frame === null || frame.t !== e.t) {
+      flushFrame();
+      frame = { t: e.t, payload: {} };
+    }
+    const p = frame.payload;
+    if (e.name === 'sim:states') p.states = { ...((p.states as object) ?? {}), ...e.payload };
+    else if (e.name === 'sim:nets') p.nets = { ...((p.nets as object) ?? {}), ...e.payload };
+    else if (e.name === 'sim:uart') p.uart = [...((p.uart as unknown[]) ?? []), e.payload];
+    else if (e.name === 'sim:pins') {
+      const delta: Record<string, unknown> = {};
+      for (const [pin, cfg] of Object.entries(e.payload)) {
+        const json = JSON.stringify(cfg);
+        if (sentPins[pin] !== json) delta[pin] = cfg;
+        sentPins[pin] = json;
+      }
+      if (Object.keys(delta).length > 0) p.pins = { ...((p.pins as object) ?? {}), ...delta };
+    }
+  }
+  flushFrame();
+  writeFileSync(`${repo}app/test-results/wk-events.json`, JSON.stringify({ duration, scripts }));
 });

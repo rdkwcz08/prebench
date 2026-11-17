@@ -1,0 +1,56 @@
+#:schema ../../docs/prebench.schema.json
+# Écran TFT ILI9341 sur SPI1 (D13 SCK, D12 MISO, D11 MOSI), CS sur D10 (PB6),
+# DC sur D9 (PC7), RESET sur D8 (PA9) ; rétroéclairage (LED) et VCC sur 3V3.
+# Le firmware affiche une mire de couleurs connues (barres rouge, vert, bleu,
+# blanc ; dégradés de rouge, de vert et de bleu ; repères magenta en haut à
+# gauche et cyan en haut à droite de l'image) dans les quatre orientations
+# MADCTL, puis anime un carré blanc qui ne réécrit que sa zone. USART2 annonce
+# chaque orientation.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id = "tft1"
+type = "ili9341"
+pos = [432, 48]
+
+[[wires]]
+from = "tft1.VCC"
+to = "board.CN6:4"
+
+[[wires]]
+from = "tft1.GND"
+to = "board.CN6:6"
+
+[[wires]]
+from = "tft1.LED"
+to = "board.CN6:4"
+
+[[wires]]
+from = "tft1.SCK"
+to = "board.CN5:6"
+
+[[wires]]
+from = "tft1.SDO"
+to = "board.CN5:5"
+
+[[wires]]
+from = "tft1.SDI"
+to = "board.CN5:4"
+
+[[wires]]
+from = "tft1.CS"
+to = "board.CN5:3"
+
+[[wires]]
+from = "tft1.DC"
+to = "board.CN5:2"
+
+[[wires]]
+from = "tft1.RST"
+to = "board.CN5:1"

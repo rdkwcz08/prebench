@@ -1,9 +1,8 @@
 /*
  * libvmcu/shims/stm32-hal/include/stm32f4xx_hal_spi.h — Module SPI du shim.
  *
- * Phase 1 : non simulé. Init appelle HAL_SPI_MspInit ; les émissions sont
- * acceptées sans effet, les octets reçus valent 0xFF (MISO sans esclave).
- * Simulation en phase 3.
+ * Simulé en phase 3 (stm32_hal_spi.c) : maître, CS en GPIO, variantes _IT et
+ * _DMA avec leurs callbacks.
  */
 #ifndef PREBENCH_STM32F4XX_HAL_SPI_H
 #define PREBENCH_STM32F4XX_HAL_SPI_H

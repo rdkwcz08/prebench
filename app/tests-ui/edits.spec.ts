@@ -55,14 +55,23 @@ test('notes : ajout, saisie, déplacement aimanté, annuler, suppression, clic d
   await input.press('Enter');
   await expect.poll(async () => (await last(bench)).notes.map((n) => n.text)).toEqual(['Bloc alimentation']);
   const pos0 = (await last(bench)).notes[0]!.pos;
+  // Sur une ligne (« Bloc alimentation » tient dans 240 px), posée sur le
+  // tapis libre : pas sous un composant, qui la cacherait.
+  const noteBox = await page.locator('[data-note="0"]').boundingBox();
+  expect(noteBox?.height ?? 0).toBeLessThan(noteBox?.width ?? 0);
+  const [cx, cy] = await centerOf(page, '[data-note="0"]');
+  expect(
+    await page.evaluate(([px, py]) => document.elementFromPoint(px ?? 0, py ?? 0)?.closest('[data-note]') !== null, [cx, cy]),
+  ).toBe(true);
 
-  // Zoom à 100 % : un glissé de 50 px vaut 50 unités du tapis.
+  // Glissé de 50 × 26 unités du tapis au zoom courant (la note reste à l'écran), aimanté à 48 × 24.
   await page.locator('main').click({ position: { x: 5, y: 5 } });
-  await page.keyboard.press('ControlOrMeta+1');
+  const style = (await page.locator('.world').getAttribute('style')) ?? '';
+  const z = Number(/scale\(([\d.]+)\)/.exec(style)?.[1] ?? '1');
   const [x, y] = await centerOf(page, '[data-note="0"]');
   await page.mouse.move(x, y);
   await page.mouse.down();
-  await page.mouse.move(x + 50, y + 26, { steps: 5 });
+  await page.mouse.move(x + 50 * z, y + 26 * z, { steps: 5 });
   await page.mouse.up();
   await expect.poll(async () => (await last(bench)).notes[0]?.pos).toEqual([pos0[0] + 48, pos0[1] + 24]);
   await page.keyboard.press('ControlOrMeta+z');

@@ -119,6 +119,15 @@ typedef enum {
     HAL_TIM_ACTIVE_CHANNEL_CLEARED = 0x00U
 } HAL_TIM_ActiveChannel;
 
+/* Index des DMA d'un timer dans hdma[] (__HAL_LINKDMA de CubeMX). */
+#define TIM_DMA_ID_UPDATE      ((uint16_t)0x0000)
+#define TIM_DMA_ID_CC1         ((uint16_t)0x0001)
+#define TIM_DMA_ID_CC2         ((uint16_t)0x0002)
+#define TIM_DMA_ID_CC3         ((uint16_t)0x0003)
+#define TIM_DMA_ID_CC4         ((uint16_t)0x0004)
+#define TIM_DMA_ID_COMMUTATION ((uint16_t)0x0005)
+#define TIM_DMA_ID_TRIGGER     ((uint16_t)0x0006)
+
 typedef struct __TIM_HandleTypeDef {
     TIM_TypeDef                       *Instance;
     TIM_Base_InitTypeDef               Init;

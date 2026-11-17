@@ -1,0 +1,36 @@
+#:schema ../../docs/prebench.schema.json
+# Bus SPI1 (D13 = PA5 SCK, D12 = PA6 MISO, D11 = PA7 MOSI, AF5), CS logiciel
+# sur D10 (PB6), configuré comme dans STM32CubeMX.
+# echo1 : composant d'écho en boucle (SDI relié à SDO) : le firmware relit ce
+# qu'il émet. Il vérifie la boucle, le bus sans CS (MISO à 0xFF), envoie une
+# trame de 60 000 octets par DMA (mémoire partagée au-delà de 4096 octets),
+# puis relit un compteur toutes les 250 ms par HAL_SPI_TransmitReceive_IT :
+# USART2 affiche « boucle:<valeur> » au traceur.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id = "echo1"
+type = "echo"
+pos = [408, 96]
+
+[[wires]]
+from = "echo1.SCK"
+to = "board.CN5:6"
+
+[[wires]]
+from = "echo1.SDO"
+to = "board.CN5:5"
+
+[[wires]]
+from = "echo1.SDI"
+to = "board.CN5:4"
+
+[[wires]]
+from = "echo1.CS"
+to = "board.CN5:3"

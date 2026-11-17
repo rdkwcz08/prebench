@@ -75,6 +75,22 @@ pub enum ModelCmd {
         tx: Vec<u8>,
         rx_len: usize,
     },
+    /// Transaction SPI pendant que le composant `id` est sélectionné (onSPI) :
+    /// `tx` vide = le firmware ne fait que lire (le modèle voit `len` octets
+    /// 0xFF). Avec `seq`, le firmware attend SpiReply (exactement `len` octets).
+    Spi {
+        id: String,
+        seq: Option<u32>,
+        tx: Vec<u8>,
+        len: usize,
+    },
+    /// Trame d'un ruban de LED adressables sur l'entrée `iface` du composant
+    /// `id` (onLedStrip), octets dans l'ordre du fil.
+    LedStrip {
+        id: String,
+        iface: String,
+        data: Vec<u8>,
+    },
     /// Interrupteur d'alimentation de la paillasse (phase 2, section 10.4).
     Power(bool),
     /// Grandeurs du panneau environnement (JSON d'Environment), à tous les
@@ -112,6 +128,11 @@ pub enum ModelEvent {
     I2cReply {
         seq: u32,
         status: u8,
+        rx: Vec<u8>,
+    },
+    /// Réponse à ModelCmd::Spi avec seq : exactement `len` octets.
+    SpiReply {
+        seq: u32,
         rx: Vec<u8>,
     },
     /// Au moins une instance a appelé invalidate() depuis le dernier FlushStates.
@@ -217,6 +238,8 @@ struct Instance {
     dispatch: Persistent<Function<'static>>,
     state_fn: Persistent<Function<'static>>,
     i2c_fn: Persistent<Function<'static>>,
+    spi_fn: Persistent<Function<'static>>,
+    strip_fn: Persistent<Function<'static>>,
     context: Context,
     _runtime: Runtime,
     faulted: bool,
@@ -316,6 +339,7 @@ const ctx = Object.freeze({{
     return Object.freeze({{
       width, height, format,
       blit: (x, y, w, hh, data) => h.blit(Number(x), Number(y), Number(w), Number(hh), data),
+      setScan: (sc) => h.setScan(!!sc.swapXY, !!sc.mirrorX, !!sc.mirrorY, !!sc.bgr),
     }});
   }},
   warn: (m) => h.warn(String(m)),
@@ -344,6 +368,15 @@ export function i2c(address, tx, rxLength) {{
     return {{ s: 0, rx }};
   }}
   return {{ s: r && r.nack === "data" ? 2 : 1 }};
+}}
+export function ledStrip(data, iface) {{
+  model.onLedStrip?.(data, iface);
+}}
+export function spi(tx, wantsRx) {{
+  if (typeof model.onSPI !== "function") return undefined;
+  const r = model.onSPI(Object.freeze({{ tx, wantsRx }}));
+  if (!wantsRx || r === undefined || r === null) return undefined;
+  return r instanceof Uint8Array ? r : Uint8Array.from(r);
 }}
 "#,
         volts = spec.logic_voltage
@@ -484,6 +517,34 @@ fn install_host(
         )?,
     )?;
 
+    let h = Rc::clone(host);
+    obj.set(
+        "setScan",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'_>,
+                  swap_xy: bool,
+                  mirror_x: bool,
+                  mirror_y: bool,
+                  bgr: bool|
+                  -> rquickjs::Result<()> {
+                let throw = |m: String| Exception::throw_message(&ctx, &m);
+                let mut host = h.borrow_mut();
+                let fb = host
+                    .display
+                    .as_mut()
+                    .ok_or_else(|| throw("setScan avant ctx.createDisplay".into()))?;
+                fb.set_scan(display::Scan {
+                    swap_xy,
+                    mirror_x,
+                    mirror_y,
+                    bgr,
+                })
+                .map_err(|e| throw(e.to_string()))
+            },
+        )?,
+    )?;
+
     let (h, owner) = (Rc::clone(host), id.to_string());
     obj.set(
         "warn",
@@ -577,14 +638,18 @@ impl Instance {
             let dispatch: Function = module.get("dispatch").map_err(|e| describe(&ctx, e))?;
             let state: Function = module.get("state").map_err(|e| describe(&ctx, e))?;
             let i2c: Function = module.get("i2c").map_err(|e| describe(&ctx, e))?;
+            let spi: Function = module.get("spi").map_err(|e| describe(&ctx, e))?;
+            let strip: Function = module.get("ledStrip").map_err(|e| describe(&ctx, e))?;
             Ok::<_, String>((
                 Persistent::save(&ctx, dispatch),
                 Persistent::save(&ctx, state),
                 Persistent::save(&ctx, i2c),
+                Persistent::save(&ctx, spi),
+                Persistent::save(&ctx, strip),
             ))
         });
         deadline.store(u64::MAX, Ordering::Relaxed);
-        let (dispatch, state_fn, i2c_fn) = loaded?;
+        let (dispatch, state_fn, i2c_fn, spi_fn, strip_fn) = loaded?;
 
         let tick = match spec.source.tick_hz() {
             hz if hz > 0.0 => Some(Duration::from_secs_f64(1.0 / hz.min(60.0))),
@@ -599,6 +664,8 @@ impl Instance {
             dispatch,
             state_fn,
             i2c_fn,
+            spi_fn,
+            strip_fn,
             context,
             _runtime: runtime,
             faulted: false,
@@ -721,6 +788,59 @@ impl Instance {
         Ok(reply)
     }
 
+    /// Transaction SPI : octets rendus par le modèle (au plus `len`, avec la
+    /// longueur rendue), ou None s'il ne répond rien. Un composant en défaut
+    /// ne répond plus (MISO à 0xFF).
+    fn spi(&mut self, tx: &[u8], len: usize, wants_rx: bool) -> Result<Option<Bytes>, String> {
+        if self.faulted {
+            return Ok(None);
+        }
+        let t0 = self.begin();
+        let result = self.context.with(|ctx| {
+            let run = || -> rquickjs::Result<Option<TypedArray<u8>>> {
+                let f = self.spi_fn.clone().restore(&ctx)?;
+                let data = if tx.is_empty() {
+                    vec![0xFF; len]
+                } else {
+                    tx.to_vec()
+                };
+                let tx = TypedArray::<u8>::new(ctx.clone(), data)?;
+                f.call((tx, wants_rx))
+            };
+            let rx = run().map_err(|e| describe(&ctx, e))?;
+            match rx {
+                Some(array) => js_bytes::copy(&array, len)
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+                None => Ok(None),
+            }
+        });
+        self.deadline.store(u64::MAX, Ordering::Relaxed);
+        let reply = result.map_err(|e| self.fault(e))?;
+        self.end(t0, "onSPI")?;
+        Ok(reply)
+    }
+
+    /// Trame d'un ruban (onLedStrip). Un composant en défaut ne reçoit plus rien.
+    fn led_strip(&mut self, data: &[u8], iface: &str) -> Result<(), String> {
+        if self.faulted {
+            return Ok(());
+        }
+        let t0 = self.begin();
+        let result = self.context.with(|ctx| {
+            let run = || -> rquickjs::Result<()> {
+                let f = self.strip_fn.clone().restore(&ctx)?;
+                let data = TypedArray::<u8>::new(ctx.clone(), data.to_vec())?;
+                f.call((data, iface))
+            };
+            run().map_err(|e| describe(&ctx, e))
+        });
+        self.deadline.store(u64::MAX, Ordering::Relaxed);
+        result.map_err(|e| self.fault(e))?;
+        self.end(t0, "onLedStrip")?;
+        Ok(())
+    }
+
     fn fault(&mut self, error: String) -> String {
         self.faulted = true;
         format!("composant {} arrêté : {error}", self.id)
@@ -729,11 +849,17 @@ impl Instance {
 
 /// Réponse I2C à exactement `rx_len` octets : complétée par 0xFF ou tronquée,
 /// avec un avertissement la première fois (component-api.d.ts, I2CResponse).
-fn fit_rx(inst: &mut Instance, rx: Bytes, rx_len: usize, emit: &dyn Fn(ModelEvent)) -> Vec<u8> {
+fn fit_rx(
+    inst: &mut Instance,
+    bus: &str,
+    rx: Bytes,
+    rx_len: usize,
+    emit: &dyn Fn(ModelEvent),
+) -> Vec<u8> {
     if rx.total != rx_len && !inst.rx_len_warned {
         inst.rx_len_warned = true;
         emit(ModelEvent::Warn(format!(
-            "{} : réponse I2C de {} octets pour {rx_len} demandés (complétée par 0xFF ou tronquée)",
+            "{} : réponse {bus} de {} octets pour {rx_len} demandés (complétée par 0xFF ou tronquée)",
             inst.id, rx.total
         )));
     }
@@ -776,7 +902,25 @@ fn run(
 
     let mut pending: Option<ModelCmd> = None;
     let mut since_send = 0u32;
+    // Version de diagnostic : temps CPU de ce fil et commandes reçues, au Journal.
+    #[cfg(feature = "diag")]
+    let mut diag = (Instant::now(), cpu_ns(), 0u64);
     loop {
+        #[cfg(feature = "diag")]
+        {
+            diag.2 += 1;
+            let elapsed = diag.0.elapsed();
+            if elapsed >= crate::diag::REPORT_EVERY {
+                let cpu =
+                    cpu_ns().saturating_sub(diag.1) as f64 / elapsed.as_nanos() as f64 * 100.0;
+                let rate = diag.2 as f64 / elapsed.as_secs_f64();
+                let text =
+                    format!("diag : fil « modèles » {cpu:.1} % d'un cœur, {rate:.0} commandes/s");
+                eprintln!("{text}");
+                emit(ModelEvent::Log(text));
+                diag = (Instant::now(), cpu_ns(), 0);
+            }
+        }
         let cmd = match pending.take() {
             Some(cmd) => Some(cmd),
             None => {
@@ -803,7 +947,12 @@ fn run(
         // Réponse attendue aussitôt : le lot part juste après cette commande.
         let urgent = matches!(
             cmd,
-            Some(ModelCmd::Ping { .. } | ModelCmd::I2c { .. } | ModelCmd::FlushStates)
+            Some(
+                ModelCmd::Ping { .. }
+                    | ModelCmd::I2c { .. }
+                    | ModelCmd::Spi { seq: Some(_), .. }
+                    | ModelCmd::FlushStates
+            )
         );
         match cmd {
             None => run_ticks(&mut instances, emit),
@@ -845,7 +994,7 @@ fn run(
             }) => {
                 let (status, rx) = match instances.iter_mut().find(|i| i.id == id) {
                     Some(inst) => match inst.i2c(address, &tx, rx_len) {
-                        Ok((0, rx)) => (0, fit_rx(inst, rx, rx_len, emit)),
+                        Ok((0, rx)) => (0, fit_rx(inst, "I2C", rx, rx_len, emit)),
                         Ok((status, _)) => (status, Vec::new()),
                         Err(e) => {
                             emit(ModelEvent::Warn(e));
@@ -855,6 +1004,29 @@ fn run(
                     None => (1, Vec::new()),
                 };
                 emit(ModelEvent::I2cReply { seq, status, rx });
+            }
+            Some(ModelCmd::Spi { id, seq, tx, len }) => {
+                // Écriture seule (trame d'écran) : aucune réponse construite.
+                let rx = match instances.iter_mut().find(|i| i.id == id) {
+                    Some(inst) => match inst.spi(&tx, len, seq.is_some()) {
+                        Ok(Some(rx)) if seq.is_some() => Some(fit_rx(inst, "SPI", rx, len, emit)),
+                        Ok(_) => None,
+                        Err(e) => {
+                            emit(ModelEvent::Warn(e));
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                if let Some(seq) = seq {
+                    let rx = rx.unwrap_or_else(|| vec![0xFF; len]); // MISO sans réponse
+                    emit(ModelEvent::SpiReply { seq, rx });
+                }
+            }
+            Some(ModelCmd::LedStrip { id, iface, data }) => {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
+                    report(inst.led_strip(&data, &iface), emit);
+                }
             }
             Some(ModelCmd::Environment(json)) => {
                 for inst in &mut instances {
@@ -1024,6 +1196,67 @@ mod tests {
             states(&models, &rx),
             vec![("LD2".into(), r#"{"brightness":1}"#.into())]
         );
+    }
+
+    /// Ruban WS2812 : la même trame lue selon l'ordre des couleurs (GRB, RGB,
+    /// GRBW avec le blanc ajouté), trame courte (les LED suivantes gardent leur
+    /// couleur), rien sans alimentation.
+    #[test]
+    fn ws2812_orders() {
+        let frame = vec![0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80];
+        for (order, first, second) in [
+            ("grb", 0x201030, 0x504060),
+            ("rgb", 0x102030, 0x405060),
+            ("grbw", 0x605070, 0xE0D0F0),
+        ] {
+            let mut s = spec("strip", provided("ws2812"));
+            s.params.insert("count".into(), 3.into());
+            s.params.insert("order".into(), order.into());
+            let (models, rx) = start(vec![s]);
+            let _ = states(&models, &rx);
+            let strip = |data: Vec<u8>| {
+                models.send(ModelCmd::LedStrip {
+                    id: "strip".into(),
+                    iface: "DIN".into(),
+                    data,
+                });
+            };
+            strip(frame.clone()); // non alimenté : ignorée
+            assert_eq!(
+                states(&models, &rx),
+                Vec::<(String, String)>::new(),
+                "{order}"
+            );
+            for (pin, level) in [("GND", Level::Low), ("5V", Level::High)] {
+                models.send(ModelCmd::Pin {
+                    id: "strip".into(),
+                    pin: pin.into(),
+                    state: NetState {
+                        level,
+                        ..Default::default()
+                    },
+                });
+            }
+            strip(frame.clone());
+            let colors = |st: Vec<(String, String)>| -> Vec<u64> {
+                let v: serde_json::Value =
+                    serde_json::from_str(&st.last().expect("état").1).expect("JSON");
+                v["colors"]
+                    .as_array()
+                    .expect("couleurs")
+                    .iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .collect()
+            };
+            assert_eq!(
+                colors(states(&models, &rx)),
+                vec![first, second, 0],
+                "{order}"
+            );
+            // Trame d'une seule LED : les suivantes gardent leur couleur.
+            strip(vec![0, 0, 0, 0]);
+            assert_eq!(colors(states(&models, &rx)), vec![0, second, 0], "{order}");
+        }
     }
 
     /// MPU6050 : en veille au reset (mesures à 0), réveillé par PWR_MGMT_1 = 0 ;
@@ -1248,8 +1481,11 @@ mod tests {
             }
         };
         assert!(warn.contains("temps d'exécution dépassé"), "{warn}");
+        // Plafond dur : 50 ms de temps CPU. Sur une machine chargée (runner de
+        // CI), le temps écoulé peut en être plusieurs fois plus long : la borne
+        // vérifie seulement que la boucle est arrêtée, pas laissée tourner.
         assert!(
-            t0.elapsed() < Duration::from_millis(200),
+            t0.elapsed() < Duration::from_secs(1),
             "interrompu trop tard : {:?}",
             t0.elapsed()
         );
@@ -1274,11 +1510,13 @@ mod tests {
             });
         };
         // Lent, rapide, lent, lent : jamais trois de suite, aucun défaut.
-        for ms in [10, 0, 10, 10] {
+        // 30 ms de temps écoulé : au-delà des 5 ms de CPU même si le fil n'a
+        // qu'une part du processeur (runner chargé), sous le plafond de 50 ms.
+        for ms in [30, 0, 30, 30] {
             control(ms);
         }
         let mut logs = Vec::new();
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + Duration::from_secs(2);
         while let Ok(e) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             match e {
                 ModelEvent::Log(l) => logs.push(l),
@@ -1296,7 +1534,7 @@ mod tests {
             "remis à zéro par l'appel rapide : {logs:#?}"
         );
         // Troisième lent de suite : défaut.
-        control(10);
+        control(30);
         let warn = loop {
             if let ModelEvent::Warn(w) = rx.recv_timeout(Duration::from_secs(5)).expect("défaut") {
                 break w;

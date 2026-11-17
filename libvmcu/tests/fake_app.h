@@ -33,12 +33,22 @@ void fake_app_initial_adc(fake_app_t *fa, uint8_t unit, uint8_t channel, uint16_
 /** Écoute, pose PREBENCH_SOCKET / PREBENCH_BOARD_ID, lance le fil serveur. */
 void fake_app_run(fake_app_t *fa);
 
+/** Version mineure du protocole de la fausse app (2 par défaut ; 1 : app 1.1). Avant fake_app_run. */
+void fake_app_set_protocol_minor(fake_app_t *fa, uint8_t minor);
+
 /** Présence d'un composant d'écho (PING cible Worker). */
 void fake_app_set_echo(fake_app_t *fa, bool present);
 
 /** Esclave I2C à registres à l'adresse 7 bits addr7 (0 : aucun, tout est NACK). */
 void fake_app_set_i2c_device(fake_app_t *fa, uint8_t addr7);
 void fake_app_set_i2c_reg(fake_app_t *fa, uint8_t reg, uint8_t value);
+
+/**
+ * Esclave SPI de la fausse app : répond le complément des octets émis. Octets
+ * émis reçus (en ligne ou par le flux bulk), empreinte FNV-1a dans l'ordre, et
+ * nombre de transactions passées par le flux bulk.
+ */
+void fake_app_spi_stats(fake_app_t *fa, uint64_t *bytes, uint32_t *hash, unsigned *bulk);
 
 void fake_app_send_gpio_input(fake_app_t *fa, uint8_t port, uint8_t pin, uint8_t level);
 void fake_app_send_empty(fake_app_t *fa, uint16_t type); /* PAUSE, RESUME… */

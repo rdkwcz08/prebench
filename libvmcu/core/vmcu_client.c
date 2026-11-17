@@ -689,6 +689,8 @@ vmcu_status_t vmcu_init(const char *board, const char *framework)
     vmcu__gpio_init();
     vmcu__uart_init();
     vmcu__pwm_init();
+    vmcu__spi_init();
+    vmcu__led_strip_init();
     vmcu__diag_init();
     create_primitives();
     connect_to_app(address);
@@ -775,6 +777,16 @@ uint8_t vmcu_adc_bits(void)
 {
     (void)vmcu__ensure_init();
     return g.adc_bits;
+}
+
+vmcu_board_id_t vmcu__board_id(void)
+{
+    return g.board_id;
+}
+
+uint8_t vmcu__proto_minor(void)
+{
+    return g.proto_minor;
 }
 
 /* --- Ping (section 8.1) ------------------------------------------------------------------- */

@@ -386,6 +386,87 @@ void vmcu_plat_cond_broadcast(vmcu_plat_cond_t *cond)
 
 /* --- Processus ------------------------------------------------------------------------ */
 
+/* --- Mémoire partagée ---------------------------------------------------------- */
+
+struct vmcu_plat_shm {
+    HANDLE mapping;
+    void  *ptr;
+};
+
+void vmcu_plat_shm_name(char *out, size_t cap, uint32_t pid, uint16_t board_id, uint16_t stream_id)
+{
+    (void)snprintf(out, cap, "Local\\prebench_%u_%u_%u", (unsigned)pid, (unsigned)board_id,
+                   (unsigned)stream_id);
+}
+
+static vmcu_plat_result_t shm_finish(HANDLE mapping, size_t size, vmcu_plat_shm_t **out)
+{
+    void *ptr = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size);
+    struct vmcu_plat_shm *shm = calloc(1, sizeof *shm);
+    if (ptr == NULL || shm == NULL) {
+        if (ptr != NULL) {
+            (void)UnmapViewOfFile(ptr);
+        }
+        (void)CloseHandle(mapping);
+        free(shm);
+        return VMCU_PLAT_ERROR;
+    }
+    shm->mapping = mapping;
+    shm->ptr = ptr;
+    *out = shm;
+    return VMCU_PLAT_OK;
+}
+
+vmcu_plat_result_t vmcu_plat_shm_create(const char *name, size_t size, vmcu_plat_shm_t **out)
+{
+    *out = NULL;
+    if (size == 0) {
+        return VMCU_PLAT_ERROR;
+    }
+    uint64_t sz = (uint64_t)size;
+    /* Pages du fichier d'échange : zéro à la création. */
+    HANDLE mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                        (DWORD)(sz >> 32), (DWORD)(sz & 0xFFFFFFFFu), name);
+    if (mapping == NULL) {
+        return VMCU_PLAT_ERROR;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        (void)CloseHandle(mapping);
+        return VMCU_PLAT_ERROR;
+    }
+    return shm_finish(mapping, size, out);
+}
+
+vmcu_plat_result_t vmcu_plat_shm_open(const char *name, size_t size, vmcu_plat_shm_t **out)
+{
+    *out = NULL;
+    HANDLE mapping = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
+    if (mapping == NULL) {
+        return VMCU_PLAT_ERROR;
+    }
+    return shm_finish(mapping, size, out);
+}
+
+void *vmcu_plat_shm_ptr(vmcu_plat_shm_t *shm)
+{
+    return shm->ptr;
+}
+
+void vmcu_plat_shm_unlink(vmcu_plat_shm_t *shm)
+{
+    (void)shm; /* le segment disparaît avec la dernière poignée */
+}
+
+void vmcu_plat_shm_close(vmcu_plat_shm_t *shm)
+{
+    if (shm == NULL) {
+        return;
+    }
+    (void)UnmapViewOfFile(shm->ptr);
+    (void)CloseHandle(shm->mapping);
+    free(shm);
+}
+
 uint32_t vmcu_plat_pid(void)
 {
     return (uint32_t)GetCurrentProcessId();

@@ -10,6 +10,8 @@ mod build;
 mod commands;
 mod core;
 mod debug;
+#[cfg(feature = "diag")]
+mod diag;
 mod error;
 mod install_check;
 mod platform;
@@ -41,8 +43,10 @@ pub fn run() {
                 .find(|w| w.label == "main")
                 .cloned()
                 .ok_or("fenêtre « main » absente de tauri.conf.json")?;
-            let window =
-                tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.build()?;
+            let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+            #[cfg(feature = "diag")]
+            let builder = builder.initialization_script(diag::PAGE_SCRIPT);
+            let window = builder.build()?;
             // Fenêtre réduite : plus d'images envoyées (section 11.3). WKWebView
             // et WebKitGTK passent alors la page à « hidden » (set_ui_visible),
             // mais wry ne le signale pas à WebView2 : la réduction est donc

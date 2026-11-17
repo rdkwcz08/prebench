@@ -2,13 +2,21 @@
   "$schema": "../manifest.schema.json",
   "api_version": 1,
   "id": "echo",
-  "version": "1.0.0",
-  "name": "Écho (latence)",
-  "description": "Composant de diagnostic sans broche : répond aux requêtes vmcu_ping(VMCU_PING_WORKER) pour mesurer l'aller-retour firmware ↔ cœur ↔ Web Worker (section 8.1).",
+  "version": "1.1.0",
+  "name": "Écho (latence et SPI)",
+  "description": "Composant de diagnostic : répond aux requêtes vmcu_ping(VMCU_PING_WORKER) pour mesurer l'aller-retour firmware ↔ cœur ↔ modèle (section 8.1), et sert d'esclave SPI en boucle : chaque octet reçu sur SDI est renvoyé sur SDO dans la même transaction (CS actif bas). Les broches ne servent qu'au SPI ; le ping fonctionne sans câblage.",
   "category": "generic",
   "license": "MIT",
-  "view": { "width": 96, "height": 40 },
+  "view": { "width": 96, "height": 72 },
   "tick_hz": 0,
-  "pins": [],
+  "pins": [
+    { "name": "SCK", "label": "Horloge SPI", "role": "input", "x": 12, "y": 72 },
+    { "name": "SDI", "label": "Données entrantes (MOSI)", "role": "input", "x": 36, "y": 72 },
+    { "name": "SDO", "label": "Données sortantes (MISO)", "role": "output", "x": 60, "y": 72 },
+    { "name": "CS", "label": "Sélection (actif bas)", "role": "input", "x": 84, "y": 72 }
+  ],
+  "interfaces": [
+    { "type": "spi", "sck": "SCK", "mosi": "SDI", "miso": "SDO", "cs": "CS", "cs_active": "low" }
+  ],
   "controls": []
 }

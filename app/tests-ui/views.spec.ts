@@ -13,7 +13,7 @@ import { expect, providedViews, test } from './fixture';
 const STATES: Record<string, [unknown, unknown]> = {
   led: [{ brightness: 0 }, { brightness: 1 }],
   button: [{ pressed: false }, { pressed: true }],
-  echo: [{ pings: 0 }, { pings: 42 }],
+  echo: [{ pings: 0, spiBytes: 0 }, { pings: 42, spiBytes: 153600 }],
   'led-rgb': [
     { r: 0, g: 0, b: 0 },
     { r: 1, g: 0.5, b: 0 },
@@ -38,6 +38,11 @@ const STATES: Record<string, [unknown, unknown]> = {
     { lit: false, contrast: 127, inverted: false, allOn: false, height: 64 },
     { lit: true, contrast: 255, inverted: false, allOn: false, height: 64 },
   ],
+  ili9341: [
+    { lit: false, dark: 'en veille', inverted: false, madctl: 0 },
+    { lit: true, dark: null, inverted: true, madctl: 0x48 },
+  ],
+  ws2812: [{ colors: [0, 0, 0, 0, 0, 0, 0, 0] }, { colors: [0xff0000, 0x00ff00, 0x0000ff, 0, 0, 0, 0, 0x101010] }],
   potentiometer: [
     { position: 0.5, volts: 1.65 },
     { position: 1, volts: 3.3 },
@@ -65,10 +70,11 @@ for (const type of providedViews()) {
     await expect(svg).toBeVisible();
     await expect(figure.locator('.placeholder')).toHaveCount(0);
     await expect(figure.locator('.fallback')).toHaveCount(0);
-    const before = await svg.innerHTML();
+    // svg entier : une vue peut ne changer que ses variables CSS (style du svg).
+    const before = await svg.evaluate((el) => el.outerHTML);
 
     await bench.emit('sim:states', { [id]: states[1] });
-    await expect.poll(() => svg.innerHTML()).not.toBe(before);
+    await expect.poll(() => svg.evaluate((el) => el.outerHTML)).not.toBe(before);
   });
 }
 

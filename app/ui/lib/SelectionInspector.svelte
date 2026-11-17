@@ -67,6 +67,16 @@
     awake: 'En marche',
     accel_range_g: "Plage de l'accéléromètre",
     gyro_range_dps: 'Plage du gyroscope',
+    lit: 'Allumé',
+    dark: 'Écran noir',
+    inverted: 'Couleurs inversées',
+    contrast: 'Contraste',
+    allOn: 'Tous les pixels allumés',
+    height: 'Hauteur',
+    madctl: 'Orientation (MADCTL)',
+    pings: 'Pings reçus',
+    spiBytes: 'Octets reçus en SPI',
+    colors: 'LED allumées',
   };
   /** Valeurs de mots (paramètres enum, statut d'un modèle) en français. */
   const VALUE_WORD: Record<string, string> = {
@@ -87,18 +97,29 @@
     unpowered: 'Non alimenté',
     fixed: 'Valeur fixe',
     slider: 'Curseur',
+    bgr: 'BGR (le plus courant)',
+    rgb: 'RGB',
+    grb: 'GRB (WS2812)',
+    grbw: 'GRBW (SK6812)',
   };
 
   /** Valeur d'état d'un modèle, en texte, selon sa clé. */
   function modelValue(key: string, v: unknown): string {
-    if (v === null) return key === 'volts' ? 'Sans tension' : 'Aucun';
+    if (v === null) return key === 'volts' ? 'Sans tension' : key === 'dark' ? 'Non' : 'Aucun';
     if (key === 'sliders' && Array.isArray(v)) {
       // Joker I2C : « 0x3B = 0x80, 0x3C = 0x10 ».
       const list = (v as { reg: number; value: number }[]).map((s) => `${hex(s.reg)} = ${hex(s.value)}`);
       return list.join(', ') || 'Aucun';
     }
+    if (key === 'colors' && Array.isArray(v)) {
+      // Ruban : « 3 sur 8 », sans la liste des couleurs.
+      const on = (v as number[]).filter((c) => c !== 0).length;
+      return `${fr(on)} sur ${fr(v.length)}`;
+    }
     if (typeof v === 'number') {
-      if (key === 'address' || key === 'pointer') return hex(v);
+      if (key === 'address' || key === 'pointer' || key === 'madctl') return hex(v);
+      if (key === 'height') return `${fr(v)} px`;
+      if (key === 'spiBytes') return `${fr(v)} octets`;
       if (key === 'accel_range_g') return `±${fr(v)} g`;
       if (key === 'gyro_range_dps') return `±${fr(v)} °/s`;
       if (['brightness', 'position', 'r', 'g', 'b'].includes(key)) return percent(v);

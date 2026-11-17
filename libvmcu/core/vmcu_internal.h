@@ -28,6 +28,12 @@
 /** Initialise si nécessaire. VMCU_ERR_DISCONNECTED après vmcu_shutdown. */
 vmcu_status_t vmcu__ensure_init(void);
 
+/** Identifiant de carte de la session (PREBENCH_BOARD_ID). */
+vmcu_board_id_t vmcu__board_id(void);
+
+/** Version mineure du protocole retenue à la poignée de main (WELCOME). */
+uint8_t vmcu__proto_minor(void);
+
 /** Bloque le fil appelant tant que la simulation est en pause. */
 void vmcu__checkpoint(void);
 
@@ -117,6 +123,16 @@ void vmcu__adc_on_value(uint8_t unit, uint8_t channel, uint16_t raw);
 /* --- UART (vmcu_uart.c) ---------------------------------------------------------- */
 
 void vmcu__uart_init(void);
+
+/* --- SPI et flux (vmcu_spi.c, vmcu_stream.c) ---------------------------------- */
+
+void vmcu__spi_init(void);
+void vmcu__led_strip_init(void);
+uint16_t vmcu__stream_id(const vmcu_stream_t *stream);
+/** Octets libres du tampon circulaire. */
+size_t vmcu__stream_free(const vmcu_stream_t *stream);
+/** Ajoute len octets sans notifier ; false s'il manque de place. *position : début des octets. */
+bool vmcu__stream_put(vmcu_stream_t *stream, const uint8_t *data, size_t len, uint64_t *position);
 /** Fil E/S : octets reçus de l'app (UART_RX). */
 void vmcu__uart_on_rx(uint8_t id, const uint8_t *data, size_t len);
 /** Fil IRQ : octets en attente remis au callback de réception. */

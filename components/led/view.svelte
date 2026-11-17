@@ -4,6 +4,9 @@
   Redessinée uniquement quand `state` change (le modèle appelle invalidate()).
   Coordonnées identiques au manifeste : 40 × 80, anode en x = 14, cathode en x = 26.
   Halo de 80 ms à l'allumage seulement ; extinction et variations de luminosité sans transition (charte, section 6).
+  Une seule modification par image : la variable --luminosite du svg (arrondie au
+  pourcent), dont dépendent le halo et le dôme ; le pourcentage n'entre dans le
+  nom accessible qu'au survol ou au focus (charte, section 6).
 -->
 <script lang="ts">
   import type { ComponentViewProps } from '../component-api';
@@ -26,6 +29,10 @@
   const palette = $derived(COLORS[params.color] ?? COLORS.red);
   const level = $derived(Math.min(1, Math.max(0, model.brightness)));
   const lit = $derived(level > 0);
+  /** Luminosité affichée, au pourcent : le style ne change que si l'écart se voit. */
+  const shown = $derived(Math.round(level * 100) / 100);
+  /** Survolée ou focalisée : le nom accessible donne le pourcentage. */
+  let described = $state(false);
 
   /*
    * Halo de 80 ms seulement à l'allumage (passage d'éteinte à allumée) : une
@@ -52,8 +59,13 @@
   height="80"
   viewBox="0 0 40 80"
   class:igniting
+  style="--luminosite: {shown}"
   role="img"
-  aria-label="LED {palette.name}, {lit ? `allumée à ${Math.round(level * 100)} %` : 'éteinte'}"
+  aria-label="LED {palette.name}, {lit ? (described ? `allumée à ${Math.round(level * 100)} %` : 'allumée') : 'éteinte'}"
+  onpointerenter={() => (described = true)}
+  onpointerleave={() => (described = false)}
+  onfocusin={() => (described = true)}
+  onfocusout={() => (described = false)}
 >
   <defs>
     <radialGradient id="glow-{uid}">
@@ -63,9 +75,9 @@
   </defs>
   <!-- Pattes : l'anode (gauche) dépasse, comme sur une vraie LED -->
   <path d="M14 34V80M26 34V80" class="leg" />
-  <circle cx="20" cy="22" r="20" fill="url(#glow-{uid})" class="glow" opacity={level} />
+  <circle cx="20" cy="22" r="20" fill="url(#glow-{uid})" class="glow" />
   <circle cx="20" cy="22" r="13" fill={palette.off} />
-  <circle cx="20" cy="22" r="13" fill={palette.on} class="dome" opacity={level} />
+  <circle cx="20" cy="22" r="13" fill={palette.on} class="dome" />
   <!-- Méplat de la cathode -->
   <path d="M30.5 14.5a13 13 0 0 1 0 15" class="flat" />
   <circle cx="15" cy="17" r="3.5" fill="#ffffff" opacity="0.35" />
@@ -84,6 +96,7 @@
   }
   .glow,
   .dome {
+    opacity: var(--luminosite);
     transition: none;
   }
   .igniting .glow,

@@ -22,7 +22,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
@@ -414,6 +417,91 @@ void vmcu_plat_cond_broadcast(vmcu_plat_cond_t *cond)
 }
 
 /* --- Processus ------------------------------------------------------------------------ */
+
+/* --- Mémoire partagée ---------------------------------------------------------- */
+
+struct vmcu_plat_shm {
+    void  *ptr;
+    size_t size;
+    bool   named; /* nom encore présent (à retirer) */
+    char   name[32];
+};
+
+void vmcu_plat_shm_name(char *out, size_t cap, uint32_t pid, uint16_t board_id, uint16_t stream_id)
+{
+    /* macOS limite le nom à 31 caractères : « /pb4294967295_65535_65535 » en fait 25. */
+    (void)snprintf(out, cap, "/pb%u_%u_%u", (unsigned)pid, (unsigned)board_id, (unsigned)stream_id);
+}
+
+static vmcu_plat_result_t shm_map(const char *name, size_t size, bool create, vmcu_plat_shm_t **out)
+{
+    *out = NULL;
+    if (size == 0 || strlen(name) >= sizeof ((struct vmcu_plat_shm *)0)->name) {
+        return VMCU_PLAT_ERROR;
+    }
+    int fd = create ? shm_open(name, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+                    : shm_open(name, O_RDWR, 0);
+    if (fd < 0) {
+        return VMCU_PLAT_ERROR;
+    }
+    if (create && ftruncate(fd, (off_t)size) != 0) {
+        (void)close(fd);
+        (void)shm_unlink(name);
+        return VMCU_PLAT_ERROR;
+    }
+    void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    (void)close(fd); /* la projection garde le segment */
+    struct vmcu_plat_shm *shm = calloc(1, sizeof *shm);
+    if (ptr == MAP_FAILED || shm == NULL) {
+        if (ptr != MAP_FAILED) {
+            (void)munmap(ptr, size);
+        }
+        if (create) {
+            (void)shm_unlink(name);
+        }
+        free(shm);
+        return VMCU_PLAT_ERROR;
+    }
+    shm->ptr = ptr;
+    shm->size = size;
+    shm->named = create;
+    (void)snprintf(shm->name, sizeof shm->name, "%s", name);
+    *out = shm;
+    return VMCU_PLAT_OK;
+}
+
+vmcu_plat_result_t vmcu_plat_shm_create(const char *name, size_t size, vmcu_plat_shm_t **out)
+{
+    return shm_map(name, size, true, out); /* ftruncate : zones neuves à zéro */
+}
+
+vmcu_plat_result_t vmcu_plat_shm_open(const char *name, size_t size, vmcu_plat_shm_t **out)
+{
+    return shm_map(name, size, false, out);
+}
+
+void *vmcu_plat_shm_ptr(vmcu_plat_shm_t *shm)
+{
+    return shm->ptr;
+}
+
+void vmcu_plat_shm_unlink(vmcu_plat_shm_t *shm)
+{
+    if (shm != NULL && shm->named) {
+        (void)shm_unlink(shm->name);
+        shm->named = false;
+    }
+}
+
+void vmcu_plat_shm_close(vmcu_plat_shm_t *shm)
+{
+    if (shm == NULL) {
+        return;
+    }
+    vmcu_plat_shm_unlink(shm);
+    (void)munmap(shm->ptr, shm->size);
+    free(shm);
+}
 
 uint32_t vmcu_plat_pid(void)
 {

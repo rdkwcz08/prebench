@@ -5,6 +5,7 @@
 // aux outils. Tous deux communs aux systèmes.
 
 pub mod paths;
+pub mod shm;
 pub mod toolchain;
 
 #[cfg(unix)]

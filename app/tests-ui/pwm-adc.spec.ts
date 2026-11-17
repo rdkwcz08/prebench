@@ -18,6 +18,11 @@ test('broche PWM : fonction du timer, fréquence et rapport cyclique, pastille e
   await bench.emit('sim:nets', { PA5: 'high' });
 
   await expect(page.locator('.net.pwm')).toHaveCount(1);
+  // Infobulle : la mesure seulement au survol (pas de texte réécrit à chaque image).
+  const tip = page.locator('[data-endpoint="board.CN5:6"] title');
+  await expect(tip).not.toContainText('PWM');
+  await page.locator('[data-endpoint="board.CN5:6"]').hover();
+  await expect(tip).toContainText('PWM 20 kHz, 50 %');
   await page.locator('[data-endpoint="board.CN5:6"]').click();
   await expect(inspector.getByRole('heading', { level: 2 })).toHaveText('Broche PA5');
   await expect(inspector).toContainText('Alternative push-pull');
@@ -109,4 +114,20 @@ test('potentiomètre au clavier, buzzer qui affiche sa fréquence', async ({ ben
   await expect(bench.figure('buzzer').locator('text.freq')).toHaveText('2,3 kHz');
   await bench.emit('sim:states', { buzzer: { sounding: false, freq_hz: null } });
   await expect(bench.figure('buzzer').locator('text.freq')).toHaveCount(0);
+});
+
+test('LED en PWM : luminosité par variable CSS, pourcentage au survol', async ({ bench }) => {
+  const { page } = bench;
+  await bench.emit('sim:status', { state: 'running', message: 'En cours' });
+  await bench.emit('sim:frame', { states: { LD2: { brightness: 0.5 } } });
+  const led = page.locator('[data-component="LD2"] svg[role="img"]');
+  await expect(led).toHaveAttribute('style', /--luminosite: 0\.5/);
+  await expect(led).toHaveAttribute('aria-label', 'LED verte, allumée');
+  await led.hover();
+  await expect(led).toHaveAttribute('aria-label', 'LED verte, allumée à 50 %');
+  // Le halo et le dôme suivent la variable, sans attribut propre.
+  const opacity = await led.locator('.dome').evaluate((el) => getComputedStyle(el).opacity);
+  expect(opacity).toBe('0.5');
+  await page.mouse.move(0, 0);
+  await expect(led).toHaveAttribute('aria-label', 'LED verte, allumée');
 });

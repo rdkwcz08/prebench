@@ -9,7 +9,7 @@ Les mots **DOIT**, **NE DOIT PAS** et **PEUT** ont le sens défini en section 0 
 | Canal | Transport | Usage |
 | --- | --- | --- |
 | Messages | Socket Unix (macOS, Linux) / named pipe (Windows), crate `interprocess` | Messages courts, binaires, groupés par lots |
-| Flux | Mémoire partagée, crate `shared_memory` (`mmap` / `CreateFileMapping`) | Framebuffers, audio, caméra, données SPI volumineuses |
+| Flux | Mémoire partagée (`shm_open` + `mmap` / `CreateFileMapping`), écrite dans `platform/` des deux côtés (`vmcu_platform_*.c`, `platform/shm.rs`) | Framebuffers, audio, caméra, données SPI volumineuses |
 
 - Une connexion par processus firmware, donc par carte simulée.
 - Le JSON n'apparaît jamais sur ces canaux (règle 16.2.4).
@@ -296,4 +296,4 @@ En-tête de 64 octets, puis la zone de données (alignée sur 64 octets).
 | --- | --- | --- |
 | 1.0 | 2026-11-10 | Version initiale (phase 0) |
 | 1.1 | 2026-11-13 | Débogage (phase 2) : variable `PREBENCH_DEBUG`, message `HEARTBEAT` (`0x0090`), fil de débogage de libvmcu (section 5.5). Ajouts compatibles |
-| 1.2 | 2026-11-15 | LED adressables (phase 3) : message `LED_STRIP` (`0x00A0`), section 4.4. Ajout compatible, implémenté à l'étape 8 de la phase 3 |
+| 1.2 | 2026-11-15 | LED adressables (phase 3) : message `LED_STRIP` (`0x00A0`), section 4.4. Ajout compatible, implémenté le 2026-11-17 (étape 8 de la phase 3, Prebench 0.2.5) : libvmcu et le cœur annoncent 1.2 |

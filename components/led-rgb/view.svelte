@@ -3,6 +3,9 @@
   style de la LED simple. La teinte est le mélange des trois canaux, son
   opacité la luminosité du canal le plus fort ; halo de 80 ms à l'allumage seulement,
   extinction et variations sans transition (charte, section 6). La patte commune est la plus longue.
+  Une seule modification par image : les variables --luminosite et --teinte du
+  svg (même attribut style), dont dépendent le halo, son dégradé et le dôme ; les
+  pourcentages n'entrent dans le nom accessible qu'au survol ou au focus.
   Coordonnées identiques au manifeste : 48 × 80, pattes R, COM, G, B en x = 12, 20, 28, 36.
 -->
 <script lang="ts">
@@ -43,6 +46,10 @@
     lit ? `rgb(${Math.round((255 * r) / level)}, ${Math.round((255 * g) / level)}, ${Math.round((255 * b) / level)})` : '#ffffff',
   );
   const pct = (v: number): string => `${Math.round(v * 100)} %`;
+  /** Luminosité affichée, au pourcent : le style ne change que si l'écart se voit. */
+  const shown = $derived(Math.round(level * 100) / 100);
+  /** Survolée ou focalisée : le nom accessible donne les canaux. */
+  let described = $state(false);
 </script>
 
 <svg
@@ -50,22 +57,29 @@
   height="80"
   viewBox="0 0 48 80"
   class:igniting
+  style="--luminosite: {shown}; --teinte: {hue}"
   role="img"
   aria-label="LED RGB, {params.common === 'anode' ? 'anode' : 'cathode'} commune, {lit
-    ? `rouge ${pct(r)}, vert ${pct(g)}, bleu ${pct(b)}`
+    ? described
+      ? `rouge ${pct(r)}, vert ${pct(g)}, bleu ${pct(b)}`
+      : 'allumée'
     : 'éteinte'}"
+  onpointerenter={() => (described = true)}
+  onpointerleave={() => (described = false)}
+  onfocusin={() => (described = true)}
+  onfocusout={() => (described = false)}
 >
   <defs>
     <radialGradient id="glow-{uid}">
-      <stop offset="0" stop-color={hue} stop-opacity="0.9" />
-      <stop offset="1" stop-color={hue} stop-opacity="0" />
+      <stop offset="0" class="tint" stop-opacity="0.9" />
+      <stop offset="1" class="tint" stop-opacity="0" />
     </radialGradient>
   </defs>
   <path d="M12 34V80M28 34V80M36 34V80" class="leg" />
   <path d="M20 34V80" class="leg common" />
-  <circle cx="24" cy="22" r="20" fill="url(#glow-{uid})" class="glow" opacity={level} />
+  <circle cx="24" cy="22" r="20" fill="url(#glow-{uid})" class="glow" />
   <circle cx="24" cy="22" r="13" class="diffuser" />
-  <circle cx="24" cy="22" r="13" fill={hue} class="dome" opacity={level} />
+  <circle cx="24" cy="22" r="13" class="dome" />
   <path d="M34.5 14.5a13 13 0 0 1 0 15" class="flat" />
   <circle cx="19" cy="17" r="3.5" fill="#ffffff" opacity="0.35" />
 </svg>
@@ -87,8 +101,15 @@
     stroke-opacity: 0.25;
     stroke-width: 1.5;
   }
+  .tint {
+    stop-color: var(--teinte);
+  }
+  .dome {
+    fill: var(--teinte);
+  }
   .glow,
   .dome {
+    opacity: var(--luminosite);
     transition: none;
   }
   .igniting .glow,

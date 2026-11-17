@@ -49,12 +49,12 @@ extern "C" {
 #define VMCU_API_VERSION_MINOR 2
 
 /**
- * Version du protocole firmware <-> app implémentée (docs/protocol.md). La
- * version 1.2 (LED_STRIP) est figée mais pas encore implémentée : elle passera
- * ici avec vmcu_led_strip_show (phase 3, étape 8).
+ * Version du protocole firmware <-> app implémentée (docs/protocol.md) : 1.2
+ * (LED_STRIP, phase 3, étape 8). Face à une app 1.1, la poignée de main
+ * retient 1.1 et vmcu_led_strip_show* renvoie VMCU_ERR_UNSUPPORTED.
  */
 #define VMCU_PROTOCOL_VERSION_MAJOR 1
-#define VMCU_PROTOCOL_VERSION_MINOR 1
+#define VMCU_PROTOCOL_VERSION_MINOR 2
 
 /* Vérification du format printf, sans extension MSVC. */
 #if defined(__MINGW32__) && defined(__MINGW_PRINTF_FORMAT)

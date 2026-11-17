@@ -6,6 +6,10 @@
 #   sh tests-ui/wk/banc.sh [taux d'images/s]
 # Écrit le CPU (% d'un cœur) et la mémoire du programme et de ses processus WebKit
 # (WebContent, GPU, réseau) pendant le rejeu. Ne pas toucher la fenêtre pendant la mesure.
+# Rejeu natif par défaut, comme Tauri (evaluateJavaScript, un sim:frame par image) ;
+# BANC_JS=1 : ancien rejeu dans la page. Fenêtre de 1200 × 800 points comme l'app
+# (BANC_LARGEUR, BANC_HAUTEUR). BANC_DIAG=1 : relevé des images et du DOM de la page
+# (diag-page.js), comme la version de diagnostic de l'app.
 set -eu
 export LC_ALL=C
 RATE="${1:-24.5}"
@@ -14,10 +18,18 @@ APP="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 PREVIEW=""
 BANC=""
-trap 'kill ${PREVIEW:-} ${BANC:-} 2>/dev/null || true; rm -rf "$WORK"' EXIT
+# npx lance node dans un processus enfant : arrêté par son port, sinon un
+# ancien serveur resterait et servirait une liste de fichiers périmée.
+stop_preview() { pkill -f "vite preview --host 127.0.0.1 --port 4174" 2>/dev/null || true; }
+trap 'kill ${PREVIEW:-} ${BANC:-} 2>/dev/null || true; stop_preview; rm -rf "$WORK"' EXIT
+if curl -sf http://127.0.0.1:4174 >/dev/null 2>&1; then
+  echo "Port 4174 déjà pris (ancien banc ?) : arrêtez ce serveur avant la mesure." >&2
+  exit 1
+fi
 
 (cd "$APP" && PREBENCH_PERF_EXPORT=1 PREBENCH_PERF_RATE="$RATE" npx playwright test perf -g export \
   --project=chromium >/dev/null)
+[ "${BANC_DIAG:-0}" = "1" ] && cat "$HERE/diag-page.js" >> "$APP/test-results/wk-init.js"
 swiftc -O "$HERE/banc.swift" -o "$WORK/banc" 2>/dev/null
 cat > "$WORK/resp.c" <<'C'
 #include <stdio.h>
@@ -35,7 +47,7 @@ cc -o "$WORK/resp" "$WORK/resp.c"
 PREVIEW=$!
 until curl -sf http://127.0.0.1:4174 >/dev/null; do sleep 0.2; done
 
-"$WORK/banc" http://127.0.0.1:4174/ "$APP/test-results/wk-init.js" > "$WORK/out.txt" &
+"$WORK/banc" http://127.0.0.1:4174/ "$APP/test-results/wk-init.js" $([ "${BANC_JS:-0}" = "1" ] || echo "$APP/test-results/wk-events.json") > "$WORK/out.txt" &
 BANC=$!
 until grep -q "DEBUT" "$WORK/out.txt" 2>/dev/null; do sleep 0.1; done
 
@@ -62,4 +74,5 @@ for p in $pids; do
   printf "  %-32s %6s %% %6s Mo\n" "$(ps -o comm= -p "$p" | sed 's|.*/||' | cut -c1-32)" "$cpu" "${mem:-?}"
   total=$(echo "$total $cpu" | awk '{ print $1 + $2 }')
 done
+sleep 1; grep ENVOIS "$WORK/out.txt" || true
 echo "Total : $total % d'un cœur sur $SECONDS_ s ($(grep -E 'FIN|ERREUR' "$WORK/out.txt")) $(grep VISIBILITE "$WORK/out.txt" || true)"

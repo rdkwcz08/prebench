@@ -1,0 +1,37 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "ws2812",
+  "version": "1.0.0",
+  "name": "Ruban de LED WS2812",
+  "description": "Ruban de LED adressables (WS2812, SK6812) : chaque trame reçue sur DIN fixe la couleur des LED dans l'ordre, les octets en trop passent aux LED suivantes du ruban. Ordre des couleurs réglable : GRB (WS2812), RGB, GRBW (SK6812, blanc ajouté aux trois couleurs à l'affichage). Le signal n'est pas simulé, seule la trame l'est (section 5.4). Alimenter 5V et GND pour voir les LED.",
+  "category": "output",
+  "license": "MIT",
+  "logic_voltages": [3.3, 5],
+  "view": { "width": 408, "height": 96 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "5V", "label": "Alimentation 5 V", "role": "power", "x": 12, "y": 96 },
+    { "name": "DIN", "label": "Données", "role": "input", "x": 36, "y": 96 },
+    { "name": "GND", "label": "Masse", "role": "ground", "x": 60, "y": 96 }
+  ],
+  "interfaces": [
+    { "type": "led-strip", "din": "DIN" }
+  ],
+  "params": {
+    "count": {
+      "type": "integer",
+      "label": "Nombre de LED",
+      "default": 8,
+      "min": 1,
+      "max": 48
+    },
+    "order": {
+      "type": "enum",
+      "label": "Ordre des couleurs",
+      "values": ["grb", "rgb", "grbw"],
+      "default": "grb"
+    }
+  },
+  "controls": []
+}

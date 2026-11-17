@@ -7,3 +7,4 @@ pub mod environment;
 pub mod net;
 pub mod protocol;
 pub mod sim;
+pub mod stream;

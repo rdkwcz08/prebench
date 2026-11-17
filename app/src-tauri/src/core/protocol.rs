@@ -9,7 +9,8 @@ pub const MAGIC: u16 = 0x4250;
 pub const HEADER_SIZE: usize = 24;
 pub const MAX_PAYLOAD: usize = 65536;
 pub const PROTOCOL_MAJOR: u8 = 1;
-pub const PROTOCOL_MINOR: u8 = 1;
+/// 1.2 : LED_STRIP (phase 3, étape 8).
+pub const PROTOCOL_MINOR: u8 = 2;
 
 /// Requête qui attend une réponse (posé par le firmware).
 pub const FLAG_SYNC: u16 = 0x0001;
@@ -32,8 +33,17 @@ pub mod msg {
     pub const I2C_CONFIG: u16 = 0x0050;
     pub const I2C_XFER: u16 = 0x0051;
     pub const I2C_REPLY: u16 = 0x8051;
+    pub const SPI_CONFIG: u16 = 0x0060;
+    pub const SPI_XFER: u16 = 0x0061;
+    pub const SPI_REPLY: u16 = 0x8061;
+    pub const STREAM_OPEN: u16 = 0x0070;
+    pub const STREAM_CLOSE: u16 = 0x0071;
+    pub const STREAM_NOTIFY: u16 = 0x0072;
+    pub const STREAM_OPENED: u16 = 0x8070;
     /// Protocole 1.1 : firmware lancé par le débogueur (PREBENCH_DEBUG=1).
     pub const HEARTBEAT: u16 = 0x0090;
+    /// Protocole 1.2 : trame d'un ruban de LED adressables.
+    pub const LED_STRIP: u16 = 0x00A0;
     pub const PING: u16 = 0x00F0;
 
     pub const WELCOME: u16 = 0x8001;

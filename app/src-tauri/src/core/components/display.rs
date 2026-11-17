@@ -15,6 +15,14 @@
 //                     bit 0 (poids faible) = ligne du haut de la page ;
 //                     1 = allumé (mémoire d'un SSD1306).
 //
+// Ordre de balayage (Display.setScan, rgb565 seulement) : échange des axes,
+// miroirs et ordre rouge/bleu, comme le registre MADCTL d'un ILI9341 ou d'un
+// ST7735. Les blits suivants sont donnés dans l'image logique (largeur et
+// hauteur échangées si swap_xy) ; le cœur replace chaque pixel dans l'image
+// physique, en Rust : en JavaScript, une rotation d'écran entier 240 × 320
+// coûtait 3,9 ms et l'échange rouge/bleu 4,6 ms, près du budget de 5 ms d'un
+// appel de modèle (mesure du 17 novembre 2026).
+//
 // Le cœur cumule la zone modifiée (rectangle englobant) et l'envoie à la vue
 // au plus une fois par image, en binaire (message ci-dessous, décodé par
 // app/ui/lib/displays.svelte.ts). La zone est élargie à l'alignement du
@@ -76,6 +84,8 @@ pub enum DisplayError {
     RectTooLarge(u32, u32),
     #[error("données trop courtes pour le rectangle : {got} octets, {need} attendus")]
     DataTooShort { got: usize, need: usize },
+    #[error("ordre de balayage (setScan) : écrans rgb565 seulement")]
+    ScanNeedsRgb565,
 }
 
 /// Rectangle en pixels de l'écran.
@@ -102,6 +112,19 @@ impl Rect {
     }
 }
 
+/// Ordre de balayage des blits (component-api.d.ts, DisplayScan).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Scan {
+    /// Axes échangés : x logique le long des lignes physiques (paysage).
+    pub swap_xy: bool,
+    /// x physique = largeur − 1 − x (après échange).
+    pub mirror_x: bool,
+    /// y physique = hauteur − 1 − y (après échange).
+    pub mirror_y: bool,
+    /// Rouge et bleu échangés dans chaque pixel RGB565.
+    pub bgr: bool,
+}
+
 /// Zone modifiée prête à partir vers la vue.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Update {
@@ -121,6 +144,7 @@ pub struct Framebuffer {
     dirty: Option<Rect>,
     /// Créé depuis le dernier envoi : la vue doit repartir d'une image noire.
     fresh: bool,
+    scan: Scan,
 }
 
 impl Framebuffer {
@@ -145,7 +169,17 @@ impl Framebuffer {
                 h: height,
             }),
             fresh: true,
+            scan: Scan::default(),
         })
+    }
+
+    /// Ordre de balayage des blits suivants (rgb565 seulement, sauf l'identité).
+    pub fn set_scan(&mut self, scan: Scan) -> Result<(), DisplayError> {
+        if scan != Scan::default() && self.format != DisplayFormat::Rgb565 {
+            return Err(DisplayError::ScanNeedsRgb565);
+        }
+        self.scan = scan;
+        Ok(())
     }
 
     /// Octets d'un rectangle w × h au format donné (règles de blit).
@@ -189,11 +223,17 @@ impl Framebuffer {
                 need,
             });
         }
-        // Rognage : intersection du rectangle et de l'écran.
+        // Rognage : intersection du rectangle et de l'image logique (axes
+        // échangés par setScan).
+        let (lw, lh) = if self.scan.swap_xy {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        };
         let x0 = x.max(0);
         let y0 = y.max(0);
-        let x1 = (x + i64::from(w)).min(i64::from(self.width));
-        let y1 = (y + i64::from(h)).min(i64::from(self.height));
+        let x1 = (x + i64::from(w)).min(i64::from(lw));
+        let y1 = (y + i64::from(h)).min(i64::from(lh));
         if x0 >= x1 || y0 >= y1 {
             return Ok(());
         }
@@ -207,7 +247,35 @@ impl Framebuffer {
             });
         };
         let src_w = w as usize;
-        if self.format == DisplayFormat::Rgb565 {
+        if self.scan != Scan::default() {
+            // Image logique -> image physique, pixel par pixel (rgb565).
+            let scan = self.scan;
+            let (pw, ph) = (i64::from(self.width), i64::from(self.height));
+            for ly in y0..y1 {
+                for lx in x0..x1 {
+                    let i = ((ly - y) as usize * src_w + (lx - x) as usize) * 2;
+                    let mut v = u16::from_be_bytes([data[i], data[i + 1]]);
+                    if scan.bgr {
+                        v = (v & 0x07E0) | (v >> 11) | ((v & 0x1F) << 11);
+                    }
+                    let (a, b) = if scan.swap_xy { (ly, lx) } else { (lx, ly) };
+                    let px = if scan.mirror_x { pw - 1 - a } else { a };
+                    let py = if scan.mirror_y { ph - 1 - b } else { b };
+                    let (ux, uy) = (px as usize, py as usize);
+                    if read(self.format, &self.pixels, self.width as usize, ux, uy) != v {
+                        put(
+                            self.format,
+                            &mut self.pixels,
+                            self.width as usize,
+                            ux,
+                            uy,
+                            v,
+                        );
+                        mark(px, py);
+                    }
+                }
+            }
+        } else if self.format == DisplayFormat::Rgb565 {
             // Chemin rapide : comparaison et copie par ligne (trames TFT de 150 Ko).
             let (sx0, row) = (((x0 - x) as usize) * 2, ((x1 - x0) as usize) * 2);
             for py in y0..y1 {
@@ -422,6 +490,81 @@ mod tests {
         );
         assert_eq!(u.data, vec![0xF8, 0x00, 0x00, 0x1F]);
         assert!(fb.take_update().is_none());
+    }
+
+    /// Ordre de balayage : un pixel logique (1, 0) d'une image 3 × 2 tournée
+    /// dans un écran physique 2 × 3, pour chaque combinaison utile.
+    #[test]
+    fn scan_maps_logical_to_physical() {
+        let red = [0xF8, 0x00];
+        let cases = [
+            // (échange, miroir x, miroir y, image logique, pixel physique attendu)
+            (false, false, false, (2, 3), (1, 0)),
+            (false, true, false, (2, 3), (0, 0)),
+            (false, false, true, (2, 3), (1, 2)),
+            (true, false, false, (3, 2), (0, 1)),
+            (true, true, false, (3, 2), (1, 1)),
+            (true, false, true, (3, 2), (0, 1)),
+            (true, true, true, (3, 2), (1, 1)),
+        ];
+        for (swap, mx, my, (lw, lh), (px, py)) in cases {
+            let mut fb = settled(2, 3, DisplayFormat::Rgb565);
+            let scan = Scan {
+                swap_xy: swap,
+                mirror_x: mx,
+                mirror_y: my,
+                bgr: false,
+            };
+            fb.set_scan(scan).expect("scan");
+            // Image logique entière, un seul pixel rouge en (1, 0).
+            let mut data = vec![0u8; (lw * lh * 2) as usize];
+            data[2..4].copy_from_slice(&red);
+            fb.blit(0, 0, lw, lh, &data).expect("blit");
+            assert_eq!(fb.pixel(px, py), 0xF800, "{scan:?}");
+            let u = fb.take_update().expect("zone");
+            assert_eq!(
+                u.rect,
+                Rect {
+                    x: px,
+                    y: py,
+                    w: 1,
+                    h: 1
+                },
+                "{scan:?}"
+            );
+        }
+        // Avec échange, x logique déborde au-delà de la largeur physique : rogné à l'image logique.
+        let mut fb = settled(2, 3, DisplayFormat::Rgb565);
+        fb.set_scan(Scan {
+            swap_xy: true,
+            ..Scan::default()
+        })
+        .expect("scan");
+        fb.blit(2, 1, 4, 1, &[0xFF; 8]).expect("blit");
+        assert_eq!(fb.pixel(1, 2), 0xFFFF);
+    }
+
+    #[test]
+    fn scan_bgr_swaps_red_and_blue() {
+        let mut fb = settled(2, 1, DisplayFormat::Rgb565);
+        fb.set_scan(Scan {
+            bgr: true,
+            ..Scan::default()
+        })
+        .expect("scan");
+        fb.blit(0, 0, 2, 1, &[0xF8, 0x00, 0x07, 0xE0])
+            .expect("blit");
+        assert_eq!(fb.pixel(0, 0), 0x001F, "rouge écrit, bleu affiché");
+        assert_eq!(fb.pixel(1, 0), 0x07E0, "vert inchangé");
+        let mut mono = settled(8, 8, DisplayFormat::Mono1);
+        assert_eq!(
+            mono.set_scan(Scan {
+                bgr: true,
+                ..Scan::default()
+            }),
+            Err(DisplayError::ScanNeedsRgb565)
+        );
+        assert_eq!(mono.set_scan(Scan::default()), Ok(()));
     }
 
     #[test]

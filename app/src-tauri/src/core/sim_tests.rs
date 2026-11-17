@@ -604,6 +604,57 @@ fn i2c_scan_mem_and_interrupt_read() {
     let _ = sim.tx.try_send(SimMsg::Stop);
 }
 
+/// Phase 3, étape 6 : bus SPI1 face au composant d'écho (tests/spi-loop).
+/// Transaction synchrone avec CS piloté en GPIO, bus sans esclave sélectionné
+/// (MISO à 0xFF), trame de 60 000 octets par DMA (flux bulk en mémoire
+/// partagée, octets comptés par le modèle), puis TransmitReceive_IT dont le
+/// callback arrive par le fil IRQ.
+#[test]
+fn spi_loop_through_echo_and_shared_memory() {
+    let dir = repo_root().join("tests").join("spi-loop");
+    let (_app, sim, rec) = start_project(&dir);
+    rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
+    let text = |v: &Value| -> String {
+        v["data"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|b| b.as_u64().map(|x| x as u8))
+                    .collect::<Vec<u8>>()
+            })
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default()
+    };
+    let mut out = String::new();
+    rec.wait(|name, v| {
+        if name == "sim:uart" && v["id"] == 2 {
+            out.push_str(&text(v));
+        }
+        out.contains("boucle:3\r\n")
+    });
+    for expected in [
+        "boucle : OK",
+        "sans CS : MISO 0xFF",
+        "trame : 60000 octets, demi-transfert vu",
+        "boucle:1\r\n",
+        "boucle:2\r\n",
+    ] {
+        assert!(out.contains(expected), "« {expected} » absent de :\n{out}");
+    }
+    assert!(!out.contains("erreur SPI"), "{out}");
+    // Octets reçus par l'écho : 13 (boucle) + 60 000 (trame) + compteurs ; la
+    // transaction sans CS ne lui parvient pas.
+    let (_, states) = rec.wait(|name, v| {
+        name == "sim:states" && v["echo1"]["spiBytes"].as_u64().is_some_and(|n| n >= 60_016)
+    });
+    let bytes = states["echo1"]["spiBytes"].as_u64().unwrap_or(0);
+    assert!(
+        bytes < 60_013 + 1000,
+        "octets SPI reçus par l'écho : {bytes}"
+    );
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
 /// Message « displays » (components/display.rs) appliqué à une image
 /// mono1-vertical de 128 × 64 : (identifiant, écran neuf, zone).
 fn apply_displays(msg: &[u8], image: &mut [u8], seen: &mut Vec<(String, bool, [u16; 4])>) {
@@ -668,6 +719,145 @@ fn oled_hello_frames() {
     // « P » de « Prebench » en x = 40, page 0 : colonne 0x7F (lignes 0 à 6).
     assert_eq!(image[40], 0x7F, "colonne du P : {:#04X}", image[40]);
     assert_eq!(image[41], 0x09);
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Message « displays » appliqué à une image RGB565 (valeurs sur 16 bits) ;
+/// renvoie le nombre de pixels reçus.
+fn apply_rgb565(msg: &[u8], image: &mut [u16], width: usize) -> usize {
+    let u16_at = |o: usize| u16::from_le_bytes([msg[o], msg[o + 1]]);
+    let count = u16_at(0);
+    let mut o = 2;
+    let mut pixels = 0;
+    for _ in 0..count {
+        let id_len = u16_at(o) as usize;
+        o += 2 + id_len;
+        assert_eq!(msg[o], 2, "rgb565 attendu");
+        let (x, y, w, h) = (
+            u16_at(o + 6) as usize,
+            u16_at(o + 8) as usize,
+            u16_at(o + 10) as usize,
+            u16_at(o + 12) as usize,
+        );
+        let len = u32::from_le_bytes([msg[o + 14], msg[o + 15], msg[o + 16], msg[o + 17]]) as usize;
+        let data = &msg[o + 18..o + 18 + len];
+        o += 18 + len;
+        for sy in 0..h {
+            for sx in 0..w {
+                let i = (sy * w + sx) * 2;
+                image[(y + sy) * width + x + sx] = u16::from_be_bytes([data[i], data[i + 1]]);
+            }
+        }
+        pixels += w * h;
+    }
+    pixels
+}
+
+/// Phase 3, étape 7 : écran TFT ILI9341 (tests/tft-demo). Mire dans les
+/// quatre orientations MADCTL (barre rouge, repère magenta à leur place
+/// physique, ordre des octets RGB565 et BGR de la dalle), identifiant lu par
+/// 0xD3, puis carré animé : seules ses zones partent vers la vue.
+#[test]
+fn tft_mire_in_four_orientations() {
+    const RED: u16 = 0xF800;
+    const MAGENTA: u16 = 0xF81F;
+    const W: usize = 240;
+    let dir = repo_root().join("tests").join("tft-demo");
+    let (_app, sim, rec) = start_project(&dir);
+    let mut image = vec![0u16; W * 320];
+    let mut out = String::new();
+    // Avertissements du modèle et dépassements de budget : aucun attendu.
+    let mut problems: Vec<String> = Vec::new();
+    // (pixel de la barre rouge, pixel du repère magenta) attendus sur la dalle,
+    // orientation par orientation (component-api.d.ts, DisplayScan ; model.ts).
+    let expected = [
+        ((30, 40), (5, 5)),
+        ((209, 40), (234, 5)),
+        ((209, 279), (234, 314)),
+        ((30, 279), (5, 314)),
+    ];
+    for (r, ((rx, ry), (mx, my))) in expected.into_iter().enumerate() {
+        rec.wait(|name, v| {
+            match name {
+                "sim:uart" if v["id"] == 2 => {
+                    if let Some(a) = v["data"].as_array() {
+                        out.extend(a.iter().filter_map(|b| b.as_u64().map(|x| x as u8 as char)));
+                    }
+                }
+                "sim:test-displays" => {
+                    let msg: Vec<u8> = serde_json::from_value(v.clone()).expect("octets");
+                    apply_rgb565(&msg, &mut image, W);
+                }
+                "sim:warn" => problems.push(v["text"].to_string()),
+                "sim:log" if v["text"].as_str().is_some_and(|t| t.contains("budget")) => {
+                    problems.push(v["text"].to_string())
+                }
+                _ => {}
+            }
+            out.contains(&format!("orientation {r} "))
+                && image[ry * W + rx] == RED
+                && image[my * W + mx] == MAGENTA
+        });
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(out.contains("identifiant 0x9341"), "{out}");
+    assert!(
+        out.contains("orientation 1 (MADCTL 0x28) : 320 x 240"),
+        "{out}"
+    );
+    // Animation : de petites zones (carré de 12 × 12 et sa trace), jamais l'écran entier.
+    let mut sizes = Vec::new();
+    rec.wait(|name, v| {
+        if name == "sim:test-displays" {
+            let msg: Vec<u8> = serde_json::from_value(v.clone()).expect("octets");
+            sizes.push(apply_rgb565(&msg, &mut image, W));
+        }
+        sizes.iter().filter(|&&n| n <= 40 * 40).count() >= 10
+    });
+    let _ = sim.tx.try_send(SimMsg::Stop);
+}
+
+/// Phase 3, étape 8 : ruban WS2812 par TIM1 et DMA (tests/ws2812-chase).
+/// Le shim décode le tampon DMA, le cœur retrouve la broche de TIM1_CH1 (PA8
+/// en AF1) et remet la trame au ruban : tête du point rouge (0x40), traînée
+/// (0x18, 0x08), puis arc-en-ciel ; aucun avertissement (DMA compris).
+#[test]
+fn ws2812_chase_through_dma() {
+    let dir = repo_root().join("tests").join("ws2812-chase");
+    let (_app, sim, rec) = start_project(&dir);
+    let mut problems: Vec<String> = Vec::new();
+    let colors = |v: &Value| -> Vec<u64> {
+        v["strip1"]["colors"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default()
+    };
+    // Point rouge : une LED à 0x400000, ses deux voisines à 0x180000 et 0x080000.
+    rec.wait(|name, v| {
+        if name == "sim:warn" {
+            problems.push(v["text"].to_string());
+        }
+        let c = colors(v);
+        name == "sim:states"
+            && c.len() == 8
+            && c.contains(&0x40_0000)
+            && c.contains(&0x18_0000)
+            && c.contains(&0x08_0000)
+    });
+    // Arc-en-ciel : au moins trois LED de couleurs différentes, toutes allumées.
+    rec.wait(|name, v| {
+        if name == "sim:warn" {
+            problems.push(v["text"].to_string());
+        }
+        let c = colors(v);
+        name == "sim:states" && c.len() == 8 && c.iter().all(|&x| x != 0) && {
+            let mut d = c.clone();
+            d.sort_unstable();
+            d.dedup();
+            d.len() >= 3
+        }
+    });
+    assert!(problems.is_empty(), "{problems:#?}");
     let _ = sim.tx.try_send(SimMsg::Stop);
 }
 
@@ -1354,7 +1544,9 @@ fn self_cpu_ms() -> u64 {
 #[test]
 #[ignore = "mesure manuelle (release)"]
 fn budget_core_profile() {
-    let dir = repo_root().join("tests").join("budget");
+    // PREBENCH_BUDGET_PROJECT : autre projet de tests/ (ex. projet-type).
+    let project = std::env::var("PREBENCH_BUDGET_PROJECT").unwrap_or_else(|_| "budget".into());
+    let dir = repo_root().join("tests").join(project);
     let (_app, sim, rec) = start_project(&dir);
     rec.wait(|name, v| name == "sim:status" && v["state"] == "running");
     // Pot à mi-course, puis 3 s de mise en route.

@@ -23,6 +23,13 @@
 //   PING Worker : firmware -> acteur -> onPing du composant d'écho -> PONG (sans WebView)
 //   I2C_XFER : firmware -> acteur (composant du bus à cette adresse, d'après
 //     le câblage) -> onI2C -> I2C_REPLY ; sans composant : NACK adresse
+//   LED_STRIP (1.2) : firmware -> acteur (rubans dont DIN est sur le net de
+//     la broche, désignée ou portant la sortie PWM) -> onLedStrip ;
+//   SPI_XFER : firmware -> acteur (composant dont SCK est sur le bus et dont
+//     l'entrée CS est active, d'après les nets) -> onSPI -> SPI_REPLY si le
+//     firmware lit ; sans composant sélectionné : octets perdus, MISO à 0xFF.
+//     Plus de 4096 octets : lus dans le flux « bulk » en mémoire partagée
+//     (STREAM_OPEN, core/stream.rs), à la position donnée par la trame.
 //
 // Garde-fous (section 11.2) : pendant une simulation, et seulement alors, un
 // minuteur à 1 Hz mesure le CPU et la mémoire du firmware (« sim:usage »).
@@ -57,6 +64,7 @@ use super::board::{pin_address, Board};
 use super::components::engine::{self, InstanceSpec, ModelCmd, ModelEvent, Models};
 use super::net::{Drive, Level, NetState, Network, Node, Pull, Pwm, Source};
 use super::protocol::{self, msg, Header, Reader, Writer, FLAG_REPLY, HEADER_SIZE};
+use super::stream::{self, Stream};
 use crate::error::{CoreError, CoreResult};
 use crate::platform;
 use crate::project::{split_endpoint, Project, Wire};
@@ -316,6 +324,10 @@ struct FwPin {
     last_rise_us: Option<u64>,
     /// Période entre les deux derniers fronts montants (µs).
     period_us: Option<u64>,
+    /// Configurée par GPIO_CONFIG. Une écriture avant la configuration (CubeMX
+    /// fixe le niveau de repos avant HAL_GPIO_Init) ne fait pas de la broche
+    /// une entrée lue.
+    configured: bool,
 }
 
 /// Configuration d'une broche par le firmware, pour l'inspecteur (partie
@@ -406,6 +418,12 @@ struct Actor<R: Runtime> {
     uart_out: BTreeMap<u8, Vec<u8>>,
     /// Niveaux des broches de la carte à envoyer à l'image suivante (« sim:nets »).
     nets_out: BTreeMap<String, Level>,
+    /// Version de diagnostic : instant et temps CPU du processus au dernier relevé.
+    #[cfg(feature = "diag")]
+    diag_last: Option<(Instant, Duration)>,
+    /// Dernier niveau envoyé à l'interface, par broche : un niveau inchangé
+    /// (sortie réécrite au même niveau) ne repart pas à chaque image.
+    sent_nets: HashMap<String, Level>,
     /// Broches de la carte câblées (fils du projet, composants intégrés).
     wired: HashSet<String>,
     /// Avertissements du réseau déjà émis (code, broche) : une fois par broche.
@@ -433,6 +451,12 @@ struct Actor<R: Runtime> {
     echo: Option<String>,
     /// Composants à interface I2C (manifeste), routés par adresse et câblage.
     i2c_devices: Vec<I2cDevice>,
+    /// Composants à interface SPI (manifeste), routés par bus et CS.
+    spi_devices: Vec<SpiDevice>,
+    /// Entrées de rubans de LED adressables (manifeste, interface led-strip).
+    strip_inputs: Vec<StripInput>,
+    /// Flux en mémoire partagée ouverts par le firmware (STREAM_OPEN).
+    streams: HashMap<u16, Stream>,
     unknown_warned: HashSet<u16>,
     unknown_pins: HashSet<(u8, u8)>,
     guards: Guards,
@@ -489,6 +513,76 @@ impl I2cDevice {
     }
 }
 
+/// Interface SPI d'un composant (manifeste, interfaces[type = spi]).
+struct SpiDevice {
+    id: String,
+    sck: String,
+    cs: String,
+    /// CS actif au niveau bas (cs_active = "low", par défaut).
+    active_low: bool,
+}
+
+impl SpiDevice {
+    fn from_specs(specs: &[InstanceSpec]) -> Vec<Self> {
+        let mut out = Vec::new();
+        for spec in specs {
+            let Some(ifaces) = spec.source.manifest["interfaces"].as_array() else {
+                continue;
+            };
+            for iface in ifaces.iter().filter(|i| i["type"] == "spi") {
+                let (Some(sck), Some(cs)) = (iface["sck"].as_str(), iface["cs"].as_str()) else {
+                    continue;
+                };
+                out.push(SpiDevice {
+                    id: spec.id.clone(),
+                    sck: sck.to_string(),
+                    cs: cs.to_string(),
+                    active_low: iface["cs_active"].as_str() != Some("high"),
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Entrée de données d'un ruban de LED adressables (interfaces[type = led-strip]).
+struct StripInput {
+    id: String,
+    /// Nom de l'interface (onLedStrip), « din » par défaut.
+    iface: String,
+    din: String,
+}
+
+impl StripInput {
+    fn from_specs(specs: &[InstanceSpec]) -> Vec<Self> {
+        let mut out = Vec::new();
+        for spec in specs {
+            let Some(ifaces) = spec.source.manifest["interfaces"].as_array() else {
+                continue;
+            };
+            for iface in ifaces.iter().filter(|i| i["type"] == "led-strip") {
+                if let Some(din) = iface["din"].as_str() {
+                    out.push(StripInput {
+                        id: spec.id.clone(),
+                        iface: iface["name"].as_str().unwrap_or(din).to_string(),
+                        din: din.to_string(),
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Bits de xfer_flags de SPI_XFER (docs/protocol.md, section 4.3).
+const SPI_RX: u8 = 0x01;
+const SPI_BULK: u8 = 0x02;
+const SPI_NO_TX: u8 = 0x04;
+/// Données en ligne d'une trame SPI_XFER, au plus.
+const SPI_INLINE_MAX: usize = 4096;
+/// « Aucune broche » (VMCU_PIN_NONE) : CS retrouvé d'après les nets.
+const PIN_NONE: u8 = 0xFF;
+
 /// État des garde-fous du firmware en cours.
 #[derive(Default)]
 struct Guards {
@@ -519,6 +613,8 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         .find(|c| c.source.id == "echo")
         .map(|c| c.id.clone());
     let i2c_devices = I2cDevice::from_specs(&cfg.components);
+    let spi_devices = SpiDevice::from_specs(&cfg.components);
+    let strip_inputs = StripInput::from_specs(&cfg.components);
     let params = cfg
         .components
         .iter()
@@ -545,6 +641,9 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         models: None,
         states_dirty: false,
         nets_out: BTreeMap::new(),
+        sent_nets: HashMap::new(),
+        #[cfg(feature = "diag")]
+        diag_last: None,
         uart_out: BTreeMap::new(),
         wired: HashSet::new(),
         net_warned: HashSet::new(),
@@ -561,6 +660,9 @@ pub fn start<R: Runtime>(app: AppHandle<R>, cfg: SimConfig) -> SimHandle {
         out_seq: 0,
         echo,
         i2c_devices,
+        spi_devices,
+        strip_inputs,
+        streams: HashMap::new(),
         unknown_warned: HashSet::new(),
         unknown_pins: HashSet::new(),
         guards: Guards::default(),
@@ -769,8 +871,10 @@ impl<R: Runtime> Actor<R> {
             return;
         }
         let level = self.net.level(&Node::Board(name.to_string()));
-        self.nets_out.insert(name.to_string(), level);
-        self.schedule_ui();
+        if self.sent_nets.get(name) != Some(&level) || self.nets_out.contains_key(name) {
+            self.nets_out.insert(name.to_string(), level);
+            self.schedule_ui();
+        }
         let label = match self
             .cfg
             .board
@@ -787,7 +891,7 @@ impl<R: Runtime> Actor<R> {
                 format!("Conflit sur {label} : deux sorties imposent des niveaux opposés (court-circuit). Retirez un fil ou passez une sortie en entrée."),
             );
         }
-        let reads = fw.is_some_and(|f| f.mode == 0 && f.pull == 0);
+        let reads = fw.is_some_and(|f| f.configured && f.mode == 0 && f.pull == 0);
         if level == Level::Floating
             && reads
             && self.net_warned.insert((WARN_FLOATING, name.to_string()))
@@ -994,6 +1098,7 @@ impl<R: Runtime> Actor<R> {
             }
             ModelEvent::Pong { seq, handler_us } => self.pong(seq, 0, handler_us).await,
             ModelEvent::I2cReply { seq, status, rx } => self.i2c_reply(seq, status, &rx).await,
+            ModelEvent::SpiReply { seq, rx } => self.spi_reply(seq, &rx).await,
             ModelEvent::Dirty => {
                 self.states_dirty = true;
                 self.schedule_ui();
@@ -1027,12 +1132,15 @@ impl<R: Runtime> Actor<R> {
     }
 
     fn reset_firmware_state(&mut self) {
+        // L'interface efface ses niveaux à la coupure : tout sera renvoyé.
+        self.sent_nets.clear();
         let pins: Vec<String> = self.fw_pins.keys().cloned().collect();
         self.fw_pins.clear();
         self.pwm_channels.clear();
         self.pwm_attached.clear();
         self.adc_configured.clear();
         self.last_adc.clear();
+        self.streams.clear(); // segments du firmware arrêté : projections rendues
         self.pins_dirty = true;
         self.schedule_ui();
         self.last_input.clear();
@@ -1326,6 +1434,8 @@ impl<R: Runtime> Actor<R> {
         }
         if !self.nets_out.is_empty() {
             let nets = std::mem::take(&mut self.nets_out);
+            self.sent_nets
+                .extend(nets.iter().map(|(k, v)| (k.clone(), *v)));
             frame.insert("nets".into(), serde_json::json!(nets));
         }
         let uart: Vec<UartEvent> = std::mem::take(&mut self.uart_out)
@@ -1371,6 +1481,28 @@ impl<R: Runtime> Actor<R> {
         match serde_json::to_string(&env) {
             Ok(json) => self.send_model(ModelCmd::Environment(json)),
             Err(e) => self.warn(0, format!("environnement non transmis : {e}")),
+        }
+    }
+
+    /// Version de diagnostic : CPU du processus de l'app, toutes les 5 s, au Journal.
+    #[cfg(feature = "diag")]
+    fn diag_report(&mut self) {
+        let Some(usage) = platform::process_usage(std::process::id()) else {
+            return;
+        };
+        let now = Instant::now();
+        match self.diag_last {
+            Some((at, cpu)) if now.duration_since(at) >= crate::diag::REPORT_EVERY => {
+                let pct = (usage.cpu_time.saturating_sub(cpu)).as_secs_f64()
+                    / now.duration_since(at).as_secs_f64()
+                    * 100.0;
+                let text = format!("diag : processus de l'app {pct:.1} % d'un cœur");
+                eprintln!("{text}");
+                self.log(&text);
+                self.diag_last = Some((now, usage.cpu_time));
+            }
+            Some(_) => {}
+            None => self.diag_last = Some((now, usage.cpu_time)),
         }
     }
 
@@ -1532,6 +1664,164 @@ impl<R: Runtime> Actor<R> {
             .map(|d| d.id.clone())
     }
 
+    async fn spi_reply(&mut self, seq: u32, rx: &[u8]) {
+        let mut w = Writer::default();
+        w.u8(0).u8(0).u8(0).u8(0).u32(rx.len() as u32).bytes(rx);
+        self.send(msg::SPI_REPLY, FLAG_REPLY, seq, &w.buf).await;
+    }
+
+    /// true si l'entrée CS du composant est active, d'après son net.
+    fn spi_selected(&self, dev: &SpiDevice) -> bool {
+        let level = self.net.level(&Node::Component {
+            id: dev.id.clone(),
+            pin: dev.cs.clone(),
+        });
+        if dev.active_low {
+            matches!(level, Level::Low | Level::PulledLow)
+        } else {
+            matches!(level, Level::High | Level::PulledHigh)
+        }
+    }
+
+    /// Composant qui reçoit une transaction sur le bus SPI `bus` : SCK câblé
+    /// sur ce bus et CS désigné par la trame (cs_pin = Some) ou actif d'après
+    /// les nets (CS piloté par le firmware en GPIO). Plusieurs sélectionnés :
+    /// le premier reçoit (l'onglet ⚠ signale une broche CS partagée).
+    fn spi_target(&self, bus: u8, cs_pin: Option<&str>) -> Option<String> {
+        let sck = format!("spi{bus}:SCK");
+        self.spi_devices
+            .iter()
+            .filter(|d| self.wired_to_cap(&d.id, &d.sck, &sck))
+            .find(|d| match cs_pin {
+                Some(board_pin) => self
+                    .net
+                    .members(&Node::Board(board_pin.to_string()))
+                    .iter()
+                    .any(
+                        |m| matches!(m, Node::Component { id, pin } if *id == d.id && *pin == d.cs),
+                    ),
+                None => self.spi_selected(d),
+            })
+            .map(|d| d.id.clone())
+    }
+
+    async fn on_spi_xfer(&mut self, h: Header, r: &mut Reader<'_>) {
+        let (bus, cs_port, cs_pin, flags) = (r.u8(), r.u8(), r.u8(), r.u8());
+        let len = r.u32() as usize;
+        let wants_rx = flags & SPI_RX != 0;
+        let tx = if flags & SPI_NO_TX != 0 {
+            Vec::new()
+        } else if flags & SPI_BULK != 0 {
+            let (id, _, position) = (r.u16(), r.u16(), r.u64());
+            let taken = match self.streams.get(&id) {
+                Some(stream) if !wants_rx => stream.take(position, len),
+                Some(_) => Err("flux bulk avec réception : refusé".to_string()),
+                None => Err(format!("flux bulk {id} inconnu")),
+            };
+            match taken {
+                Ok(data) => data,
+                Err(e) => {
+                    self.warn(0, format!("SPI : {e}"));
+                    return;
+                }
+            }
+        } else {
+            r.bytes(len.min(SPI_INLINE_MAX))
+        };
+        // NO_TX : libvmcu découpe déjà par 4096 octets ; borne de défense.
+        let len = if tx.is_empty() {
+            len.min(SPI_INLINE_MAX)
+        } else {
+            tx.len()
+        };
+        let cs = if cs_port == PIN_NONE && cs_pin == PIN_NONE {
+            None
+        } else {
+            self.pin_name(cs_port, cs_pin)
+        };
+        match self.spi_target(bus, cs.as_deref()) {
+            Some(id) => self.send_model(ModelCmd::Spi {
+                id,
+                seq: wants_rx.then_some(h.seq),
+                tx,
+                len,
+            }),
+            // Aucun esclave sélectionné : octets perdus, MISO à 0xFF.
+            None if wants_rx => self.spi_reply(h.seq, &vec![0xFF; len]).await,
+            None => {}
+        }
+    }
+
+    /// LED_STRIP (protocole 1.2) : trame brute remise aux rubans dont l'entrée
+    /// de données est sur le net de la broche (désignée, ou portant la sortie PWM).
+    fn on_led_strip(&mut self, r: &mut Reader<'_>) {
+        let (port, pin, unit, channel) = (r.u8(), r.u8(), r.u8(), r.u8());
+        let len = r.u16() as usize;
+        let _ = r.u16();
+        let data = r.bytes(len.min(4096));
+        if r.error {
+            return;
+        }
+        let name = if port == PIN_NONE && pin == PIN_NONE {
+            self.pwm_pin((unit, channel))
+        } else {
+            self.pin_name(port, pin)
+        };
+        let Some(name) = name else {
+            if self.unknown_warned.insert(msg::LED_STRIP) {
+                self.warn(
+                    0,
+                    format!("ruban de LED : sortie TIM{unit}_CH{channel} sur aucune broche configurée en fonction alternative"),
+                );
+            }
+            return;
+        };
+        let members = self.net.members(&Node::Board(name));
+        let targets: Vec<(String, String)> = self
+            .strip_inputs
+            .iter()
+            .filter(|s| {
+                members.iter().any(
+                    |m| matches!(m, Node::Component { id, pin } if *id == s.id && *pin == s.din),
+                )
+            })
+            .map(|s| (s.id.clone(), s.iface.clone()))
+            .collect();
+        for (id, iface) in targets {
+            self.send_model(ModelCmd::LedStrip {
+                id,
+                iface,
+                data: data.clone(),
+            });
+        }
+    }
+
+    async fn on_stream_open(&mut self, h: Header, r: &mut Reader<'_>) {
+        let id = r.u16();
+        let kind = r.u8();
+        let _format = r.u8();
+        let capacity = r.u32();
+        let _geometry = (r.u16(), r.u16(), r.u32(), r.u8(), r.u8(), r.u16());
+        let name = r.str();
+        let status = if r.error {
+            stream::status::INVALID_ARG
+        } else if self.streams.len() >= stream::MAX_STREAMS || self.streams.contains_key(&id) {
+            stream::status::BUSY
+        } else {
+            match Stream::open(&name, kind, capacity) {
+                Ok(s) => {
+                    self.streams.insert(id, s);
+                    stream::status::OK
+                }
+                Err(status) => status,
+            }
+        };
+        let mut w = Writer::default();
+        w.u16(id).u16(status as u16);
+        self.send(msg::STREAM_OPENED, FLAG_REPLY, h.seq, &w.buf)
+            .await;
+    }
+
     async fn pong(&mut self, seq: u32, status: u8, handler_us: u32) {
         let mut w = Writer::default();
         w.u8(1).u8(status).u16(0).u32(handler_us);
@@ -1550,6 +1840,7 @@ impl<R: Runtime> Actor<R> {
                     fw.mode = mode;
                     fw.pull = pull;
                     fw.af = af;
+                    fw.configured = true;
                     let fw = *fw;
                     self.pins_dirty = true;
                     self.schedule_ui();
@@ -1689,6 +1980,16 @@ impl<R: Runtime> Actor<R> {
             }
             msg::HEARTBEAT => self.on_heartbeat(),
             msg::I2C_CONFIG => {} // fréquence du bus : sans effet sur la simulation
+            msg::LED_STRIP => self.on_led_strip(&mut r),
+            msg::SPI_CONFIG => {} // mode, fréquence, ordre des bits : sans effet (octets entiers)
+            msg::SPI_XFER => self.on_spi_xfer(h, &mut r).await,
+            msg::STREAM_OPEN => self.on_stream_open(h, &mut r).await,
+            msg::STREAM_CLOSE => {
+                self.streams.remove(&r.u16());
+            }
+            // Flux produits par le firmware et lus à la demande (bulk) : rien à
+            // réveiller. Les framebuffers auront leur consommateur (écrans).
+            msg::STREAM_NOTIFY => {}
             msg::I2C_XFER => {
                 let (bus, addr) = (r.u8(), r.u8());
                 let (tx_len, rx_len) = (r.u16() as usize, r.u16() as usize);
@@ -2141,6 +2442,8 @@ impl<R: Runtime> Actor<R> {
     }
 
     async fn on_usage(&mut self, cpu_pct: f32, used: Duration, cpu_time: Duration, memory: u64) {
+        #[cfg(feature = "diag")]
+        self.diag_report();
         if self.guards.paused {
             return;
         }

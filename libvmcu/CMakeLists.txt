@@ -50,8 +50,10 @@ add_library(vmcu STATIC
   core/vmcu_pwm.c
   core/vmcu_adc.c
   core/vmcu_i2c.c
+  core/vmcu_spi.c
+  core/vmcu_stream.c
+  core/vmcu_led_strip.c
   core/vmcu_diag.c
-  core/vmcu_unsupported.c
   ${_vmcu_platform}
 )
 target_include_directories(vmcu
@@ -66,6 +68,10 @@ target_compile_definitions(vmcu PRIVATE
 )
 target_compile_options(vmcu PRIVATE ${VMCU_WARNING_FLAGS})
 target_link_libraries(vmcu PUBLIC Threads::Threads)
+# shm_open : dans librt avant la glibc 2.34 (Linux) ; sans effet ailleurs.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(vmcu PUBLIC rt)
+endif()
 
 add_subdirectory(shims/stm32-hal)
 include(cmake/PrebenchFirmware.cmake)

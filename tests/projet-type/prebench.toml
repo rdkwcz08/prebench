@@ -1,0 +1,56 @@
+#:schema ../../docs/prebench.schema.json
+# Projet réaliste de mesure du budget (section 11.1) : LD2 clignote à 1 Hz,
+# B1 en interruption, MPU6050 (0x68) lu toutes les 50 ms, OLED (0x3C) qui
+# affiche l'accélération toutes les 100 ms, une ligne de traceur toutes les
+# 200 ms. tests/budget, lui, anime tout en permanence (test de stress).
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id = "imu1"
+type = "mpu6050"
+pos = [408, 288]
+params = { address = 104 }
+
+[[components]]
+id = "oled1"
+type = "ssd1306"
+pos = [408, 72]
+params = { address = 60, size = "128x64", color = "white" }
+
+[[wires]]
+from = "imu1.VCC"
+to = "board.CN6:4"
+
+[[wires]]
+from = "imu1.GND"
+to = "board.CN6:6"
+
+[[wires]]
+from = "imu1.SCL"
+to = "board.CN5:10"
+
+[[wires]]
+from = "imu1.SDA"
+to = "board.CN5:9"
+
+[[wires]]
+from = "oled1.GND"
+to = "board.CN6:6"
+
+[[wires]]
+from = "oled1.VCC"
+to = "board.CN6:4"
+
+[[wires]]
+from = "oled1.SCL"
+to = "board.CN5:10"
+
+[[wires]]
+from = "oled1.SDA"
+to = "board.CN5:9"

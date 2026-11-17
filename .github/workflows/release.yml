@@ -157,6 +157,22 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${TAURI_ICON_CONFIG:+--config "$TAURI_ICON_CONFIG"}
 
+      # Version de diagnostic (feature Cargo « diag » : ouverture et démarrage
+      # automatiques, relevés dans le Journal, Web Inspector) : jamais publiée.
+      - name: Version de diagnostic absente du build publié
+        shell: bash
+        run: |
+          if grep -Eq '^default *=.*diag' app/src-tauri/Cargo.toml; then
+            echo "La feature diag est dans les features par défaut" >&2; exit 1
+          fi
+          BIN="app/src-tauri/target/${{ matrix.target }}/release/prebench"
+          [ -f "$BIN" ] || BIN="$BIN.exe"
+          [ -f "$BIN" ] || { echo "Exécutable introuvable : $BIN" >&2; exit 1; }
+          if grep -aq PREBENCH_DIAG_PROJET "$BIN"; then
+            echo "Version de diagnostic dans le build publié : $BIN" >&2; exit 1
+          fi
+          echo "Feature diag absente : $BIN"
+
       - name: Renommage selon la section 12.5
         run: |
           BUNDLE="app/src-tauri/target/${{ matrix.target }}/release/bundle"

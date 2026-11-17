@@ -4,9 +4,10 @@
  * Les fonctions MX_*_Init et HAL_*_MspInit ci-dessous reprennent le code que
  * STM32CubeMX génère pour TIM1 (PWM complémentaire), TIM2 (PWM), ADC1, I2C1,
  * SPI1 et USART2 avec réception DMA. Le test vérifie qu'elles compilent, que
- * les MspInit du projet sont appelés, qu'aucun Init n'échoue, et que les
- * modules non simulés (DMA, SPI) se comportent comme décrit dans
- * stm32_hal_periph.c ; l'I2C est simulé (test_i2c.c). PWM et ADC en détail : test_pwm_adc.c.
+ * les MspInit du projet sont appelés, qu'aucun Init n'échoue, et que l'usage
+ * direct du DMA, non simulé, se comporte comme décrit dans stm32_hal_periph.c ;
+ * l'I2C et le SPI sont simulés (test_i2c.c, test_spi.c). PWM et ADC en détail :
+ * test_pwm_adc.c.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -344,11 +345,11 @@ int main(void)
     CHECK(HAL_I2C_Mem_Read(&hi2c1, 0x68 << 1, 0x75, I2C_MEMADD_SIZE_8BIT, buf, 1, 100) == HAL_ERROR);
     CHECK(HAL_I2C_GetError(&hi2c1) == HAL_I2C_ERROR_AF);
 
-    /* SPI : MISO à 0xFF */
+    /* SPI (simulé, test_spi.c) : l'esclave de la fausse app répond le complément */
     uint8_t tx[3] = { 0x9F, 0, 0 };
     uint8_t rx[3] = { 0 };
     CHECK(HAL_SPI_TransmitReceive(&hspi1, tx, rx, 3, 100) == HAL_OK);
-    CHECK(rx[0] == 0xFF && rx[2] == 0xFF);
+    CHECK(rx[0] == 0x60 && rx[2] == 0xFF);
 
     /* UART (simulée, test_uart.c) : émission envoyée, réception qui expire,
        émetteur toujours prêt, réception DMA en cours jusqu'à son arrêt */
@@ -361,8 +362,11 @@ int main(void)
     CHECK(HAL_UART_DMAStop(&huart2) == HAL_OK);
     CHECK(HAL_UART_GetState(&huart2) == HAL_UART_STATE_READY);
 
-    /* Chaque fonction non simulée a averti (DMA, SPI) ; l'I2C est simulé (test_i2c.c) */
-    CHECK(fake_app_wait(fa, VMCU_MSG_WARN, -1, -1, 3, 1000, &f));
+    /* Usage direct du DMA : non simulé, compile et avertit (règle 16.2.10).
+       HAL_DMA_Init, lui, n'avertit pas : les variantes _DMA sont simulées. */
+    DMA_HandleTypeDef raw = { 0 };
+    CHECK(HAL_DMA_Start(&raw, 0, 0, 1) == HAL_OK);
+    CHECK(fake_app_wait(fa, VMCU_MSG_WARN, -1, -1, 1, 1000, &f));
 
     vmcu_shutdown();
     fake_app_stop(fa);

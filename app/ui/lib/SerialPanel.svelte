@@ -15,6 +15,7 @@
 -->
 <script lang="ts">
   import { tick } from 'svelte';
+  import { onNextFrame } from './frame';
   import { bench } from './bench.svelte';
   import { decode, LINE_ENDINGS, serial, stamp, toHex, type Chunk, type LineEnding } from './serial.svelte';
   import Button from './ui/Button.svelte';
@@ -96,7 +97,8 @@
     const n = port?.chunks.length ?? 0;
     if (n === seen || scheduled) return;
     scheduled = true;
-    requestAnimationFrame(() => {
+    // Image commune (frame.ts) : les octets série ne font pas dessiner une image de plus.
+    onNextFrame(() => {
       scheduled = false;
       seen = serial.active?.chunks.length ?? 0;
     });

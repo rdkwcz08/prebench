@@ -1,0 +1,31 @@
+#:schema ../../docs/prebench.schema.json
+# Ruban de 8 LED WS2812 sur D7 (PA8, TIM1_CH1 en AF1), piloté comme dans les
+# tutoriels STM32 : HAL_TIM_PWM_Start_DMA d'un tampon de rapports cycliques
+# (impulsion longue = 1, courte = 0), timer à 800 kHz. 5V et GND du ruban sur
+# la carte. Le firmware fait courir un point rouge à traînée, puis allume le
+# ruban en arc-en-ciel ; USART2 compte les images envoyées.
+
+format_version = 1
+board          = "nucleo-f401re"
+framework      = "stm32-hal"
+
+[build]
+system = "cmake"
+
+[[components]]
+id = "strip1"
+type = "ws2812"
+pos = [432, 120]
+params = { count = 8, order = "grb" }
+
+[[wires]]
+from = "strip1.5V"
+to = "board.CN6:5"
+
+[[wires]]
+from = "strip1.GND"
+to = "board.CN6:6"
+
+[[wires]]
+from = "strip1.DIN"
+to = "board.CN9:8"

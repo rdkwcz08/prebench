@@ -182,6 +182,26 @@ export interface Display {
    * données trop courtes lèvent une erreur.
    */
   blit(x: number, y: number, w: number, h: number, data: Uint8Array): void;
+  /**
+   * Ordre de balayage des blits suivants, comme le registre MADCTL d'un
+   * ILI9341 ou d'un ST7735 ('rgb565' seulement ; erreur sinon, sauf l'ordre
+   * par défaut). Les coordonnées des blits sont alors celles de l'image
+   * logique, et le cœur place chaque pixel dans l'image physique :
+   * (a, b) = swapXY ? (y, x) : (x, y) ; x physique = mirrorX ? width − 1 − a : a ;
+   * y physique = mirrorY ? height − 1 − b : b. Avec swapXY, l'image logique
+   * mesure height × width. bgr : rouge et bleu échangés dans chaque pixel.
+   * Le cœur fait ce travail : en JavaScript, tourner un écran entier coûterait
+   * l'essentiel du budget d'un appel. Ajout compatible de la v1 (phase 3).
+   */
+  setScan(scan: DisplayScan): void;
+}
+
+/** Ordre de balayage d'un écran (Display.setScan) ; champs absents : false. */
+export interface DisplayScan {
+  readonly swapXY?: boolean;
+  readonly mirrorX?: boolean;
+  readonly mirrorY?: boolean;
+  readonly bgr?: boolean;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -284,7 +304,10 @@ export interface DisplaySurfaceOptions {
   readonly on?: string;
   /** Couleur CSS d'un pixel éteint (écrans monochromes). */
   readonly off?: string;
-  /** Inverse les pixels (commande d'inversion d'un SSD1306). */
+  /**
+   * Inverse les pixels (commande d'inversion d'un SSD1306) ; en 'rgb565',
+   * chaque composante est complémentée (INVON d'un ILI9341).
+   */
   readonly invert?: boolean;
 }
 

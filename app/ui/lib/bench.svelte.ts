@@ -27,6 +27,7 @@ import type {
   WarnEvent,
 } from './types';
 import { displays } from './displays.svelte';
+import { onNextFrame, setCadence } from './frame';
 import { BOARD_ORIGIN } from './geometry';
 import { serial } from './serial.svelte';
 import { settings } from './settings.svelte';
@@ -163,7 +164,6 @@ export class Bench {
   private frameNets: Record<string, Level> = {};
   /** Broches modifiées depuis l'image précédente ; null : plus configurée. */
   private framePins: Record<string, PinConfig | null> | null = null;
-  private frameRequested = false;
 
   async init(): Promise<void> {
     this.watchBattery();
@@ -612,7 +612,6 @@ export class Bench {
 
   /** Sur batterie : 30 images/s au lieu de 60 (section 11.3). */
   private onBattery = false;
-  private lastFrame = 0;
 
   /** API Batterie : Chromium (WebView2 sous Windows) ; absente de WebKit (macOS). */
   private watchBattery(): void {
@@ -639,48 +638,43 @@ export class Bench {
    * continue ; les derniers états sont appliqués au retour.
    */
   private requestFrame(): void {
-    if (this.frameRequested) return;
-    this.frameRequested = true;
-    const frame = (t: number): void => {
-      // Cadence d'affichage (réglage frame_rate : 60, 30 ou 15 images/s, 15 par
-      // défaut ; le cœur l'applique déjà, ceci couvre la batterie), plus
-      // basse sur batterie (frame_rate_battery). Trop tôt : attente par
-      // minuterie, sans reboucler à chaque rafraîchissement de l'écran.
-      const fps = this.onBattery
+    // Cadence d'affichage (réglage frame_rate : 60, 30 ou 15 images/s, 15 par
+    // défaut ; le cœur l'applique déjà, ceci couvre la batterie), plus basse
+    // sur batterie (frame_rate_battery). Image partagée avec le moniteur
+    // série et les écrans (frame.ts) : une seule recomposition par période.
+    setCadence(() =>
+      this.onBattery
         ? Math.min(settings.number('frame_rate', 15), settings.number('frame_rate_battery', 30))
-        : settings.number('frame_rate', 15);
-      const wait = 1000 / fps - 1 - (t - this.lastFrame);
-      if (wait > 0) {
-        setTimeout(() => requestAnimationFrame(frame), wait);
-        return;
-      }
-      this.lastFrame = t;
-      this.frameRequested = false;
-      const states = this.frameStates;
-      this.frameStates = {};
-      for (const inst of this.instances) {
-        if (inst.id in states) inst.state = states[inst.id];
-      }
-      // Niveaux et broches mis à jour clé par clé, seulement s'ils changent :
-      // seules les pastilles concernées (et l'inspecteur s'il les montre) se
-      // redessinent, au lieu de toute la couche des pastilles (section 11.3).
-      for (const [k, v] of Object.entries(this.frameNets)) {
-        if (this.nets[k] !== v) this.nets[k] = v;
-      }
-      this.frameNets = {};
-      if (this.framePins !== null) {
-        for (const [name, cfg] of Object.entries(this.framePins)) {
-          if (cfg === null) {
-            if (name in this.pins) delete this.pins[name];
-          } else if (!samePin(this.pins[name], cfg)) {
-            this.pins[name] = cfg;
-          }
-        }
-        this.framePins = null;
-      }
-    };
-    requestAnimationFrame(frame);
+        : settings.number('frame_rate', 15),
+    );
+    onNextFrame(this.applyFrame);
   }
+
+  /** États, nets et broches reçus depuis l'image précédente. */
+  private readonly applyFrame = (): void => {
+    const states = this.frameStates;
+    this.frameStates = {};
+    for (const inst of this.instances) {
+      if (inst.id in states) inst.state = states[inst.id];
+    }
+    // Niveaux et broches mis à jour clé par clé, seulement s'ils changent :
+    // seules les pastilles concernées (et l'inspecteur s'il les montre) se
+    // redessinent, au lieu de toute la couche des pastilles (section 11.3).
+    for (const [k, v] of Object.entries(this.frameNets)) {
+      if (this.nets[k] !== v) this.nets[k] = v;
+    }
+    this.frameNets = {};
+    if (this.framePins !== null) {
+      for (const [name, cfg] of Object.entries(this.framePins)) {
+        if (cfg === null) {
+          if (name in this.pins) delete this.pins[name];
+        } else if (!samePin(this.pins[name], cfg)) {
+          this.pins[name] = cfg;
+        }
+      }
+      this.framePins = null;
+    }
+  };
 
   private log(source: string, text: string): void {
     this.logs.push({ source, text });

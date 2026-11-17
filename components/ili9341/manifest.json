@@ -1,0 +1,36 @@
+{
+  "$schema": "../manifest.schema.json",
+  "api_version": 1,
+  "id": "ili9341",
+  "version": "1.0.0",
+  "name": "Écran TFT ILI9341",
+  "description": "Module TFT couleur SPI 240 × 320, contrôleur ILI9341, sans tactile. Simulés : reset (RST, 0x01), veille, allumage, inversion, fenêtres CASET et PASET, écriture mémoire (0x2C, 0x3C), orientation MADCTL (MY, MX, MV, BGR), pixels RGB565 (COLMOD 0x55), identifiant (0xD3). Seuls les pixels écrits sont redessinés. Réglages analogiques acceptés sans effet ; défilement vertical et pixels 18 bits non simulés. Rétroéclairage (LED) à alimenter pour voir l'image.",
+  "category": "display",
+  "license": "MIT",
+  "logic_voltages": [3.3],
+  "view": { "width": 264, "height": 384 },
+  "tick_hz": 0,
+  "pins": [
+    { "name": "VCC", "label": "Alimentation", "role": "power", "x": 36, "y": 0 },
+    { "name": "GND", "label": "Masse", "role": "ground", "x": 60, "y": 0 },
+    { "name": "CS", "label": "Sélection (actif bas)", "role": "input", "x": 84, "y": 0 },
+    { "name": "RST", "label": "Reset (actif bas)", "role": "input", "x": 108, "y": 0 },
+    { "name": "DC", "label": "Commande (bas) ou donnée (haut)", "role": "input", "x": 132, "y": 0 },
+    { "name": "SDI", "label": "Données entrantes (MOSI)", "role": "input", "x": 156, "y": 0 },
+    { "name": "SCK", "label": "Horloge SPI", "role": "input", "x": 180, "y": 0 },
+    { "name": "LED", "label": "Rétroéclairage", "role": "input", "x": 204, "y": 0 },
+    { "name": "SDO", "label": "Données sortantes (MISO)", "role": "output", "x": 228, "y": 0 }
+  ],
+  "interfaces": [
+    { "type": "spi", "sck": "SCK", "mosi": "SDI", "miso": "SDO", "cs": "CS", "cs_active": "low" }
+  ],
+  "params": {
+    "panel": {
+      "type": "enum",
+      "label": "Ordre des couleurs de la dalle",
+      "values": ["bgr", "rgb"],
+      "default": "bgr"
+    }
+  },
+  "controls": []
+}

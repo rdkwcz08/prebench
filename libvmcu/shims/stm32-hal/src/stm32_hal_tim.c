@@ -16,11 +16,14 @@
  * __HAL_TIM_SET_COMPARE, __HAL_TIM_SET_AUTORELOAD et __HAL_TIM_SET_PRESCALER
  * mettent à jour un canal en marche, sans fronts ni messages superflus.
  *
+ * HAL_TIM_PWM_Start_DMA : décodage d'un ruban WS2812 (plus bas).
  * Non simulés (compilent et avertissent) : compteur, interruptions et
  * callbacks des timers, capture d'entrée, codeur, sorties complémentaires,
- * variantes DMA. Les *_Init appellent leur MspInit si le handle est neuf.
+ * autres variantes DMA. Les *_Init appellent leur MspInit si le handle est neuf.
  */
 #include "stm32_hal_internal.h"
+
+#include <string.h>
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -290,8 +293,96 @@ HAL_StatusTypeDef HAL_TIM_PWM_Start_IT(TIM_HandleTypeDef *htim, uint32_t Channel
     return pwm_start(htim, Channel);
 }
 HAL_StatusTypeDef HAL_TIM_PWM_Stop_IT(TIM_HandleTypeDef *htim, uint32_t Channel) { return pwm_stop(htim, Channel); }
-HAL_StatusTypeDef HAL_TIM_PWM_Start_DMA(TIM_HandleTypeDef *htim, uint32_t Channel, const uint32_t *pData, uint16_t Length) { STUB_OK(); }
-HAL_StatusTypeDef HAL_TIM_PWM_Stop_DMA(TIM_HandleTypeDef *htim, uint32_t Channel) { return pwm_stop(htim, Channel); }
+/*
+ * PWM par DMA : pilotage d'un ruban WS2812 (section 5.4). Le tampon donne la
+ * valeur de comparaison de chaque bit ; impulsion longue (plus de la moitié
+ * de la période) = 1, courte = 0, comparaison nulle = repos (reset du ruban),
+ * ignorée. Les bits, poids fort d'abord, forment les octets de la trame,
+ * envoyés en une fois (vmcu_led_strip_show_pwm) ; le firmware tourne tel
+ * quel sur la vraie carte. Largeur des éléments : celle de la mémoire du DMA
+ * lié (__HAL_LINKDMA, octet, demi-mot ou mot), un mot sans DMA lié.
+ * Puis, depuis le fil IRQ : demi-transfert et fin (PulseFinished), comme le
+ * DMA en mode normal. Le canal reste occupé jusqu'à HAL_TIM_PWM_Stop_DMA,
+ * comme sur la puce. Mode circulaire : la trame est envoyée une fois (les
+ * suivantes seraient identiques).
+ */
+static void dma_done(void *arg)
+{
+    TIM_HandleTypeDef *htim = (TIM_HandleTypeDef *)arg;
+    HAL_TIM_PWM_PulseFinishedHalfCpltCallback(htim);
+    HAL_TIM_PWM_PulseFinishedCallback(htim);
+    htim->Channel = HAL_TIM_ACTIVE_CHANNEL_CLEARED;
+}
+
+HAL_StatusTypeDef HAL_TIM_PWM_Start_DMA(TIM_HandleTypeDef *htim, uint32_t Channel, const uint32_t *pData, uint16_t Length)
+{
+    int t = htim != NULL ? tim_index(htim->Instance) : -1;
+    int ch = channel_index(Channel);
+    if (t < 0 || ch < 0 || pData == NULL || Length == 0U) {
+        return HAL_ERROR;
+    }
+    if (htim->ChannelState[ch] == HAL_TIM_CHANNEL_STATE_BUSY) {
+        return HAL_BUSY;
+    }
+    const DMA_HandleTypeDef *dma = htim->hdma[TIM_DMA_ID_CC1 + ch];
+    uint32_t align = dma != NULL ? dma->Init.MemDataAlignment : DMA_MDATAALIGN_WORD;
+    uint32_t threshold = (htim->Instance->ARR + 1U) / 2U;
+    static uint8_t frame[VMCU_LED_STRIP_MAX_BYTES];
+    size_t bits = 0;
+    bool truncated = false;
+    memset(frame, 0, sizeof frame);
+    for (uint16_t i = 0; i < Length; ++i) {
+        uint32_t v;
+        if (align == DMA_MDATAALIGN_BYTE) {
+            v = ((const uint8_t *)pData)[i];
+        } else if (align == DMA_MDATAALIGN_HALFWORD) {
+            v = ((const uint16_t *)pData)[i];
+        } else {
+            v = pData[i];
+        }
+        if (v == 0U) {
+            continue; /* repos de la ligne */
+        }
+        if (bits >= (size_t)VMCU_LED_STRIP_MAX_BYTES * 8U) {
+            truncated = true;
+            break;
+        }
+        if (v > threshold) {
+            frame[bits / 8U] |= (uint8_t)(0x80U >> (bits % 8U));
+        }
+        bits++;
+    }
+    if (truncated) {
+        vmcu_warn_unsimulated("ruban de plus de 4096 octets par trame (tronqué)");
+    }
+    if (dma != NULL && dma->Init.Mode == DMA_CIRCULAR) {
+        vmcu_warn_unsimulated("HAL_TIM_PWM_Start_DMA en mode circulaire (trame envoyée une fois)");
+    }
+    (void)vmcu_led_strip_show_pwm((uint8_t)t, (uint8_t)(ch + 1), frame, bits / 8U);
+    htim->ChannelState[ch] = HAL_TIM_CHANNEL_STATE_BUSY;
+    htim->State = HAL_TIM_STATE_BUSY;
+    htim->Channel = (HAL_TIM_ActiveChannel)(1U << ch);
+    if (vmcu_irq_post(dma_done, htim) != VMCU_OK) {
+        return HAL_ERROR;
+    }
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_TIM_PWM_Stop_DMA(TIM_HandleTypeDef *htim, uint32_t Channel)
+{
+    int ch = channel_index(Channel);
+    if (htim == NULL || ch < 0) {
+        return HAL_ERROR;
+    }
+    /* Canal lancé par Start_DMA : aucune PWM en marche à arrêter dans le cœur. */
+    int t = tim_index(htim->Instance);
+    if (t >= 0 && !tim_channels[t][ch].running) {
+        htim->ChannelState[ch] = HAL_TIM_CHANNEL_STATE_READY;
+        htim->State = HAL_TIM_STATE_READY;
+        return HAL_OK;
+    }
+    return pwm_stop(htim, Channel);
+}
 HAL_StatusTypeDef HAL_TIM_PWM_ConfigChannel(TIM_HandleTypeDef *htim, const TIM_OC_InitTypeDef *sConfig, uint32_t Channel)
 {
     return pwm_config_channel(htim, sConfig, Channel);

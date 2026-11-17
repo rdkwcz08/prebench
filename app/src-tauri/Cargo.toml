@@ -1,6 +1,6 @@
 [package]
 name = "prebench"
-version = "0.2.4"
+version = "0.2.5"
 description = "Prebench — simulateur de cartes de développement"
 authors = ["Mathis Rudkiewicz"]
 license = "MIT"
@@ -10,6 +10,10 @@ rust-version = "1.95"
 [lib]
 name = "prebench_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Version de diagnostic (src/diag.rs) : jamais publiée, release.yml le vérifie.
+diag = ["tauri/devtools"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -59,6 +63,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
+    # Mémoire partagée du canal flux (platform/shm.rs, docs/protocol.md section 6).
+    "Win32_System_Memory",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
     # QueryThreadCycleTime : budget des modèles en temps CPU (platform/windows.rs).

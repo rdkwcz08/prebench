@@ -6,9 +6,10 @@
 // message : app/src-tauri/src/core/components/display.rs). Chaque écran garde
 // ses pixels ici ; les vues attachent un canvas (DisplaySurface.attach) où
 // l'hôte dessine lui-même la zone modifiée (putImageData), sans repasser par
-// Svelte, une seule fois par image d'affichage (requestAnimationFrame).
+// Svelte, dans l'image d'affichage commune (frame.ts).
 
 import type { DisplayFormat, DisplaySurfaceOptions } from '../../../components/component-api';
+import { onNextFrame } from './frame';
 
 const FORMATS: DisplayFormat[] = ['mono1-vertical', 'mono1', 'rgb565'];
 
@@ -58,7 +59,6 @@ export class DisplayHost {
   private readonly values: Uint8Array | Uint16Array;
   private readonly canvases = new Map<HTMLCanvasElement, Attached>();
   private pending: Rect | null = null;
-  private scheduled = false;
 
   constructor(width: number, height: number, format: DisplayFormat) {
     this.width = width;
@@ -114,16 +114,15 @@ export class DisplayHost {
           v[(y + sy) * W + x + sx] = ((data[(sy >> 3) * w + sx] ?? 0) >> (sy & 7)) & 1;
     }
     this.pending = union(this.pending, rect);
-    if (!this.scheduled) {
-      this.scheduled = true;
-      requestAnimationFrame(() => {
-        this.scheduled = false;
-        const r = this.pending;
-        this.pending = null;
-        if (r !== null) for (const canvas of this.canvases.keys()) this.draw(canvas, r);
-      });
-    }
+    onNextFrame(this.flush);
   }
+
+  /** Zone accumulée dessinée dans les canvas, dans l'image commune (frame.ts). */
+  private readonly flush = (): void => {
+    const r = this.pending;
+    this.pending = null;
+    if (r !== null) for (const canvas of this.canvases.keys()) this.draw(canvas, r);
+  };
 
   /** Dessine une zone dans un canvas attaché, à ses couleurs. */
   private draw(canvas: HTMLCanvasElement, r: Rect): void {
@@ -132,10 +131,12 @@ export class DisplayHost {
     const px = a.image.data;
     const W = this.width;
     if (this.format === 'rgb565') {
+      // Inversion (INVON d'un ILI9341) : chaque composante complémentée, sans filtre CSS.
       const v = this.values as Uint16Array;
+      const flip = a.options.invert === true ? 0xffff : 0;
       for (let y = r.y; y < r.y + r.h; y += 1)
         for (let x = r.x; x < r.x + r.w; x += 1) {
-          const c = v[y * W + x] ?? 0;
+          const c = (v[y * W + x] ?? 0) ^ flip;
           const o = (y * W + x) * 4;
           px[o] = (((c >> 11) & 0x1f) * 255) / 31;
           px[o + 1] = (((c >> 5) & 0x3f) * 255) / 63;

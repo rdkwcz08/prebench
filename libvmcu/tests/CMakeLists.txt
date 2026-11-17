@@ -20,12 +20,19 @@ foreach(_test test_wire test_client)
   add_test(NAME ${_test} COMMAND ${_test})
 endforeach()
 
-foreach(_test test_stm32_hal test_stm32_hal_stubs test_uart test_pwm_adc test_i2c)
+foreach(_test test_stm32_hal test_stm32_hal_stubs test_uart test_pwm_adc test_i2c test_spi test_ws2812)
   add_executable(${_test} ${_test}.c)
   target_link_libraries(${_test} PRIVATE vmcu_fake_app prebench_stm32_hal vmcu)
   target_compile_options(${_test} PRIVATE ${VMCU_WARNING_FLAGS})
   add_test(NAME ${_test} COMMAND ${_test})
 endforeach()
+
+# Même test face à une app en protocole 1.1 : LED adressables refusées.
+add_executable(test_ws2812_proto11 test_ws2812.c)
+target_compile_definitions(test_ws2812_proto11 PRIVATE PREBENCH_TEST_PROTO11)
+target_link_libraries(test_ws2812_proto11 PRIVATE vmcu_fake_app prebench_stm32_hal vmcu)
+target_compile_options(test_ws2812_proto11 PRIVATE ${VMCU_WARNING_FLAGS})
+add_test(NAME test_ws2812_proto11 COMMAND test_ws2812_proto11)
 
 # Projet STM32CubeMX du dépôt, compilé tel quel ; seul `main` est renommé.
 set(PREBENCH_CUBEMX_TEST_PROJECT "${PROJECT_SOURCE_DIR}/../tests/cubemx-nucleo-f401re")
